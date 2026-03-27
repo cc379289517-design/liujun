@@ -1,0 +1,175 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ============================================
+// 楼座表
+// ============================================
+model Building {
+  id            Int      @id @default(autoincrement())
+  name          String   // e.g. "1号楼"
+  floorPlanUrl  String?  @map("floor_plan_url")
+  rooms         Room[]
+  profiles      Profile[]
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  @@map("buildings")
+}
+
+// ============================================
+// 房间表
+// ============================================
+model Room {
+  id          Int      @id @default(autoincrement())
+  buildingId  Int      @map("building_id")
+  roomNumber  String   @map("room_number")
+  floor       Int      @default(1)
+  xPosition   Float    @default(0) @map("x_position")
+  yPosition   Float    @default(0) @map("y_position")
+  fenceRadius Float    @default(5) @map("fence_radius")
+  building    Building @relation(fields: [buildingId], references: [id], onDelete: Cascade)
+
+  @@unique([buildingId, roomNumber])
+  @@map("rooms")
+}
+
+// ============================================
+// 用户角色枚举
+// ============================================
+enum Role {
+  photographer
+  assistant
+  leader
+}
+
+// ============================================
+// 用户状态枚举
+// 1:空闲(绿) 2:在忙(浅橙) 3:进行中(橙) 4:快结束(浅绿)
+// ============================================
+enum ProfileStatus {
+  idle       // 1: 空闲 - 绿色
+  busy       // 2: 在忙 - 浅橙
+  executing  // 3: 进行中 - 橙色
+  finishing  // 4: 快结束 - 浅绿
+}
+
+// ============================================
+// 在线状态枚举
+// ============================================
+enum OnlineStatus {
+  online
+  offline
+  on_break
+}
+
+// ============================================
+// 用户状态表 (profiles)
+// ============================================
+model Profile {
+  id            String        @id @default(uuid())
+  employeeId    String        @unique @map("employee_id")
+  name          String
+  avatar        String?
+  role          Role
+  buildingId    Int           @map("building_id")
+  currentRoom   String?       @map("current_room")
+  status        ProfileStatus @default(idle)
+  subStatus     String?       @map("sub_status") // 微标签：上厕所、请假、身体不适
+  onlineStatus  OnlineStatus  @default(online) @map("online_status")
+  isOnline      Boolean       @default(true) @map("is_online")
+  building      Building      @relation(fields: [buildingId], references: [id])
+  createdAt     DateTime      @default(now()) @map("created_at")
+  updatedAt     DateTime      @updatedAt @map("updated_at")
+
+  // 关系
+  createdTasks  BookingTask[] @relation("TaskPhotographer")
+  assignedTasks BookingTask[] @relation("TaskAssistant")
+
+  @@map("profiles")
+}
+
+// ============================================
+// 任务状态枚举
+// ============================================
+enum TaskStatus {
+  waiting    // 等待分配/执行
+  executing  // 执行中
+  paused     // 暂停（被插单等）
+  completed  // 已完成
+}
+
+// ============================================
+// 任务类型配置表
+// ============================================
+model TaskCategory {
+  id            Int      @id @default(autoincrement())
+  name          String   // e.g. "短时手持", "服装穿戴"
+  description   String?
+  priorityLevel Int      @map("priority_level") // 1-4
+  minDuration   Int      @map("min_duration")   // 最小时长(分钟)
+  maxDuration   Int      @map("max_duration")   // 最大时长(分钟)
+  estDuration   Int      @default(10) @map("est_duration") // 预估时长(分钟)
+  hexColor      String   @default("#f97316") @map("hex_color") // 状态环颜色
+  sortRank      Int      @default(0) @map("sort_rank") // 排序权重
+  tasks         BookingTask[]
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  @@map("task_categories")
+}
+
+// ============================================
+// 系统全局配置表
+// ============================================
+model SystemConfig {
+  key       String   @id
+  value     String
+  label     String?
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("system_config")
+}
+
+// ============================================
+// 任务预约表 (booking_tasks)
+// ============================================
+model BookingTask {
+  id              String      @id @default(uuid())
+  photographerId  String      @map("photographer_id")
+  assistantId     String?     @map("assistant_id")
+  roomNumber      String      @map("room_number")
+  categoryId      Int         @map("category_id")
+  priority        Int         @default(4) // 动态优先级 1-4
+  isLocked        Boolean     @default(false) @map("is_locked")
+  lockReason      String?     @map("lock_reason")
+  isSpecified     Boolean     @default(false) @map("is_specified")
+  estEndTime      DateTime?   @map("est_end_time")
+  status          TaskStatus  @default(waiting)
+  note            String?     // 特殊备注（带小推车、工具等）
+
+  // 时间戳
+  createdAt       DateTime    @default(now()) @map("created_at")
+  updatedAt       DateTime    @updatedAt @map("updated_at")
+  startedAt       DateTime?   @map("started_at")
+  completedAt     DateTime?   @map("completed_at")
+  escalatedAt     DateTime?   @map("escalated_at") // 最后一次提权时间
+
+  // 插单相关
+  parentTaskId    String?     @map("parent_task_id") // 被插单的原任务
+  parentTask      BookingTask? @relation("TaskInterrupt", fields: [parentTaskId], references: [id])
+  interruptTasks  BookingTask[] @relation("TaskInterrupt")
+
+  // 关系
+  photographer    Profile      @relation("TaskPhotographer", fields: [photographerId], references: [id])
+  assistant       Profile?     @relation("TaskAssistant", fields: [assistantId], references: [id])
+  category        TaskCategory @relation(fields: [categoryId], references: [id])
+
+  @@index([status, priority])
+  @@index([assistantId, status])
+  @@index([photographerId])
+  @@map("booking_tasks")
+}

@@ -1,0 +1,11 @@
+{
+  "name": "SPAD - 摄影助理自动派单系统",
+  "short_name": "SPAD",
+  "description": "摄影助理自动派单与实时调度管理系统",
+  "start_url": "/assistant",
+  "display": "standalone",
+  "background_color": "#f9fafb",
+  "theme_color": "#f97316",
+  "orientation": "portrait",
+  "icons": []
+}
