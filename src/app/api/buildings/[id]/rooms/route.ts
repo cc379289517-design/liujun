@@ -20,10 +20,10 @@ export async function POST(request: NextRequest, { params }: RouteContext) {
       data: {
         buildingId: parseInt(id),
         roomNumber,
-        floor: floor ? parseInt(floor) : 1,
-        fenceRadius: fenceRadius ? parseFloat(fenceRadius) : null,
-        xPosition: xPosition ? parseFloat(xPosition) : null,
-        yPosition: yPosition ? parseFloat(yPosition) : null,
+        floor: floor != null ? parseInt(floor) : 1,
+        ...(fenceRadius != null && { fenceRadius: parseFloat(fenceRadius) }),
+        ...(xPosition != null && { xPosition: parseFloat(xPosition) }),
+        ...(yPosition != null && { yPosition: parseFloat(yPosition) }),
       },
     });
 

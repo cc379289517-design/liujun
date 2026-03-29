@@ -39,7 +39,7 @@ export async function POST(request: NextRequest) {
         priorityLevel: parseInt(priorityLevel),
         minDuration: parseInt(minDuration),
         maxDuration: parseInt(maxDuration),
-        estDuration: estDuration ? parseInt(estDuration) : null,
+        estDuration: estDuration ? parseInt(estDuration) : undefined,
         hexColor: hexColor || null,
         sortRank: sortRank !== undefined ? parseInt(sortRank) : 0,
       },

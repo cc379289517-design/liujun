@@ -47,7 +47,7 @@ export async function PATCH(request: NextRequest, { params }: RouteContext) {
     const { id } = await params;
     const body = await request.json();
 
-    const { status, subStatus, currentRoom, buildingId, isOnline, name, role, avatar, employeeId, onlineStatus } = body;
+    const { status, subStatus, currentRoom, buildingId, isOnline, name, role, avatar, employeeId, onlineStatus, department, group } = body;
 
     const data: Record<string, unknown> = {};
     if (status && Object.values(ProfileStatus).includes(status)) {
@@ -62,10 +62,13 @@ export async function PATCH(request: NextRequest, { params }: RouteContext) {
     if (avatar !== undefined) data.avatar = avatar;
     if (employeeId !== undefined) data.employeeId = employeeId;
     if (onlineStatus !== undefined) data.onlineStatus = onlineStatus;
+    if (department !== undefined) data.department = department;
+    if (group !== undefined) data.group = group;
 
     const updated = await prisma.profile.update({
       where: { id },
       data,
+      include: { building: { select: { id: true, name: true } } },
     });
 
     return Response.json(updated);

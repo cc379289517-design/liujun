@@ -38,6 +38,8 @@ export async function POST(request: NextRequest) {
           currentRoom: p.currentRoom || null,
           avatar: p.avatar || null,
           employeeId: p.employeeId || null,
+          department: p.department || null,
+          group: p.group || null,
         };
 
         if (p.employeeId) {

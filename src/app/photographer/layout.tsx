@@ -1,5 +1,3 @@
-import AssistantDock from "./AssistantDock";
-
 export default function PhotographerLayout({
   children,
 }: {
@@ -7,7 +5,6 @@ export default function PhotographerLayout({
 }) {
   return (
     <div className="h-screen w-screen overflow-hidden relative">
-      <AssistantDock />
       {children}
     </div>
   );

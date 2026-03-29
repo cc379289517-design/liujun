@@ -1,18 +1,37 @@
 import { NextRequest } from "next/server";
 import { prisma } from "@/lib/prisma";
+import { writeFile } from "fs/promises";
+import path from "path";
 
 type RouteContext = { params: Promise<{ id: string }> };
 
 /**
- * PATCH /api/buildings/[id] - 更新楼座
+ * PATCH /api/buildings/[id] - 更新楼座（支持 JSON 或 FormData 上传平面图）
  */
 export async function PATCH(request: NextRequest, { params }: RouteContext) {
   try {
     const { id } = await params;
-    const body = await request.json();
+    const contentType = request.headers.get("content-type") || "";
     const data: Record<string, unknown> = {};
-    if (body.name !== undefined) data.name = body.name;
-    if (body.floorPlanUrl !== undefined) data.floorPlanUrl = body.floorPlanUrl;
+
+    if (contentType.includes("multipart/form-data")) {
+      const formData = await request.formData();
+      const name = formData.get("name");
+      if (name) data.name = name;
+
+      const file = formData.get("floorPlan") as File | null;
+      if (file && file.size > 0) {
+        const ext = path.extname(file.name) || ".png";
+        const filename = `floor-plan-${id}-${Date.now()}${ext}`;
+        const buffer = Buffer.from(await file.arrayBuffer());
+        await writeFile(path.join(process.cwd(), "public/uploads", filename), buffer);
+        data.floorPlanUrl = `/uploads/${filename}`;
+      }
+    } else {
+      const body = await request.json();
+      if (body.name !== undefined) data.name = body.name;
+      if (body.floorPlanUrl !== undefined) data.floorPlanUrl = body.floorPlanUrl;
+    }
 
     const building = await prisma.building.update({
       where: { id: parseInt(id) },

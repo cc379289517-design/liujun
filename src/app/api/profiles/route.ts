@@ -39,7 +39,7 @@ export async function GET(request: NextRequest) {
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const { name, employeeId, role, buildingId, currentRoom, avatar } = body;
+    const { name, employeeId, role, buildingId, currentRoom, avatar, department, group } = body;
 
     if (!name || !role || !buildingId) {
       return Response.json(
@@ -60,6 +60,8 @@ export async function POST(request: NextRequest) {
         buildingId: parseInt(buildingId),
         currentRoom: currentRoom || null,
         avatar: avatar || null,
+        department: department || null,
+        group: group || null,
       },
       include: { building: { select: { id: true, name: true } } },
     });

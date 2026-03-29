@@ -1,11 +1,12 @@
 "use client";
 
-import { useState, useRef } from "react";
+import { useState, useRef, useCallback } from "react";
+import { createPortal } from "react-dom";
 import * as XLSX from "xlsx";
 
 type Building = { id: number; name: string; floorPlanUrl: string | null; rooms: Room[] };
 type Room = { id: number; buildingId: number; roomNumber: string; floor: number; xPosition: number; yPosition: number; fenceRadius: number };
-type Profile = { id: string; employeeId: string | null; name: string; avatar: string | null; role: "photographer" | "assistant" | "leader"; buildingId: number; currentRoom: string | null; status: string; onlineStatus: string; isOnline: boolean; building: { id: number; name: string } };
+type Profile = { id: string; employeeId: string | null; name: string; avatar: string | null; role: "photographer" | "assistant" | "leader"; buildingId: number; currentRoom: string | null; status: string; onlineStatus: string; isOnline: boolean; department: string | null; group: string | null; building: { id: number; name: string } };
 
 const ROLE_MAP: Record<string, { label: string; color: string; bg: string }> = {
   photographer: { label: "摄影师", color: "text-orange-600", bg: "bg-orange-50" },
@@ -26,7 +27,7 @@ const ONLINE_STATUS_MAP: Record<string, { label: string; color: string; bg: stri
 };
 
 export default function ProfilesTab({
-  profiles,
+  profiles: initialProfiles,
   buildings,
   onRefresh,
 }: {
@@ -34,15 +35,32 @@ export default function ProfilesTab({
   buildings: Building[];
   onRefresh: () => void;
 }) {
+  const [localProfiles, setLocalProfiles] = useState(initialProfiles);
   const [filterRole, setFilterRole] = useState("");
   const [filterBuilding, setFilterBuilding] = useState("");
+  const [filterDepartment, setFilterDepartment] = useState("");
+  const [filterGroup, setFilterGroup] = useState("");
   const [showProfileModal, setShowProfileModal] = useState(false);
   const [editingProfile, setEditingProfile] = useState<Profile | null>(null);
   const [showImportModal, setShowImportModal] = useState(false);
 
+  // Sync when parent re-fetches
+  const [prevProfiles, setPrevProfiles] = useState(initialProfiles);
+  if (initialProfiles !== prevProfiles) {
+    setPrevProfiles(initialProfiles);
+    setLocalProfiles(initialProfiles);
+  }
+
+  const profiles = localProfiles;
+
+  const departments = [...new Set(profiles.map((p) => p.department).filter(Boolean))] as string[];
+  const groups = [...new Set(profiles.map((p) => p.group).filter(Boolean))] as string[];
+
   const filteredProfiles = profiles.filter((p) => {
     if (filterRole && p.role !== filterRole) return false;
     if (filterBuilding && p.buildingId !== parseInt(filterBuilding)) return false;
+    if (filterDepartment && p.department !== filterDepartment) return false;
+    if (filterGroup && p.group !== filterGroup) return false;
     return true;
   });
 
@@ -62,12 +80,16 @@ export default function ProfilesTab({
   async function toggleOnlineStatus(p: Profile) {
     const current = p.onlineStatus || "offline";
     const info = ONLINE_STATUS_MAP[current] || ONLINE_STATUS_MAP.offline;
+    const nextStatus = info.next;
+    // Optimistic local update
+    setLocalProfiles((prev) =>
+      prev.map((pr) => pr.id === p.id ? { ...pr, onlineStatus: nextStatus } : pr)
+    );
     await fetch(`/api/profiles/${p.id}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ onlineStatus: info.next }),
+      body: JSON.stringify({ onlineStatus: nextStatus }),
     });
-    onRefresh();
   }
 
   return (
@@ -113,6 +135,26 @@ export default function ProfilesTab({
               <option key={b.id} value={b.id}>{b.name}</option>
             ))}
           </select>
+          <select
+            value={filterDepartment}
+            onChange={(e) => setFilterDepartment(e.target.value)}
+            className="px-3 py-2 rounded-xl bg-[--bg-card] border border-gray-200 text-sm text-[--text-secondary] outline-none"
+          >
+            <option value="">全部部门</option>
+            {departments.map((d) => (
+              <option key={d} value={d}>{d}</option>
+            ))}
+          </select>
+          <select
+            value={filterGroup}
+            onChange={(e) => setFilterGroup(e.target.value)}
+            className="px-3 py-2 rounded-xl bg-[--bg-card] border border-gray-200 text-sm text-[--text-secondary] outline-none"
+          >
+            <option value="">全部小组</option>
+            {groups.map((g) => (
+              <option key={g} value={g}>{g}</option>
+            ))}
+          </select>
         </div>
         <div className="flex gap-2">
           <button
@@ -133,8 +175,8 @@ export default function ProfilesTab({
       {/* Table */}
       <div className="card p-5">
         <div className="space-y-2">
-          <div className="grid grid-cols-7 gap-3 px-3 text-[10px] text-[--text-muted] font-medium uppercase tracking-wider">
-            <span>姓名</span><span>工号</span><span>角色</span><span>所属楼座</span><span>当前房间</span><span>在线状态</span><span>操作</span>
+          <div className="grid grid-cols-9 gap-3 px-3 text-[10px] text-[--text-muted] font-medium uppercase tracking-wider">
+            <span>姓名</span><span>工号</span><span>角色</span><span>部门</span><span>小组</span><span>所属楼座</span><span>当前房间</span><span>在线状态</span><span>操作</span>
           </div>
           {filteredProfiles.length === 0 ? (
             <div className="text-center py-8 text-[--text-muted] text-sm">暂无数据</div>
@@ -143,10 +185,12 @@ export default function ProfilesTab({
               const r = ROLE_MAP[p.role];
               const os = ONLINE_STATUS_MAP[p.onlineStatus || "offline"] || ONLINE_STATUS_MAP.offline;
               return (
-                <div key={p.id} className="grid grid-cols-7 gap-3 px-3 py-3 rounded-xl bg-[--bg-base] hover:bg-gray-100 transition-colors items-center">
+                <div key={p.id} className="grid grid-cols-9 gap-3 px-3 py-3 rounded-xl bg-[--bg-base] hover:bg-gray-100 transition-colors items-center">
                   <span className="text-sm font-medium text-[--text-primary]">{p.name}</span>
                   <span className="text-xs text-[--text-muted] font-mono">{p.employeeId || "—"}</span>
                   <span className={`text-[10px] font-bold px-2 py-0.5 rounded-md w-fit ${r.bg} ${r.color}`}>{r.label}</span>
+                  <span className="text-xs text-[--text-secondary]">{p.department || "—"}</span>
+                  <span className="text-xs text-[--text-secondary]">{p.group || "—"}</span>
                   <span className="text-xs text-[--text-secondary]">{p.building.name}</span>
                   <span className="text-xs text-[--text-secondary]">{p.currentRoom || "—"}</span>
                   <button
@@ -177,20 +221,28 @@ export default function ProfilesTab({
       </div>
 
       {/* Modals */}
-      {showProfileModal && (
+      {showProfileModal && createPortal(
         <ProfileModal
           profile={editingProfile}
           buildings={buildings}
           onClose={() => setShowProfileModal(false)}
-          onSaved={onRefresh}
-        />
+          onSaved={(saved: Profile) => {
+            if (editingProfile) {
+              setLocalProfiles((prev) => prev.map((p) => p.id === saved.id ? saved : p));
+            } else {
+              setLocalProfiles((prev) => [...prev, saved]);
+            }
+          }}
+        />,
+        document.body
       )}
-      {showImportModal && (
+      {showImportModal && createPortal(
         <ImportModal
           buildings={buildings}
           onClose={() => setShowImportModal(false)}
           onImported={onRefresh}
-        />
+        />,
+        document.body
       )}
     </>
   );
@@ -206,7 +258,7 @@ function ProfileModal({
   profile: Profile | null;
   buildings: Building[];
   onClose: () => void;
-  onSaved: () => void;
+  onSaved: (profile: Profile) => void;
 }) {
   const [form, setForm] = useState({
     employeeId: profile?.employeeId || "",
@@ -215,8 +267,21 @@ function ProfileModal({
     buildingId: profile?.buildingId?.toString() || (buildings[0]?.id?.toString() || ""),
     currentRoom: profile?.currentRoom || "",
     avatar: profile?.avatar || "",
+    department: profile?.department || "",
+    group: profile?.group || "",
   });
   const [saving, setSaving] = useState(false);
+  const avatarInputRef = useRef<HTMLInputElement>(null);
+  const [avatarDragOver, setAvatarDragOver] = useState(false);
+
+  const handleAvatarFile = useCallback((file: File) => {
+    if (!file.type.startsWith("image/")) return;
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      setForm((prev) => ({ ...prev, avatar: e.target?.result as string }));
+    };
+    reader.readAsDataURL(file);
+  }, []);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -225,22 +290,24 @@ function ProfileModal({
 
     const payload = { ...form, buildingId: parseInt(form.buildingId) };
 
+    let res: Response;
     if (profile) {
-      await fetch(`/api/profiles/${profile.id}`, {
+      res = await fetch(`/api/profiles/${profile.id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
     } else {
-      await fetch("/api/profiles", {
+      res = await fetch("/api/profiles", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
     }
 
+    const saved = await res.json();
     setSaving(false);
-    onSaved();
+    onSaved(saved);
     onClose();
   }
 
@@ -272,7 +339,7 @@ function ProfileModal({
             <label className="text-xs font-medium text-[--text-secondary] mb-1 block">角色 *</label>
             <select
               value={form.role}
-              onChange={(e) => setForm({ ...form, role: e.target.value })}
+              onChange={(e) => setForm({ ...form, role: e.target.value as "photographer" | "assistant" | "leader" })}
               className="w-full px-3 py-2.5 rounded-xl bg-[--bg-base] border border-gray-200 text-sm outline-none focus:border-purple-400 transition-colors"
             >
               <option value="photographer">摄影师</option>
@@ -293,6 +360,24 @@ function ProfileModal({
             </select>
           </div>
           <div>
+            <label className="text-xs font-medium text-[--text-secondary] mb-1 block">部门</label>
+            <input
+              value={form.department}
+              onChange={(e) => setForm({ ...form, department: e.target.value })}
+              className="w-full px-3 py-2.5 rounded-xl bg-[--bg-base] border border-gray-200 text-sm outline-none focus:border-purple-400 transition-colors"
+              placeholder="例如：摄影部"
+            />
+          </div>
+          <div>
+            <label className="text-xs font-medium text-[--text-secondary] mb-1 block">小组</label>
+            <input
+              value={form.group}
+              onChange={(e) => setForm({ ...form, group: e.target.value })}
+              className="w-full px-3 py-2.5 rounded-xl bg-[--bg-base] border border-gray-200 text-sm outline-none focus:border-purple-400 transition-colors"
+              placeholder="例如：A组"
+            />
+          </div>
+          <div>
             <label className="text-xs font-medium text-[--text-secondary] mb-1 block">当前房间</label>
             <input
               value={form.currentRoom}
@@ -302,13 +387,46 @@ function ProfileModal({
             />
           </div>
           <div>
-            <label className="text-xs font-medium text-[--text-secondary] mb-1 block">头像URL</label>
-            <input
-              value={form.avatar}
-              onChange={(e) => setForm({ ...form, avatar: e.target.value })}
-              className="w-full px-3 py-2.5 rounded-xl bg-[--bg-base] border border-gray-200 text-sm outline-none focus:border-purple-400 transition-colors"
-              placeholder="可选"
-            />
+            <label className="text-xs font-medium text-[--text-secondary] mb-1 block">头像</label>
+            <div
+              className={`relative w-full rounded-xl border-2 border-dashed transition-colors cursor-pointer ${
+                avatarDragOver ? "border-purple-400 bg-purple-50" : "border-gray-200 hover:border-purple-300"
+              } ${form.avatar ? "p-2" : "p-6"}`}
+              onClick={() => avatarInputRef.current?.click()}
+              onDragOver={(e) => { e.preventDefault(); setAvatarDragOver(true); }}
+              onDragLeave={() => setAvatarDragOver(false)}
+              onDrop={(e) => { e.preventDefault(); setAvatarDragOver(false); const f = e.dataTransfer.files[0]; if (f) handleAvatarFile(f); }}
+            >
+              <input
+                ref={avatarInputRef}
+                type="file"
+                accept="image/*"
+                className="hidden"
+                onChange={(e) => { const f = e.target.files?.[0]; if (f) handleAvatarFile(f); }}
+              />
+              {form.avatar ? (
+                <div className="flex items-center gap-3">
+                  <img src={form.avatar} alt="头像预览" className="w-14 h-14 rounded-xl object-cover border border-gray-200" />
+                  <div className="flex-1 min-w-0">
+                    <p className="text-xs text-[--text-secondary] truncate">已选择头像</p>
+                    <button
+                      type="button"
+                      onClick={(e) => { e.stopPropagation(); setForm({ ...form, avatar: "" }); }}
+                      className="text-[10px] text-red-500 hover:text-red-600 mt-0.5"
+                    >
+                      移除
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className="text-center">
+                  <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#9ca3af" strokeWidth="1.5" className="mx-auto mb-1.5">
+                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>
+                  </svg>
+                  <p className="text-xs text-[--text-muted]">拖拽图片或点击上传</p>
+                </div>
+              )}
+            </div>
           </div>
           <div className="flex gap-3 pt-2">
             <button
@@ -343,18 +461,27 @@ function ImportModal({
   onImported: () => void;
 }) {
   const fileRef = useRef<HTMLInputElement>(null);
-  const [rows, setRows] = useState<{ employeeId: string; name: string; role: string; building: string; room: string; error?: string }[]>([]);
+  const [rows, setRows] = useState<{ employeeId: string; name: string; role: string; building: string; room: string; department: string; group: string; error?: string }[]>([]);
   const [importing, setImporting] = useState(false);
   const [result, setResult] = useState<{ success: number; failed: { index: number; name: string; error: string }[] } | null>(null);
   const [dragOver, setDragOver] = useState(false);
 
   function downloadTemplate() {
-    const ws = XLSX.utils.aoa_to_sheet([
-      ["工号", "姓名", "角色", "所属楼座", "当前房间"],
-      ["EMP001", "张三", "摄影师", "1号楼", "101"],
-      ["EMP002", "李四", "助理", "2号楼", "202"],
-    ]);
-    ws["!cols"] = [{ wch: 12 }, { wch: 12 }, { wch: 10 }, { wch: 12 }, { wch: 10 }];
+    const header = ["工号", "姓名", "角色", "部门", "小组", "所属楼座", "当前房间"];
+    const examples = [
+      ["WG0001", "张三", "摄影师", "摄影一部", "图片A0组", buildings[0]?.name || "南座四楼", "401"],
+      ["WG0002", "李四", "助理", "摄影二部", "助理B1组", buildings[0]?.name || "南座四楼", "402"],
+    ];
+    const ws = XLSX.utils.aoa_to_sheet([header, ...examples]);
+    // Force all cells to text format so Excel won't strip leading characters
+    const range = XLSX.utils.decode_range(ws["!ref"] || "A1");
+    for (let R = range.s.r; R <= range.e.r; R++) {
+      for (let C = range.s.c; C <= range.e.c; C++) {
+        const addr = XLSX.utils.encode_cell({ r: R, c: C });
+        if (ws[addr]) ws[addr].t = "s";
+      }
+    }
+    ws["!cols"] = [{ wch: 12 }, { wch: 12 }, { wch: 10 }, { wch: 12 }, { wch: 12 }, { wch: 12 }, { wch: 12 }];
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, "人员信息");
     XLSX.writeFile(wb, "人员导入模板.xlsx");
@@ -364,16 +491,18 @@ function ImportModal({
     const reader = new FileReader();
     reader.onload = (e) => {
       const data = new Uint8Array(e.target?.result as ArrayBuffer);
-      const wb = XLSX.read(data, { type: "array" });
+      const wb = XLSX.read(data, { type: "array", raw: true });
       const ws = wb.Sheets[wb.SheetNames[0]];
-      const json = XLSX.utils.sheet_to_json<Record<string, string>>(ws);
+      const json = XLSX.utils.sheet_to_json<Record<string, string>>(ws, { raw: false });
 
       const parsed = json.map((row) => {
-        const employeeId = (row["工号"] || "").toString().trim();
-        const name = (row["姓名"] || "").trim();
-        const roleCn = (row["角色"] || "").trim();
-        const building = (row["所属楼座"] || "").trim();
-        const room = (row["当前房间"] || "").toString().trim();
+        const employeeId = String(row["工号"] ?? "").trim();
+        const name = String(row["姓名"] ?? "").trim();
+        const roleCn = String(row["角色"] ?? "").trim();
+        const department = String(row["部门"] ?? "").trim();
+        const group = String(row["小组"] ?? "").trim();
+        const building = String(row["所属楼座"] ?? "").trim();
+        const room = String(row["当前房间"] ?? "").trim();
         const role = ROLE_CN_MAP[roleCn];
 
         let error: string | undefined;
@@ -382,7 +511,7 @@ function ImportModal({
         else if (!building) error = "缺少楼座";
         else if (!buildings.find((b) => b.name === building)) error = `楼座不存在: ${building}`;
 
-        return { employeeId, name, role: role || roleCn, building, room, error };
+        return { employeeId, name, role: role || roleCn, building, room, department, group, error };
       });
 
       setRows(parsed);
@@ -414,6 +543,8 @@ function ImportModal({
       role: r.role,
       buildingId: buildings.find((b) => b.name === r.building)?.id,
       currentRoom: r.room || null,
+      department: r.department || null,
+      group: r.group || null,
     }));
 
     try {
@@ -482,18 +613,20 @@ function ImportModal({
             </div>
             <div className="flex-1 overflow-auto">
               <div className="space-y-1.5">
-                <div className="grid grid-cols-6 gap-3 px-3 text-[10px] text-[--text-muted] font-medium uppercase tracking-wider sticky top-0 bg-[--bg-card] py-1">
-                  <span>#</span><span>工号</span><span>姓名</span><span>角色</span><span>楼座</span><span>房间</span>
+                <div className="grid grid-cols-8 gap-3 px-3 text-[10px] text-[--text-muted] font-medium uppercase tracking-wider sticky top-0 bg-[--bg-card] py-1">
+                  <span>#</span><span>工号</span><span>姓名</span><span>角色</span><span>部门</span><span>小组</span><span>楼座</span><span>房间</span>
                 </div>
                 {rows.map((r, i) => (
-                  <div key={i} className={`grid grid-cols-6 gap-3 px-3 py-2 rounded-xl items-center ${r.error ? "bg-red-50" : "bg-[--bg-base]"}`}>
+                  <div key={i} className={`grid grid-cols-8 gap-3 px-3 py-2 rounded-xl items-center ${r.error ? "bg-red-50" : "bg-[--bg-base]"}`}>
                     <span className="text-xs text-[--text-muted]">{i + 1}</span>
                     <span className="text-xs text-[--text-secondary] font-mono">{r.employeeId || "—"}</span>
                     <span className="text-xs font-medium text-[--text-primary]">{r.name || "—"}</span>
                     <span className="text-xs text-[--text-secondary]">{r.role}</span>
+                    <span className="text-xs text-[--text-secondary]">{r.department || "—"}</span>
+                    <span className="text-xs text-[--text-secondary]">{r.group || "—"}</span>
                     <span className="text-xs text-[--text-secondary]">{r.building || "—"}</span>
                     <span className="text-xs text-[--text-secondary]">{r.room || "—"}</span>
-                    {r.error && <span className="col-span-6 text-[10px] text-red-500 -mt-1">{r.error}</span>}
+                    {r.error && <span className="col-span-8 text-[10px] text-red-500 -mt-1">{r.error}</span>}
                   </div>
                 ))}
               </div>
