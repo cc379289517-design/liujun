@@ -29,8 +29,8 @@ model Room {
   buildingId  Int      @map("building_id")
   roomNumber  String   @map("room_number")
   floor       Int      @default(1)
-  xPosition   Float    @default(0) @map("x_position")
-  yPosition   Float    @default(0) @map("y_position")
+  xPosition   Float    @default(50) @map("x_position")
+  yPosition   Float    @default(50) @map("y_position")
   fenceRadius Float    @default(5) @map("fence_radius")
   building    Building @relation(fields: [buildingId], references: [id], onDelete: Cascade)
 
@@ -53,9 +53,10 @@ enum Role {
 // ============================================
 enum ProfileStatus {
   idle       // 1: 空闲 - 绿色
-  busy       // 2: 在忙 - 浅橙
-  executing  // 3: 进行中 - 橙色
-  finishing  // 4: 快结束 - 浅绿
+  assigned   // 2: 待就位 - 蓝色（已接收派发任务，未实际开始）
+  busy       // 3: 在忙 - 浅橙
+  executing  // 4: 进行中 - 橙色
+  finishing  // 5: 快结束 - 浅绿
 }
 
 // ============================================
@@ -72,10 +73,12 @@ enum OnlineStatus {
 // ============================================
 model Profile {
   id            String        @id @default(uuid())
-  employeeId    String        @unique @map("employee_id")
+  employeeId    String?       @unique @map("employee_id")
   name          String
   avatar        String?
   role          Role
+  department    String?
+  group         String?       @map("group_name")
   buildingId    Int           @map("building_id")
   currentRoom   String?       @map("current_room")
   status        ProfileStatus @default(idle)

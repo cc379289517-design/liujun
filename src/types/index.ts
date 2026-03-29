@@ -18,6 +18,7 @@ export const PRIORITY = {
 // ============================================
 export const STATUS_COLORS: Record<ProfileStatus, string> = {
   idle: "#22c55e", // 绿色 - 空闲
+  assigned: "#3b82f6", // 蓝色 - 待就位
   busy: "#fdba74", // 浅橙 - 在忙
   executing: "#f97316", // 橙色 - 进行中
   finishing: "#86efac", // 浅绿 - 快结束

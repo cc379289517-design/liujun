@@ -35,6 +35,35 @@ export async function GET(_request: NextRequest, { params }: RouteContext) {
 }
 
 /**
+ * DELETE /api/tasks/[id] - 删除单个任务
+ */
+export async function DELETE(_request: NextRequest, { params }: RouteContext) {
+  try {
+    const { id } = await params;
+
+    const task = await prisma.bookingTask.findUnique({ where: { id } });
+    if (!task) {
+      return Response.json({ error: "Task not found" }, { status: 404 });
+    }
+
+    // 如果任务有分配的助理，将助理状态恢复为 idle
+    if (task.assistantId) {
+      await prisma.profile.update({
+        where: { id: task.assistantId },
+        data: { status: ProfileStatus.idle },
+      });
+    }
+
+    await prisma.bookingTask.delete({ where: { id } });
+
+    return Response.json({ success: true });
+  } catch (error) {
+    console.error("[DELETE /api/tasks/[id]]", error);
+    return Response.json({ error: "Failed to delete task" }, { status: 500 });
+  }
+}
+
+/**
  * PATCH /api/tasks/[id] - 更新任务状态
  * Actions: start, pause, complete, extend
  */

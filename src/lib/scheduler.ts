@@ -52,7 +52,7 @@ export async function assignTask(taskId: string): Promise<string | null> {
   );
   const selected = sameBuilding ?? availableAssistants[0];
 
-  // 分配任务
+  // 分配任务（助理状态设为待就位，等待助理确认开始）
   await prisma.$transaction([
     prisma.bookingTask.update({
       where: { id: taskId },
@@ -60,7 +60,7 @@ export async function assignTask(taskId: string): Promise<string | null> {
     }),
     prisma.profile.update({
       where: { id: selected.id },
-      data: { status: ProfileStatus.busy },
+      data: { status: ProfileStatus.assigned },
     }),
   ]);
 

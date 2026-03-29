@@ -39,6 +39,46 @@ export async function GET(request: NextRequest) {
 }
 
 /**
+ * DELETE /api/tasks - 批量清空任务
+ * 支持 ?photographerId=xxx 按摄影师清空
+ */
+export async function DELETE(request: NextRequest) {
+  try {
+    const { searchParams } = request.nextUrl;
+    const photographerId = searchParams.get("photographerId");
+
+    const where: Record<string, unknown> = {};
+    if (photographerId) where.photographerId = photographerId;
+    // 排除已完成的任务，只清空进行中/等待中的
+    where.status = { not: TaskStatus.completed };
+
+    // 先释放被分配的助理
+    const tasksToDelete = await prisma.bookingTask.findMany({
+      where,
+      select: { assistantId: true },
+    });
+
+    const assistantIds = tasksToDelete
+      .map((t) => t.assistantId)
+      .filter((id): id is string => id !== null);
+
+    if (assistantIds.length > 0) {
+      await prisma.profile.updateMany({
+        where: { id: { in: assistantIds } },
+        data: { status: "idle" },
+      });
+    }
+
+    const result = await prisma.bookingTask.deleteMany({ where });
+
+    return Response.json({ deleted: result.count });
+  } catch (error) {
+    console.error("[DELETE /api/tasks]", error);
+    return Response.json({ error: "Failed to delete tasks" }, { status: 500 });
+  }
+}
+
+/**
  * POST /api/tasks - 创建新任务
  */
 export async function POST(request: NextRequest) {
@@ -98,8 +138,9 @@ export async function POST(request: NextRequest) {
         note,
       },
       include: {
-        photographer: { select: { id: true, name: true } },
-        category: { select: { id: true, name: true } },
+        photographer: { select: { id: true, name: true, currentRoom: true } },
+        assistant: { select: { id: true, name: true, currentRoom: true } },
+        category: { select: { id: true, name: true, priorityLevel: true } },
       },
     });
 
@@ -122,9 +163,9 @@ export async function POST(request: NextRequest) {
             const updated = await prisma.bookingTask.findUnique({
               where: { id: task.id },
               include: {
-                photographer: { select: { id: true, name: true } },
-                assistant: { select: { id: true, name: true } },
-                category: { select: { id: true, name: true } },
+                photographer: { select: { id: true, name: true, currentRoom: true } },
+                assistant: { select: { id: true, name: true, currentRoom: true } },
+                category: { select: { id: true, name: true, priorityLevel: true } },
               },
             });
             return Response.json(updated, { status: 201 });
@@ -138,9 +179,9 @@ export async function POST(request: NextRequest) {
         const updated = await prisma.bookingTask.findUnique({
           where: { id: task.id },
           include: {
-            photographer: { select: { id: true, name: true } },
-            assistant: { select: { id: true, name: true } },
-            category: { select: { id: true, name: true } },
+            photographer: { select: { id: true, name: true, currentRoom: true } },
+            assistant: { select: { id: true, name: true, currentRoom: true } },
+            category: { select: { id: true, name: true, priorityLevel: true } },
           },
         });
         return Response.json(updated, { status: 201 });
