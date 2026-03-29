@@ -5,15 +5,39 @@ import ProfilesTab from "./ProfilesTab";
 import SpaceTab from "./SpaceTab";
 import TaskLogicTab from "./TaskLogicTab";
 import ApprovalTab from "./ApprovalTab";
+import StatsTab from "./StatsTab";
 
-type TabKey = "profiles" | "spaces" | "tasks" | "approvals";
+type TabKey = "profiles" | "spaces" | "tasks" | "approvals" | "stats";
 
-const TABS: { key: TabKey; label: string; bg: string; activeBg: string; text: string }[] = [
-  { key: "profiles", label: "人员管理", bg: "bg-blue-100/70", activeBg: "bg-blue-50", text: "text-blue-600" },
-  { key: "spaces", label: "空间管理", bg: "bg-amber-100/70", activeBg: "bg-amber-50", text: "text-amber-600" },
-  { key: "approvals", label: "审批管理", bg: "bg-green-100/70", activeBg: "bg-green-50", text: "text-green-600" },
-  { key: "tasks", label: "逻���设置", bg: "bg-purple-100/70", activeBg: "bg-purple-50", text: "text-purple-500" },
+type Room = { id: number; buildingId: number; roomNumber: string; floor: number; xPosition: number; yPosition: number; fenceRadius: number };
+type Building = { id: number; name: string; floorPlanUrl: string | null; rooms: Room[] };
+type Profile = { id: string; employeeId: string | null; name: string; avatar: string | null; role: "photographer" | "assistant" | "leader"; buildingId: number; currentRoom: string | null; status: string; onlineStatus: string; isOnline: boolean; department: string | null; group: string | null; building: { id: number; name: string } };
+type Category = { id: number; name: string; description: string | null; priorityLevel: number; minDuration: number; maxDuration: number; estDuration: number; hexColor: string; sortRank: number };
+type SystemConfigMap = Record<string, { value: string; label: string | null }>;
+
+const TABS: { key: TabKey; label: string; color: string; bg: string; activeBg: string }[] = [
+  { key: "profiles", label: "人员管理", color: "#3b82f6", bg: "#dbeafe", activeBg: "#eff6ff" },
+  { key: "spaces", label: "空间管理", color: "#f59e0b", bg: "#fef3c7", activeBg: "#fffbeb" },
+  { key: "approvals", label: "审批管理", color: "#22c55e", bg: "#dcfce7", activeBg: "#f0fdf4" },
+  { key: "tasks", label: "逻辑设置", color: "#a855f7", bg: "#f3e8ff", activeBg: "#faf5ff" },
+  { key: "stats", label: "数据统计", color: "#ef4444", bg: "#fee2e2", activeBg: "#fef2f2" },
 ];
+
+/* Chrome-style tab SVG — bottom edge is a flat line so it seamlessly connects to content */
+function ChromeTab({ fill }: { fill: string }) {
+  return (
+    <svg
+      viewBox="0 0 200 40"
+      preserveAspectRatio="none"
+      className="absolute inset-0 w-full h-full"
+    >
+      <path
+        d="M 0 40 L 0 40 C 4 40, 8 36, 12 10 C 14 2, 18 0, 24 0 L 176 0 C 182 0, 186 2, 188 10 C 192 36, 196 40, 200 40 L 200 40 Z"
+        fill={fill}
+      />
+    </svg>
+  );
+}
 
 export default function AdminPage() {
   const [tab, setTab] = useState<TabKey>("profiles");
@@ -53,44 +77,60 @@ export default function AdminPage() {
       <div className="flex flex-col max-w-[1200px] mx-auto">
         {/* Header */}
         <div className="flex items-center gap-4 mb-6">
-          <a href="/photographer" className="w-9 h-9 rounded-full bg-white border border-gray-200 flex items-center justify-center text-gray-500 hover:bg-gray-100 transition-colors shadow-sm" title="返回前台">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M15 18l-6-6 6-6"/></svg>
+          <a href="/photographer" className="flex items-center gap-1.5 text-gray-500 hover:text-gray-700 transition-colors" title="返回工作台">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M15 18l-6-6 6-6"/></svg>
+            <span className="text-sm font-semibold">返回工作台</span>
           </a>
-          <div>
-            <h1 className="text-2xl font-bold text-[--text-primary]">后台管理</h1>
-            <p className="text-sm text-[--text-muted] mt-0.5">人员 · 空间 · 审批 · 逻辑设置</p>
-          </div>
         </div>
 
-        {/* Folder-style tabs + content */}
+        {/* Chrome-style tabs + content */}
         <div className="relative">
           {/* Tabs row */}
-          <div className="flex w-full relative" style={{ marginBottom: "-1px", height: "72px" }}>
+          <div className="relative flex items-end" style={{ height: "72px", zIndex: 1 }}>
             {TABS.map((t, i) => {
               const isActive = tab === t.key;
-              const zIndex = isActive ? 10 : TABS.length - i;
+              const zIndex = isActive ? 20 : TABS.length - i;
+              const TAB_WIDTH = 240;
+              const OVERLAP = 20;
+              const left = i * (TAB_WIDTH - OVERLAP);
+
               return (
                 <button
                   key={t.key}
                   onClick={() => setTab(t.key)}
-                  className={`absolute top-0 h-full cursor-pointer flex items-center ${t.bg}`}
+                  onMouseDown={(e) => e.preventDefault()}
+                  className="absolute bottom-0 cursor-pointer flex items-center justify-center"
                   style={{
-                    left: `${i * 24}%`,
-                    width: "30%",
+                    left,
+                    width: TAB_WIDTH,
+                    height: 72,
                     zIndex,
-                    clipPath: "polygon(0 0, 85% 0, 100% 100%, 0 100%)",
-                    borderRadius: "16px 16px 0 0",
-                    paddingLeft: "24px",
+                    transform: isActive ? "translateX(12px) scale(1.02)" : "translateX(0) scale(1)",
+                    transition: "transform 0.4s cubic-bezier(0.34, 1.56, 0.64, 1), background 0.2s",
+                    transformOrigin: "bottom center",
                   }}
                 >
-                  <span className={`font-extrabold text-xl ${t.text}`}>{t.label}</span>
+                  <ChromeTab fill={isActive ? "#ffffff" : t.bg} />
+                  <span
+                    className="relative z-10 font-extrabold select-none whitespace-nowrap"
+                    style={{
+                      color: t.color,
+                      opacity: isActive ? 1 : 0.65,
+                      fontSize: "28px",
+                    }}
+                  >
+                    {t.label}
+                  </span>
                 </button>
               );
             })}
           </div>
 
           {/* Content area */}
-          <div className="bg-white rounded-b-2xl shadow-sm p-6" style={{ minHeight: "calc(100vh - 200px)" }}>
+          <div
+            className="relative bg-white rounded-2xl shadow-sm p-6"
+            style={{ minHeight: "calc(100vh - 200px)" }}
+          >
             {loading ? (
               <div className="flex items-center justify-center py-20 text-[--text-muted]">加载中...</div>
             ) : (
@@ -99,6 +139,7 @@ export default function AdminPage() {
                 {tab === "spaces" && <SpaceTab buildings={buildings} onRefresh={fetchData} />}
                 {tab === "tasks" && <TaskLogicTab categories={categories} config={config} onRefresh={fetchData} />}
                 {tab === "approvals" && <ApprovalTab config={config} onRefresh={fetchData} />}
+                {tab === "stats" && <StatsTab />}
               </>
             )}
           </div>

@@ -19,6 +19,7 @@ type TaskFromAPI = {
   startedAt: string | null;
   completedAt: string | null;
   estEndTime: string | null;
+  isLocked: boolean;
   photographer: { id: string; name: string; currentRoom: string | null };
   assistant: { id: string; name: string; currentRoom: string | null } | null;
   category: { id: number; name: string; priorityLevel: number };
@@ -29,12 +30,15 @@ type DisplayTask = {
   name: string;
   room: string;
   time: string;
+  timePeriod: string;
+  actualTime: string;
   progress: number | null;
   statusLabel: string;
   statusCls: string;
   tagCls: string;
   hasProgress: boolean;
   assistantName: string | null;
+  photographerName: string | null;
 };
 
 const STATUS_STYLE: Record<string, { statusLabel: string; statusCls: string; tagCls: string; hasProgress: boolean }> = {
@@ -49,31 +53,39 @@ function apiTaskToDisplay(t: TaskFromAPI): DisplayTask {
   // 已分配助理但未开始 → 待就位
   const effectiveStatus = (t.status === "waiting" && t.assistantId) ? "assigned" : t.status;
   const style = STATUS_STYLE[effectiveStatus] || STATUS_STYLE.waiting;
+  const PRIORITY_LABEL: Record<number, string> = { 1: "1-5分钟", 2: "5-20分钟", 3: "30分钟以内", 4: "30分钟以上" };
+  const timePeriod = PRIORITY_LABEL[t.priority] || t.category.name;
   let time = "";
+  let actualTime = "";
   let progress: number | null = null;
   if (t.status === "executing" && t.startedAt) {
     const elapsed = Math.floor((Date.now() - new Date(t.startedAt).getTime()) / 60000);
     const est = t.estEndTime ? Math.floor((new Date(t.estEndTime).getTime() - new Date(t.startedAt).getTime()) / 60000) : null;
     time = est ? `已执行${elapsed}分/${est}分` : `已执行${elapsed}分钟`;
+    actualTime = `已${elapsed}分钟`;
     progress = est ? Math.min(100, Math.round((elapsed / est) * 100)) : null;
   } else if (t.status === "completed" && t.startedAt && t.completedAt) {
     const used = Math.floor((new Date(t.completedAt).getTime() - new Date(t.startedAt).getTime()) / 60000);
     time = `用时${used}分钟`;
+    actualTime = `${used}分钟`;
   } else if (t.status === "paused" && t.startedAt) {
     const elapsed = Math.floor((Date.now() - new Date(t.startedAt).getTime()) / 60000);
     time = `已执行${elapsed}分钟(暂停)`;
+    actualTime = `已${elapsed}分钟`;
   } else {
-    // 等待中/待就位：显示预约时间段
-    const PRIORITY_LABEL: Record<number, string> = { 1: "1-5分钟", 2: "5-20分钟", 3: "30分钟以内", 4: "30分钟以上" };
-    time = PRIORITY_LABEL[t.priority] || t.category.name;
+    time = timePeriod;
+    actualTime = "";
   }
   return {
     id: t.id,
     name: t.category.name,
     room: t.roomNumber,
     time,
+    timePeriod,
+    actualTime,
     progress,
     assistantName: t.assistant?.name || null,
+    photographerName: t.photographer?.name || null,
     ...style,
   };
 }
@@ -93,22 +105,22 @@ const categories = [
     darkBg: "bg-red-500/25", darkActive: "bg-red-500/40",
     text: "text-red-700", darkText: "text-red-300",
     durations: [
-      { label: "1-5分钟", priority: "P1", cls: "bg-red-500 text-white" },
-      { label: "5-20分钟", priority: "P2", cls: "bg-orange-500 text-white" },
-      { label: "30分钟以内", priority: "P3", cls: "bg-amber-500 text-white" },
-      { label: "30分钟以上", priority: "P4", cls: "bg-blue-500 text-white" },
+      { label: "1-5分钟", priority: "P1", cls: "bg-red-500 text-white", categoryId: 1 },
+      { label: "5-20分钟", priority: "P2", cls: "bg-orange-500 text-white", categoryId: 1 },
+      { label: "30分钟以内", priority: "P3", cls: "bg-amber-500 text-white", categoryId: 1 },
+      { label: "30分钟以上", priority: "P4", cls: "bg-blue-500 text-white", categoryId: 1 },
     ],
   },
   {
-    name: "穿戴对角度",
+    name: "服装穿戴",
     bg: "bg-orange-400/20", active: "bg-orange-400/35",
     darkBg: "bg-orange-500/25", darkActive: "bg-orange-500/40",
     text: "text-orange-700", darkText: "text-orange-300",
     durations: [
-      { label: "1-5分钟", priority: "P1", cls: "bg-red-500 text-white" },
-      { label: "5-20分钟", priority: "P2", cls: "bg-orange-500 text-white" },
-      { label: "30分钟以内", priority: "P3", cls: "bg-amber-500 text-white" },
-      { label: "30分钟以上", priority: "P4", cls: "bg-blue-500 text-white" },
+      { label: "1-5分钟", priority: "P1", cls: "bg-red-500 text-white", categoryId: 2 },
+      { label: "5-20分钟", priority: "P2", cls: "bg-orange-500 text-white", categoryId: 2 },
+      { label: "30分钟以内", priority: "P3", cls: "bg-amber-500 text-white", categoryId: 2 },
+      { label: "30分钟以上", priority: "P4", cls: "bg-blue-500 text-white", categoryId: 2 },
     ],
   },
   {
@@ -117,8 +129,8 @@ const categories = [
     darkBg: "bg-amber-500/25", darkActive: "bg-amber-500/40",
     text: "text-amber-700", darkText: "text-amber-300",
     durations: [
-      { label: "30分钟以内", priority: "P3", cls: "bg-amber-500 text-white" },
-      { label: "30分钟以上", priority: "P4", cls: "bg-blue-500 text-white" },
+      { label: "30分钟以内", priority: "P3", cls: "bg-amber-500 text-white", categoryId: 3 },
+      { label: "30分钟以上", priority: "P4", cls: "bg-blue-500 text-white", categoryId: 6 },
     ],
   },
   {
@@ -127,9 +139,9 @@ const categories = [
     darkBg: "bg-emerald-500/25", darkActive: "bg-emerald-500/40",
     text: "text-emerald-700", darkText: "text-emerald-300",
     durations: [
-      { label: "5-15分钟", priority: "P2", cls: "bg-orange-500 text-white" },
-      { label: "15-30分钟", priority: "P3", cls: "bg-amber-500 text-white" },
-      { label: "30分钟以上", priority: "P4", cls: "bg-blue-500 text-white" },
+      { label: "5-15分钟", priority: "P2", cls: "bg-orange-500 text-white", categoryId: 4 },
+      { label: "15-30分钟", priority: "P3", cls: "bg-amber-500 text-white", categoryId: 4 },
+      { label: "30分钟以上", priority: "P4", cls: "bg-blue-500 text-white", categoryId: 5 },
     ],
   },
   {
@@ -138,10 +150,10 @@ const categories = [
     darkBg: "bg-blue-500/25", darkActive: "bg-blue-500/40",
     text: "text-blue-700", darkText: "text-blue-300",
     durations: [
-      { label: "1-5分钟", priority: "P1", cls: "bg-red-500 text-white" },
-      { label: "5-20分钟", priority: "P2", cls: "bg-orange-500 text-white" },
-      { label: "30分钟以内", priority: "P3", cls: "bg-amber-500 text-white" },
-      { label: "30分钟以上", priority: "P4", cls: "bg-blue-500 text-white" },
+      { label: "1-5分钟", priority: "P1", cls: "bg-red-500 text-white", categoryId: 7 },
+      { label: "5-20分钟", priority: "P2", cls: "bg-orange-500 text-white", categoryId: 7 },
+      { label: "30分钟以内", priority: "P3", cls: "bg-amber-500 text-white", categoryId: 7 },
+      { label: "30分钟以上", priority: "P4", cls: "bg-blue-500 text-white", categoryId: 7 },
     ],
   },
 ];
@@ -157,13 +169,13 @@ export default function PhotographerPage() {
   const [resolvedTheme, setResolvedTheme] = useState<"light" | "dark">("light");
   const [now, setNow] = useState(() => new Date());
   const [tasks, setTasks] = useState<DisplayTask[]>([]);
-  const [buildings, setBuildings] = useState<{ id: number; name: string; floorPlanUrl: string | null; rooms: { id: number; roomNumber: string }[] }[]>([]);
+  const [buildings, setBuildings] = useState<{ id: number; name: string; floorPlanUrl: string | null; rooms: { id: number; roomNumber: string; xPosition: number; yPosition: number }[] }[]>([]);
   const [activeBuildingId, setActiveBuildingId] = useState<number | null>(null);
   const [assistants, setAssistants] = useState<DockAssistant[]>([]);
   const [genie, setGenie] = useState<{
     sx: number; sy: number; sw: number; sh: number;
     tx: number; ty: number; tw: number; th: number;
-    label: string; priority: string; cls: string; catName: string;
+    label: string; priority: string; cls: string; catName: string; categoryId: number;
     phase: number;
   } | null>(null);
   const [enteringTaskId, setEnteringTaskId] = useState<string | null>(null);
@@ -178,8 +190,13 @@ export default function PhotographerPage() {
     buildingId: number; building: { id: number; name: string };
     onlineStatus: string;
   } | null>(null);
+  const [hoveredMapAssistant, setHoveredMapAssistant] = useState<string | null>(null);
   const [showAvatarModal, setShowAvatarModal] = useState(false);
   const [showStatsModal, setShowStatsModal] = useState(false);
+  const [showIdentityModal, setShowIdentityModal] = useState(false);
+  const [allProfiles, setAllProfiles] = useState<{ id: string; name: string; role: string; employeeId: string | null; department: string | null; group: string | null; avatar: string | null; buildingId: number; building: { id: number; name: string } }[]>([]);
+  // 助理当前任务（原始 API 数据）
+  const [currentRawTask, setCurrentRawTask] = useState<TaskFromAPI | null>(null);
 
   // Map pan & zoom state
   const mapContainerRef = useRef<HTMLDivElement>(null);
@@ -234,16 +251,25 @@ export default function PhotographerPage() {
     ]).then(([profilesData, tasksData]) => {
       const profiles = Array.isArray(profilesData) ? profilesData : [];
       const allTasks = Array.isArray(tasksData) ? tasksData : [];
-      // Build a map: assistantId -> current task description (executing / waiting+assigned)
+      // Build a map: assistantId -> current task description
+      const PRIORITY_DUR: Record<number, string> = { 1: "1-5分钟", 2: "5-20分钟", 3: "30分钟以内", 4: "30分钟以上" };
       const taskMap = new Map<string, string>();
+      const taskRoomMap = new Map<string, string>();
       for (const t of allTasks) {
         if (t.assistantId && t.category && (t.status === "executing" || t.status === "waiting" || t.status === "paused")) {
-          taskMap.set(t.assistantId, `${t.category.name} · ${t.roomNumber}室`);
+          let desc = `${t.category.name} · ${t.roomNumber}室 · ${PRIORITY_DUR[t.priority] || ""}`;
+          if (t.status === "executing" && t.startedAt) {
+            const elapsed = Math.floor((Date.now() - new Date(t.startedAt).getTime()) / 60000);
+            desc += ` · 已${elapsed}分钟`;
+          }
+          taskMap.set(t.assistantId, desc);
+          taskRoomMap.set(t.assistantId, t.roomNumber);
         }
       }
       setAssistants(profiles.map((p: DockAssistant) => ({
         ...p,
         currentTask: taskMap.get(p.id) || null,
+        currentRoom: taskRoomMap.get(p.id) || p.currentRoom || null,
       })));
     }).catch(console.error);
   }, [activeBuildingId]);
@@ -319,22 +345,31 @@ export default function PhotographerPage() {
   }, [themeMode]);
 
   useEffect(() => {
-    // Fetch photographer profile (郑丹) first, then buildings & tasks
+    // Fetch profiles, then pick current identity from localStorage or default
     fetch("/api/profiles")
       .then((r) => r.json())
       .then((data) => {
         if (Array.isArray(data)) {
-          const photographer = data.find((p: { name: string; role: string }) => p.name === "郑丹" && p.role === "photographer");
-          if (photographer) {
-            setProfile(photographer);
-            // Default to photographer's building
-            setActiveBuildingId(photographer.buildingId);
-            // Fetch tasks
-            fetch(`/api/tasks?photographerId=${photographer.id}`)
+          setAllProfiles(data);
+          const savedId = typeof window !== "undefined" ? localStorage.getItem("currentProfileId") : null;
+          const match = savedId ? data.find((p: { id: string }) => p.id === savedId) : null;
+          const selected = match || data.find((p: { name: string; role: string }) => p.name === "郑丹" && p.role === "photographer") || data[0];
+          if (selected) {
+            setProfile(selected);
+            setActiveBuildingId(selected.buildingId);
+            // Fetch tasks for this profile
+            const taskParam = selected.role === "assistant" ? `assistantId=${selected.id}` : `photographerId=${selected.id}`;
+            fetch(`/api/tasks?${taskParam}`)
               .then((r) => r.json())
               .then((taskData) => {
                 if (Array.isArray(taskData)) {
                   setTasks(taskData.map(apiTaskToDisplay));
+                  // 助理：找到当前活跃任务
+                  if (selected.role === "assistant") {
+                    const active = (taskData as TaskFromAPI[]).find((t) => t.status === "executing")
+                      || (taskData as TaskFromAPI[]).find((t) => t.status === "waiting" && t.assistantId);
+                    setCurrentRawTask(active || null);
+                  }
                 }
               })
               .catch(console.error);
@@ -380,8 +415,42 @@ export default function PhotographerPage() {
     }, 450);
   }, [removingTaskId, refreshAssistants]);
 
+  const switchIdentity = useCallback((p: typeof allProfiles[0]) => {
+    localStorage.setItem("currentProfileId", p.id);
+    setShowIdentityModal(false);
+    window.location.reload();
+  }, []);
+
+  // 助理：切换���务状态
+  const handleAssistantStatusChange = useCallback(async (action: "start" | "complete") => {
+    if (!currentRawTask) return;
+    try {
+      const res = await fetch(`/api/tasks/${currentRawTask.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action }),
+      });
+      if (res.ok) {
+        // 重新拉取任务
+        if (profile) {
+          const taskRes = await fetch(`/api/tasks?assistantId=${profile.id}`);
+          const taskData = await taskRes.json();
+          if (Array.isArray(taskData)) {
+            setTasks(taskData.map(apiTaskToDisplay));
+            const active = (taskData as TaskFromAPI[]).find((t) => t.status === "executing")
+              || (taskData as TaskFromAPI[]).find((t) => t.status === "waiting" && t.assistantId);
+            setCurrentRawTask(active || null);
+          }
+          refreshAssistants();
+        }
+      }
+    } catch (e) {
+      console.error("Failed to update task status", e);
+    }
+  }, [currentRawTask, profile, refreshAssistants]);
+
   const handleBook = useCallback(
-    (catName: string, dur: { label: string; priority: string; cls: string }, e: React.MouseEvent) => {
+    (catName: string, dur: { label: string; priority: string; cls: string; categoryId: number }, e: React.MouseEvent) => {
       if (genie) return;
       const btn = e.currentTarget.getBoundingClientRect();
       const listEl = taskListRef.current;
@@ -392,7 +461,7 @@ export default function PhotographerPage() {
         sx: btn.left, sy: btn.top, sw: btn.width, sh: btn.height,
         tx: listRect.left, ty: listRect.top, tw: listRect.width, th: 38,
         label: dur.label, priority: dur.priority, cls: dur.cls,
-        catName, phase: 0,
+        catName, categoryId: dur.categoryId, phase: 0,
       });
     },
     [genie],
@@ -412,9 +481,7 @@ export default function PhotographerPage() {
       const timer = setTimeout(async () => {
         // 任务地点就是摄影师当前所在的房间
         const room = profile?.currentRoom || "418";
-        // Find matching category from DB categories list
-        const catMap: Record<string, number> = { "手持": 1, "穿戴对角度": 2, "手工DIY": 3, "熨烫": 4, "其他": 7 };
-        const categoryId = catMap[genie.catName] || 7;
+        const categoryId = genie.categoryId;
         const tempId = `temp-${Date.now()}`;
         // Optimistic local insert
         setTasks((prev) => [
@@ -423,12 +490,15 @@ export default function PhotographerPage() {
             name: genie.catName,
             room,
             time: genie.label,
+            timePeriod: genie.label,
+            actualTime: "",
             progress: null,
             hasProgress: false,
             statusLabel: "等待中",
             statusCls: "bg-white/30 border-white/40",
             tagCls: "bg-gray-100/60 text-gray-500",
             assistantName: null,
+            photographerName: profile?.name || null,
           },
           ...prev,
         ]);
@@ -442,7 +512,7 @@ export default function PhotographerPage() {
             const res = await fetch("/api/tasks", {
               method: "POST",
               headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ photographerId: profile.id, roomNumber: room, categoryId }),
+              body: JSON.stringify({ photographerId: profile.id, roomNumber: room, categoryId, priority: parseInt(genie.priority.replace("P", "")) }),
             });
             if (res.ok) {
               const saved = await res.json();
@@ -473,6 +543,7 @@ export default function PhotographerPage() {
         {activeBuilding?.floorPlanUrl ? (
           <div
             ref={mapInnerRef}
+            className="relative"
             style={{
               transform: `translate(${mapPan.x}px, ${mapPan.y}px) scale(${mapZoom})`,
               transformOrigin: "0 0",
@@ -485,6 +556,62 @@ export default function PhotographerPage() {
               draggable={false}
               style={{ filter: `brightness(var(--map-brightness))` }}
             />
+            {/* 助理地图标记 */}
+            {assistants.filter((a) => a.currentRoom && (a.status === "assigned" || a.status === "executing")).map((a) => {
+              const room = activeBuilding.rooms.find((r) => r.roomNumber === a.currentRoom);
+              if (!room || (!room.xPosition && !room.yPosition)) return null;
+              const isAssigned = a.status === "assigned";
+              const isHovered = hoveredMapAssistant === a.id;
+              return (
+                <div
+                  key={a.id}
+                  className="absolute"
+                  style={{ left: `${room.xPosition}%`, top: `${room.yPosition}%`, transform: "translate(-50%, -50%)", zIndex: isHovered ? 50 : 10 }}
+                  onMouseEnter={(e) => { e.stopPropagation(); setHoveredMapAssistant(a.id); }}
+                  onMouseLeave={() => setHoveredMapAssistant(null)}
+                  onMouseDown={(e) => e.stopPropagation()}
+                >
+                  {isAssigned ? (
+                    /* 蓝色脉冲点 — 待就位 */
+                    <div className="relative w-8 h-8 flex items-center justify-center">
+                      <div className="absolute inset-0 rounded-full bg-blue-500/30 animate-ping" />
+                      <div className="absolute inset-1 rounded-full bg-blue-500/20 animate-pulse" />
+                      <div className="w-3 h-3 rounded-full bg-blue-500 relative z-10" />
+                    </div>
+                  ) : (
+                    /* 头像 + 状态环 — 进行中 */
+                    <div className="relative w-10 h-10">
+                      <div className="w-full h-full rounded-full overflow-hidden border-[2.5px] border-orange-500 shadow-md">
+                        {a.avatar ? (
+                          <img src={a.avatar} alt={a.name} className="w-full h-full object-cover" />
+                        ) : (
+                          <div className="w-full h-full bg-gradient-to-br from-orange-200 to-orange-400 flex items-center justify-center text-white text-xs font-bold">{a.name[0]}</div>
+                        )}
+                      </div>
+                      <div className="absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full bg-orange-500 border-2 border-white" />
+                    </div>
+                  )}
+                  {/* Tooltip */}
+                  {isHovered && (
+                    <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 pointer-events-none whitespace-nowrap z-50">
+                      <div className="px-3 py-2 rounded-xl bg-white/95 backdrop-blur-xl shadow-lg border border-gray-100 text-center">
+                        {isAssigned ? (
+                          <>
+                            <p className="text-xs font-semibold text-blue-600">{a.name} · 待就位</p>
+                            <p className="text-[10px] text-[--text-muted] mt-0.5">{a.currentTask || `前往${a.currentRoom}室`}</p>
+                          </>
+                        ) : (
+                          <>
+                            <p className="text-xs font-semibold text-orange-600">{a.name} · 进行中</p>
+                            <p className="text-[10px] text-[--text-muted] mt-0.5">{a.currentTask || "执行任务中"}</p>
+                          </>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
           </div>
         ) : (
           <div className="w-full h-full flex items-center justify-center text-[--text-muted] text-sm">
@@ -630,7 +757,95 @@ export default function PhotographerPage() {
             </div>
           </div>
 
-          {/* 面板2：快捷预约 */}
+          {/* 面板2：快捷预约（摄影师） / 当前任务状态（助理） */}
+          {profile?.role === "assistant" ? (
+            <div className={`rounded-2xl px-4 py-3.5 flex-1 min-h-0 flex flex-col ${glass}`}>
+              <h3 className="text-[12px] font-bold text-[--text-primary] tracking-wide mb-2.5">当前任务状态</h3>
+              <div className="flex-1 min-h-0 flex flex-col items-center justify-center">
+                {(() => {
+                  // 无任务 → 空闲
+                  if (!currentRawTask) {
+                    return (
+                      <div className="w-full flex-1 rounded-xl bg-green-400/20 flex flex-col items-center justify-center gap-3">
+                        <div className="w-16 h-16 rounded-full bg-green-500/20 flex items-center justify-center">
+                          <div className="w-8 h-8 rounded-full bg-green-500" />
+                        </div>
+                        <span className="text-[32px] font-extrabold text-green-600">空闲</span>
+                        <span className="text-[11px] text-green-600/70">等待系统派发任务</span>
+                      </div>
+                    );
+                  }
+                  // 已分配但未开始 → 待就位
+                  if (currentRawTask.status === "waiting") {
+                    const PRIORITY_DUR: Record<number, string> = { 1: "1-5分钟", 2: "5-20分钟", 3: "30分钟以内", 4: "30分钟以上" };
+                    return (
+                      <button
+                        onClick={() => handleAssistantStatusChange("start")}
+                        className="w-full flex-1 rounded-xl bg-blue-400/20 hover:bg-blue-400/30 flex flex-col items-center justify-center gap-3 cursor-pointer transition-colors active:scale-[0.98]"
+                      >
+                        <div className="w-16 h-16 rounded-full bg-blue-500/20 flex items-center justify-center">
+                          <div className="w-8 h-8 rounded-full bg-blue-500" />
+                        </div>
+                        <span className="text-[25px] font-extrabold text-blue-600">点击开始任务</span>
+                        <div className="text-[13px] text-blue-600/70 text-center space-y-1">
+                          <p className="flex items-center justify-center gap-1">
+                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z" /><circle cx="12" cy="10" r="3" /></svg>
+                            {currentRawTask.roomNumber}室 · {currentRawTask.photographer.name}
+                          </p>
+                          <p>{currentRawTask.category.name} · {PRIORITY_DUR[currentRawTask.priority] || ""} · 待就位</p>
+                        </div>
+                      </button>
+                    );
+                  }
+                  // 进行中 → 根据 isLocked 判断颜色
+                  if (currentRawTask.status === "executing") {
+                    const isLocked = currentRawTask.isLocked;
+                    const bgCls = isLocked ? "bg-red-400/20 hover:bg-red-400/30" : "bg-orange-400/20 hover:bg-orange-400/30";
+                    const dotBg = isLocked ? "bg-red-500/20" : "bg-orange-500/20";
+                    const dotColor = isLocked ? "bg-red-500" : "bg-orange-500";
+                    const textColor = isLocked ? "text-red-600" : "text-orange-600";
+                    const subColor = isLocked ? "text-red-600/70" : "text-orange-600/70";
+                    const barFrom = isLocked ? "from-red-400" : "from-orange-400";
+                    const barTo = isLocked ? "to-red-500" : "to-orange-500";
+                    const label = isLocked ? "进行中（不可中断）" : "进行中";
+                    const elapsedMs = currentRawTask.startedAt
+                      ? now.getTime() - new Date(currentRawTask.startedAt).getTime()
+                      : 0;
+                    const elapsedMin = Math.floor(elapsedMs / 60000);
+                    const elapsedSec = Math.floor((elapsedMs % 60000) / 1000);
+                    return (
+                      <button
+                        onClick={() => handleAssistantStatusChange("complete")}
+                        className={`w-full flex-1 rounded-xl ${bgCls} flex flex-col items-center justify-center gap-3 cursor-pointer transition-colors active:scale-[0.98] relative overflow-hidden`}
+                      >
+                        <div className={`w-16 h-16 rounded-full ${dotBg} flex items-center justify-center`}>
+                          <div className={`w-8 h-8 rounded-full ${dotColor} animate-pulse`} />
+                        </div>
+                        <span className={`text-[25px] font-extrabold ${textColor}`}>点击完成任务</span>
+                        <div className={`text-[13px] ${subColor} text-center space-y-1`}>
+                          <p className="flex items-center justify-center gap-1">
+                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z" /><circle cx="12" cy="10" r="3" /></svg>
+                            {currentRawTask.roomNumber}室 · {currentRawTask.photographer.name}
+                          </p>
+                          <p>{currentRawTask.category.name} · 进行中{elapsedMin}分{elapsedSec.toString().padStart(2, "0")}秒</p>
+                        </div>
+                        {/* 底部循环颜色条动效 */}
+                        <div className="absolute bottom-0 left-0 right-0 h-1 overflow-hidden">
+                          <div className={`h-full w-[200%] bg-gradient-to-r ${barFrom} ${barTo} ${barFrom} animate-[shimmer_2s_linear_infinite]`} />
+                        </div>
+                      </button>
+                    );
+                  }
+                  // 其他状态 fallback
+                  return (
+                    <div className="w-full flex-1 rounded-xl bg-gray-400/10 flex flex-col items-center justify-center gap-2">
+                      <span className="text-[28px] font-extrabold text-gray-400">{currentRawTask.status}</span>
+                    </div>
+                  );
+                })()}
+              </div>
+            </div>
+          ) : (
           <div className={`rounded-2xl px-4 py-3.5 flex-1 min-h-0 flex flex-col ${glass}`}>
             <h3 className="text-[12px] font-bold text-[--text-primary] tracking-wide mb-2.5">快捷预约</h3>
             <div className="flex-1 min-h-0 flex flex-col gap-1.5 relative">
@@ -694,6 +909,7 @@ export default function PhotographerPage() {
               })}
             </div>
           </div>
+          )}
 
           {/* 面板3：我的任务 */}
           <div className={`rounded-2xl px-4 py-3.5 flex-1 min-h-0 flex flex-col overflow-hidden ${glass}`}>
@@ -731,7 +947,7 @@ export default function PhotographerPage() {
                       <div className="flex items-center justify-between">
                         <span className="text-[12px] font-medium text-[--text-primary]">
                           {task.name}
-                          {task.assistantName && <span className="text-[10px] text-[--text-muted] font-normal ml-1.5">{task.assistantName}</span>}
+                          <span className="text-[10px] text-[--text-muted] font-normal ml-1.5">{task.timePeriod}</span>
                         </span>
                         <span
                           className={`text-[8px] font-bold px-1.5 py-0.5 rounded transition-all duration-150 ${
@@ -751,9 +967,16 @@ export default function PhotographerPage() {
                           {showCancel ? "取消" : task.statusLabel}
                         </span>
                       </div>
-                      <p className="text-[10px] text-[--text-muted] mt-0.5">
-                        {task.room}室 · {task.time}
-                      </p>
+                      <div className="flex items-center justify-between mt-0.5">
+                        <span className="text-[10px] text-[--text-muted]">
+                          {task.room}室
+                          {profile?.role === "assistant"
+                            ? task.photographerName ? ` · ${task.photographerName}` : ""
+                            : task.assistantName ? ` · ${task.assistantName}` : ""
+                          }
+                        </span>
+                        {task.actualTime && <span className="text-[10px] text-[--text-muted]">{task.actualTime}</span>}
+                      </div>
                       {task.progress != null && (
                         <div className="mt-1 h-0.5 rounded-full bg-black/[0.04] overflow-hidden">
                           <div className="h-full rounded-full bg-gradient-to-r from-orange-400 to-orange-500" style={{ width: `${task.progress}%` }} />
@@ -786,14 +1009,25 @@ export default function PhotographerPage() {
           </div>
         </div>
 
-        {/* 右上：后台身份管理入口 */}
-        <a href="/admin" className={`absolute top-3 right-3 z-20 rounded-xl px-3 py-2 flex items-center gap-2 cursor-pointer hover:bg-white/70 transition-colors ${glass}`}>
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--text-secondary)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z" />
-            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z" />
-          </svg>
-          <span className="text-xs font-medium text-[--text-secondary]">后台管理</span>
-        </a>
+        {/* 右上：身份切换 + 后台管理 */}
+        <div className="absolute top-3 right-3 z-20 flex items-center gap-2">
+          <button
+            onClick={() => setShowIdentityModal(true)}
+            className={`rounded-xl px-3 py-2 flex items-center gap-2 cursor-pointer hover:bg-white/70 transition-colors ${glass}`}
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--text-secondary)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" /><circle cx="8.5" cy="7" r="4" /><line x1="20" y1="8" x2="20" y2="14" /><line x1="23" y1="11" x2="17" y2="11" />
+            </svg>
+            <span className="text-xs font-medium text-[--text-secondary]">切换身份</span>
+          </button>
+          <a href="/admin" className={`rounded-xl px-3 py-2 flex items-center gap-2 cursor-pointer hover:bg-white/70 transition-colors ${glass}`}>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--text-secondary)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z" />
+              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z" />
+            </svg>
+            <span className="text-xs font-medium text-[--text-secondary]">后台管理</span>
+          </a>
+        </div>
 
         {/* 底部：图例 — 居中于任务面板右侧与助理列表左侧之间 */}
         <div className={`absolute bottom-5 z-20 flex justify-center ${resolvedTheme === "dark" ? "" : ""}`}
@@ -901,6 +1135,82 @@ export default function PhotographerPage() {
         />
       )}
 
+      {/* ====== IDENTITY SWITCH MODAL ====== */}
+      {showIdentityModal && (
+        <div
+          className="fixed inset-0 z-[80] bg-black/30 backdrop-blur-sm flex items-center justify-center"
+          onClick={() => setShowIdentityModal(false)}
+        >
+          <div
+            className="bg-white/95 backdrop-blur-2xl rounded-2xl shadow-2xl w-[520px] max-h-[80vh] overflow-hidden flex flex-col"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between px-5 pt-5 pb-3">
+              <h2 className="text-base font-bold text-[--text-primary]">切换身份</h2>
+              <button
+                onClick={() => setShowIdentityModal(false)}
+                className="w-7 h-7 rounded-lg hover:bg-black/5 flex items-center justify-center transition-colors"
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+                  <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+                </svg>
+              </button>
+            </div>
+            <div className="px-5 pb-2">
+              <p className="text-[11px] text-[--text-muted]">选择一个身份查看对应视角的页面，当前：<span className="font-medium text-[--text-primary]">{profile?.name}</span></p>
+            </div>
+            <div className="flex-1 overflow-y-auto px-5 pb-5">
+              {(["photographer", "assistant", "leader"] as const).map((role) => {
+                const roleLabel = role === "photographer" ? "摄影师" : role === "assistant" ? "助理" : "组长";
+                const roleColor = role === "photographer" ? "text-orange-600" : role === "assistant" ? "text-green-600" : "text-blue-600";
+                const roleBg = role === "photographer" ? "bg-orange-50" : role === "assistant" ? "bg-green-50" : "bg-blue-50";
+                const roleProfiles = allProfiles.filter((p) => p.role === role);
+                if (roleProfiles.length === 0) return null;
+                return (
+                  <div key={role} className="mb-4">
+                    <div className="flex items-center gap-2 mb-2">
+                      <span className={`text-[10px] font-bold px-2 py-0.5 rounded ${roleBg} ${roleColor}`}>{roleLabel}</span>
+                      <span className="text-[10px] text-[--text-muted]">{roleProfiles.length}人</span>
+                    </div>
+                    <div className="grid grid-cols-2 gap-1.5">
+                      {roleProfiles.map((p) => {
+                        const isCurrent = p.id === profile?.id;
+                        return (
+                          <button
+                            key={p.id}
+                            onClick={() => !isCurrent && switchIdentity(p)}
+                            className={`flex items-center gap-2.5 px-3 py-2 rounded-xl text-left transition-all ${
+                              isCurrent
+                                ? "bg-orange-50 border border-orange-200 cursor-default"
+                                : "hover:bg-gray-50 border border-transparent cursor-pointer"
+                            }`}
+                          >
+                            <div className="w-8 h-8 rounded-full overflow-hidden flex-shrink-0 bg-gradient-to-br from-gray-200 to-gray-300 flex items-center justify-center">
+                              {p.avatar ? (
+                                <img src={p.avatar} alt={p.name} className="w-full h-full object-cover" />
+                              ) : (
+                                <span className="text-white text-xs font-bold">{p.name[0]}</span>
+                              )}
+                            </div>
+                            <div className="min-w-0 flex-1">
+                              <p className="text-xs font-medium text-[--text-primary] truncate">
+                                {p.name}
+                                {isCurrent && <span className="text-[9px] text-orange-500 ml-1">当前</span>}
+                              </p>
+                              <p className="text-[10px] text-[--text-muted] truncate">{p.building.name}{p.employeeId ? ` · ${p.employeeId}` : ""}</p>
+                            </div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* ====== STATS MODAL ====== */}
       {showStatsModal && (
         <div
@@ -953,17 +1263,34 @@ export default function PhotographerPage() {
             {(() => {
               // 任务类型占比 — 从真实 tasks 计算
               const TYPE_COLORS: Record<string, string> = {
-                "手持": "bg-red-400", "穿戴对角度": "bg-orange-400", "手工DIY": "bg-amber-400",
-                "熨烫": "bg-emerald-400", "其他": "bg-blue-400", "服装穿戴": "bg-orange-400",
+                "短时手持": "bg-red-400", "手持": "bg-red-400",
+                "服装穿戴": "bg-orange-400", "穿戴对角度": "bg-orange-400",
+                "手工DIY协助": "bg-amber-400", "手工DIY制作": "bg-amber-400", "手工DIY": "bg-amber-400",
+                "短时熨烫": "bg-emerald-400", "长时熨烫": "bg-emerald-400", "熨烫": "bg-emerald-400",
+                "其他长时任务": "bg-blue-400", "其他": "bg-blue-400",
+              };
+              // 归类到5大预约类型
+              const CATEGORY_GROUP: Record<string, string> = {
+                "短时手持": "手持", "手持": "手持",
+                "服装穿戴": "服装穿戴", "穿戴对角度": "服装穿戴",
+                "手工DIY协助": "手工DIY", "手工DIY制作": "手工DIY", "手工DIY": "手工DIY",
+                "短时熨烫": "熨烫", "长时熨烫": "熨烫", "熨烫": "熨烫",
+                "其他长时任务": "其他", "其他": "其他",
+              };
+              const GROUP_COLORS: Record<string, string> = {
+                "手持": "bg-red-400", "服装穿戴": "bg-orange-400",
+                "手工DIY": "bg-amber-400", "熨烫": "bg-emerald-400", "其他": "bg-blue-400",
               };
               const typeCounts: Record<string, number> = {};
               for (const t of tasks) {
-                typeCounts[t.name] = (typeCounts[t.name] || 0) + 1;
+                const group = CATEGORY_GROUP[t.name] || "其他";
+                typeCounts[group] = (typeCounts[group] || 0) + 1;
               }
               const total = tasks.length || 1;
-              const typeBreakdown = Object.entries(typeCounts)
-                .map(([name, count]) => ({ name, count, pct: Math.round((count / total) * 100), color: TYPE_COLORS[name] || "bg-gray-400" }))
-                .sort((a, b) => b.count - a.count);
+              const typeOrder = ["手持", "服装穿戴", "手工DIY", "熨烫", "其他"];
+              const typeBreakdown = typeOrder
+                .filter((name) => typeCounts[name])
+                .map((name) => ({ name, count: typeCounts[name], pct: Math.round((typeCounts[name] / total) * 100), color: GROUP_COLORS[name] }));
 
               return (
                 <div className="grid grid-cols-2 gap-3 mb-4">
@@ -1016,7 +1343,7 @@ export default function PhotographerPage() {
                 <span className="w-[20%]">类型</span>
                 <span className="w-[12%]">房间</span>
                 <span className="w-[23%]">时间信息</span>
-                <span className="w-[20%]">助理</span>
+                <span className="w-[20%]">{profile?.role === "assistant" ? "摄影师" : "助理"}</span>
                 <span className="w-[13%]">用时</span>
                 <span className="w-[12%]">状态</span>
               </div>
@@ -1028,7 +1355,7 @@ export default function PhotographerPage() {
                     <span className="w-[20%] font-medium text-[--text-primary]">{t.name}</span>
                     <span className="w-[12%] text-[--text-muted]">{t.room}室</span>
                     <span className="w-[23%] text-[--text-muted]">{t.time}</span>
-                    <span className="w-[20%] text-[--text-muted]">{t.assistantName || "—"}</span>
+                    <span className="w-[20%] text-[--text-muted]">{profile?.role === "assistant" ? (t.photographerName || "—") : (t.assistantName || "—")}</span>
                     <span className="w-[13%] text-[--text-muted]">{t.statusLabel === "已完成" ? t.time : "—"}</span>
                     <span className={`text-[8px] font-bold px-1.5 py-0.5 rounded ${t.tagCls}`}>{t.statusLabel}</span>
                   </div>

@@ -118,6 +118,12 @@ body {
 .task-scroll::-webkit-scrollbar-thumb:hover { background: rgba(0,0,0,0.25); }
 .task-scroll { scrollbar-width: thin; scrollbar-color: rgba(0,0,0,0.12) transparent; overflow-x: hidden; }
 
+/* Shimmer bar animation */
+@keyframes shimmer {
+  0% { transform: translateX(0); }
+  100% { transform: translateX(-50%); }
+}
+
 /* Genie effect — new task entry animation */
 @keyframes task-genie-enter {
   0% {
