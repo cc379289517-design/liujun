@@ -49,11 +49,17 @@ const STATUS_STYLE: Record<string, { statusLabel: string; statusCls: string; tag
   paused:    { statusLabel: "已暂停", statusCls: "bg-white/25 border-yellow-200/40", tagCls: "bg-yellow-100/60 text-yellow-600", hasProgress: false },
 };
 
+// 任务状态排序权重：待就位 → 等待中 → 进行中 → 已完成 → 已取消/其他
+const STATUS_ORDER: Record<string, number> = { "待就位": 0, "等待中": 1, "进行中": 2, "已完成": 3, "已取消": 4, "已暂停": 5 };
+function sortTasksByStatus(tasks: DisplayTask[]): DisplayTask[] {
+  return [...tasks].sort((a, b) => (STATUS_ORDER[a.statusLabel] ?? 99) - (STATUS_ORDER[b.statusLabel] ?? 99));
+}
+
 function apiTaskToDisplay(t: TaskFromAPI): DisplayTask {
   // 已分配助理但未开始 → 待就位
   const effectiveStatus = (t.status === "waiting" && t.assistantId) ? "assigned" : t.status;
   const style = STATUS_STYLE[effectiveStatus] || STATUS_STYLE.waiting;
-  const PRIORITY_LABEL: Record<number, string> = { 1: "1-5分钟", 2: "5-20分钟", 3: "30分钟以内", 4: "30分钟以上" };
+  const PRIORITY_LABEL: Record<number, string> = { 1: "1-5分钟", 2: "5-20分钟", 3: "30分钟以内", 4: "30-60分钟", 5: "1小时以上" };
   const timePeriod = PRIORITY_LABEL[t.priority] || t.category.name;
   let time = "";
   let actualTime = "";
@@ -108,7 +114,8 @@ const categories = [
       { label: "1-5分钟", priority: "P1", cls: "bg-red-500 text-white", categoryId: 1 },
       { label: "5-20分钟", priority: "P2", cls: "bg-orange-500 text-white", categoryId: 1 },
       { label: "30分钟以内", priority: "P3", cls: "bg-amber-500 text-white", categoryId: 1 },
-      { label: "30分钟以上", priority: "P4", cls: "bg-blue-500 text-white", categoryId: 1 },
+      { label: "30-60分钟", priority: "P4", cls: "bg-blue-500 text-white", categoryId: 1 },
+      { label: "1小时以上", priority: "P5", cls: "bg-gray-500 text-white", categoryId: 1 },
     ],
   },
   {
@@ -120,7 +127,8 @@ const categories = [
       { label: "1-5分钟", priority: "P1", cls: "bg-red-500 text-white", categoryId: 2 },
       { label: "5-20分钟", priority: "P2", cls: "bg-orange-500 text-white", categoryId: 2 },
       { label: "30分钟以内", priority: "P3", cls: "bg-amber-500 text-white", categoryId: 2 },
-      { label: "30分钟以上", priority: "P4", cls: "bg-blue-500 text-white", categoryId: 2 },
+      { label: "30-60分钟", priority: "P4", cls: "bg-blue-500 text-white", categoryId: 2 },
+      { label: "1小时以上", priority: "P5", cls: "bg-gray-500 text-white", categoryId: 2 },
     ],
   },
   {
@@ -130,7 +138,8 @@ const categories = [
     text: "text-amber-700", darkText: "text-amber-300",
     durations: [
       { label: "30分钟以内", priority: "P3", cls: "bg-amber-500 text-white", categoryId: 3 },
-      { label: "30分钟以上", priority: "P4", cls: "bg-blue-500 text-white", categoryId: 6 },
+      { label: "30-60分钟", priority: "P4", cls: "bg-blue-500 text-white", categoryId: 6 },
+      { label: "1小时以上", priority: "P5", cls: "bg-gray-500 text-white", categoryId: 6 },
     ],
   },
   {
@@ -141,7 +150,8 @@ const categories = [
     durations: [
       { label: "5-15分钟", priority: "P2", cls: "bg-orange-500 text-white", categoryId: 4 },
       { label: "15-30分钟", priority: "P3", cls: "bg-amber-500 text-white", categoryId: 4 },
-      { label: "30分钟以上", priority: "P4", cls: "bg-blue-500 text-white", categoryId: 5 },
+      { label: "30-60分钟", priority: "P4", cls: "bg-blue-500 text-white", categoryId: 5 },
+      { label: "1小时以上", priority: "P5", cls: "bg-gray-500 text-white", categoryId: 5 },
     ],
   },
   {
@@ -153,7 +163,8 @@ const categories = [
       { label: "1-5分钟", priority: "P1", cls: "bg-red-500 text-white", categoryId: 7 },
       { label: "5-20分钟", priority: "P2", cls: "bg-orange-500 text-white", categoryId: 7 },
       { label: "30分钟以内", priority: "P3", cls: "bg-amber-500 text-white", categoryId: 7 },
-      { label: "30分钟以上", priority: "P4", cls: "bg-blue-500 text-white", categoryId: 7 },
+      { label: "30-60分钟", priority: "P4", cls: "bg-blue-500 text-white", categoryId: 7 },
+      { label: "1小时以上", priority: "P5", cls: "bg-gray-500 text-white", categoryId: 7 },
     ],
   },
 ];
@@ -201,19 +212,37 @@ export default function PhotographerPage() {
   // Map pan & zoom state
   const mapContainerRef = useRef<HTMLDivElement>(null);
   const mapInnerRef = useRef<HTMLDivElement>(null);
-  const MAP_MIN_ZOOM = 1;
+  const MAP_BASE_MIN_ZOOM = 1;
   const MAP_MAX_ZOOM = 5;
   const MAP_ZOOM_STEP = 0.15;
-  const [mapZoom, setMapZoom] = useState(MAP_MIN_ZOOM);
+  // Dynamic minimum zoom that covers the container fully (object-fit:cover style)
+  const [mapCoverZoom, setMapCoverZoom] = useState(MAP_BASE_MIN_ZOOM);
+  const [mapZoom, setMapZoom] = useState(MAP_BASE_MIN_ZOOM);
   const [mapPan, setMapPan] = useState({ x: 0, y: 0 });
   const [mapPanning, setMapPanning] = useState<{
     startX: number; startY: number; origPanX: number; origPanY: number;
   } | null>(null);
 
   const clampMapZoom = useCallback(
-    (z: number) => Math.min(MAP_MAX_ZOOM, Math.max(MAP_MIN_ZOOM, Math.round(z * 100) / 100)),
-    []
+    (z: number) => Math.min(MAP_MAX_ZOOM, Math.max(mapCoverZoom, Math.round(z * 100) / 100)),
+    [mapCoverZoom]
   );
+
+  // Calculate cover zoom: minimum zoom so the image fills the container with no white edges
+  const computeCoverZoom = useCallback(() => {
+    const container = mapContainerRef.current;
+    const inner = mapInnerRef.current;
+    if (!container || !inner) return MAP_BASE_MIN_ZOOM;
+    const img = inner.querySelector("img");
+    if (!img || !img.naturalWidth || !img.naturalHeight) return MAP_BASE_MIN_ZOOM;
+    const cw = container.clientWidth;
+    const ch = container.clientHeight;
+    // At zoom=1 the image is w-full, so displayed size = cw x (cw * naturalH/naturalW)
+    const displayedH = cw * (img.naturalHeight / img.naturalWidth);
+    // Cover zoom = max ratio needed so both dimensions fill the container
+    const cover = Math.max(1, ch / displayedH);
+    return Math.round(cover * 100) / 100;
+  }, []);
 
   const clampMapPan = useCallback(
     (px: number, py: number, z: number) => {
@@ -233,14 +262,38 @@ export default function PhotographerPage() {
   );
 
   const resetMapView = useCallback(() => {
-    setMapZoom(MAP_MIN_ZOOM);
-    setMapPan(clampMapPan(0, 0, MAP_MIN_ZOOM));
-  }, [clampMapPan]);
+    const z = computeCoverZoom();
+    setMapCoverZoom(z);
+    setMapZoom(z);
+    setMapPan(clampMapPan(0, 0, z));
+  }, [clampMapPan, computeCoverZoom]);
+
+  // Handle floor plan image load — recalculate cover zoom
+  const handleFloorPlanLoad = useCallback(() => {
+    const z = computeCoverZoom();
+    setMapCoverZoom(z);
+    setMapZoom(z);
+    setMapPan(clampMapPan(0, 0, z));
+  }, [clampMapPan, computeCoverZoom]);
+
+  // Recalculate cover zoom on window resize
+  useEffect(() => {
+    const onResize = () => {
+      const z = computeCoverZoom();
+      setMapCoverZoom(z);
+      setMapZoom((prev) => Math.max(z, prev));
+      setMapPan((prev) => clampMapPan(prev.x, prev.y, Math.max(z, mapZoom)));
+    };
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, [computeCoverZoom, clampMapPan, mapZoom]);
 
   // Reset view when switching buildings
   useEffect(() => {
-    resetMapView();
-  }, [activeBuildingId, resetMapView]);
+    setMapCoverZoom(MAP_BASE_MIN_ZOOM);
+    setMapZoom(MAP_BASE_MIN_ZOOM);
+    setMapPan({ x: 0, y: 0 });
+  }, [activeBuildingId]);
 
   // Fetch assistants + their active tasks for the active building
   const refreshAssistants = useCallback(() => {
@@ -252,7 +305,7 @@ export default function PhotographerPage() {
       const profiles = Array.isArray(profilesData) ? profilesData : [];
       const allTasks = Array.isArray(tasksData) ? tasksData : [];
       // Build a map: assistantId -> current task description
-      const PRIORITY_DUR: Record<number, string> = { 1: "1-5分钟", 2: "5-20分钟", 3: "30分钟以内", 4: "30分钟以上" };
+      const PRIORITY_DUR: Record<number, string> = { 1: "1-5分钟", 2: "5-20分钟", 3: "30分钟以内", 4: "30-60分钟", 5: "1小时以上" };
       const taskMap = new Map<string, string>();
       const taskRoomMap = new Map<string, string>();
       for (const t of allTasks) {
@@ -363,8 +416,7 @@ export default function PhotographerPage() {
               .then((r) => r.json())
               .then((taskData) => {
                 if (Array.isArray(taskData)) {
-                  setTasks(taskData.map(apiTaskToDisplay));
-                  // 助理：找到当前活跃任务
+                  setTasks(sortTasksByStatus(taskData.map(apiTaskToDisplay)));
                   if (selected.role === "assistant") {
                     const active = (taskData as TaskFromAPI[]).find((t) => t.status === "executing")
                       || (taskData as TaskFromAPI[]).find((t) => t.status === "waiting" && t.assistantId);
@@ -436,7 +488,7 @@ export default function PhotographerPage() {
           const taskRes = await fetch(`/api/tasks?assistantId=${profile.id}`);
           const taskData = await taskRes.json();
           if (Array.isArray(taskData)) {
-            setTasks(taskData.map(apiTaskToDisplay));
+            setTasks(sortTasksByStatus(taskData.map(apiTaskToDisplay)));
             const active = (taskData as TaskFromAPI[]).find((t) => t.status === "executing")
               || (taskData as TaskFromAPI[]).find((t) => t.status === "waiting" && t.assistantId);
             setCurrentRawTask(active || null);
@@ -484,7 +536,7 @@ export default function PhotographerPage() {
         const categoryId = genie.categoryId;
         const tempId = `temp-${Date.now()}`;
         // Optimistic local insert
-        setTasks((prev) => [
+        setTasks((prev) => sortTasksByStatus([
           {
             id: tempId,
             name: genie.catName,
@@ -501,7 +553,7 @@ export default function PhotographerPage() {
             photographerName: profile?.name || null,
           },
           ...prev,
-        ]);
+        ]));
         setEnteringTaskId(tempId);
         setGenie(null);
         taskListRef.current?.scrollTo({ top: 0, behavior: "smooth" });
@@ -516,7 +568,7 @@ export default function PhotographerPage() {
             });
             if (res.ok) {
               const saved = await res.json();
-              setTasks((prev) => prev.map((t) => t.id === tempId ? apiTaskToDisplay(saved) : t));
+              setTasks((prev) => sortTasksByStatus(prev.map((t) => t.id === tempId ? apiTaskToDisplay(saved) : t)));
               refreshAssistants();
             }
           } catch (e) {
@@ -555,6 +607,7 @@ export default function PhotographerPage() {
               className="block w-full h-auto transition-[filter] duration-700"
               draggable={false}
               style={{ filter: `brightness(var(--map-brightness))` }}
+              onLoad={handleFloorPlanLoad}
             />
             {/* 助理地图标记 */}
             {assistants.filter((a) => a.currentRoom && (a.status === "assigned" || a.status === "executing")).map((a) => {
@@ -566,29 +619,35 @@ export default function PhotographerPage() {
                 <div
                   key={a.id}
                   className="absolute"
-                  style={{ left: `${room.xPosition}%`, top: `${room.yPosition}%`, transform: "translate(-50%, -50%)", zIndex: isHovered ? 50 : 10 }}
+                  style={{
+                    left: `${room.xPosition}%`,
+                    top: `${room.yPosition}%`,
+                    transform: `translate(-50%, -50%) scale(${isHovered ? 1.35 : 1})`,
+                    zIndex: isHovered ? 50 : 10,
+                    transition: "transform .3s cubic-bezier(.34,1.56,.64,1)",
+                  }}
                   onMouseEnter={(e) => { e.stopPropagation(); setHoveredMapAssistant(a.id); }}
                   onMouseLeave={() => setHoveredMapAssistant(null)}
                   onMouseDown={(e) => e.stopPropagation()}
                 >
                   {isAssigned ? (
                     /* 蓝色脉冲点 — 待就位 */
-                    <div className="relative w-8 h-8 flex items-center justify-center">
+                    <div className="relative w-5 h-5 flex items-center justify-center">
                       <div className="absolute inset-0 rounded-full bg-blue-500/30 animate-ping" />
-                      <div className="absolute inset-1 rounded-full bg-blue-500/20 animate-pulse" />
-                      <div className="w-3 h-3 rounded-full bg-blue-500 relative z-10" />
+                      <div className="absolute inset-0.5 rounded-full bg-blue-500/20 animate-pulse" />
+                      <div className="w-2 h-2 rounded-full bg-blue-500 relative z-10" />
                     </div>
                   ) : (
                     /* 头像 + 状态环 — 进行中 */
-                    <div className="relative w-10 h-10">
-                      <div className="w-full h-full rounded-full overflow-hidden border-[2.5px] border-orange-500 shadow-md">
+                    <div className="relative w-[26px] h-[26px]">
+                      <div className="w-full h-full rounded-full overflow-hidden border-[2px] border-orange-500 shadow-sm">
                         {a.avatar ? (
                           <img src={a.avatar} alt={a.name} className="w-full h-full object-cover" />
                         ) : (
-                          <div className="w-full h-full bg-gradient-to-br from-orange-200 to-orange-400 flex items-center justify-center text-white text-xs font-bold">{a.name[0]}</div>
+                          <div className="w-full h-full bg-gradient-to-br from-orange-200 to-orange-400 flex items-center justify-center text-white text-[8px] font-bold">{a.name[0]}</div>
                         )}
                       </div>
-                      <div className="absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full bg-orange-500 border-2 border-white" />
+                      <div className="absolute -bottom-0.5 -right-0.5 w-2 h-2 rounded-full bg-orange-500 border border-white" />
                     </div>
                   )}
                   {/* Tooltip */}
@@ -653,11 +712,11 @@ export default function PhotographerPage() {
           <div className="relative h-28 w-7 flex items-center justify-center">
             <input
               type="range" min={0} max={100}
-              value={((mapZoom - MAP_MIN_ZOOM) / (MAP_MAX_ZOOM - MAP_MIN_ZOOM)) * 100}
+              value={((mapZoom - mapCoverZoom) / (MAP_MAX_ZOOM - mapCoverZoom)) * 100}
               onChange={(e) => {
                 const container = mapContainerRef.current;
                 if (!container) return;
-                const nz = clampMapZoom(MAP_MIN_ZOOM + (parseInt(e.target.value) / 100) * (MAP_MAX_ZOOM - MAP_MIN_ZOOM));
+                const nz = clampMapZoom(mapCoverZoom + (parseInt(e.target.value) / 100) * (MAP_MAX_ZOOM - mapCoverZoom));
                 if (nz === mapZoom) return;
                 const cx = container.clientWidth / 2, cy = container.clientHeight / 2;
                 const s = nz / mapZoom;
@@ -680,7 +739,7 @@ export default function PhotographerPage() {
               setMapZoom(nz);
               setMapPan(clampMapPan(cx - s * (cx - mapPan.x), cy - s * (cy - mapPan.y), nz));
             }}
-            disabled={mapZoom <= MAP_MIN_ZOOM}
+            disabled={mapZoom <= mapCoverZoom}
             className="w-7 h-7 rounded-lg bg-white/50 hover:bg-white/80 disabled:opacity-30 disabled:cursor-not-allowed flex items-center justify-center transition-colors"
             title="缩小"
           >
@@ -777,7 +836,7 @@ export default function PhotographerPage() {
                   }
                   // 已分配但未开始 → 待就位
                   if (currentRawTask.status === "waiting") {
-                    const PRIORITY_DUR: Record<number, string> = { 1: "1-5分钟", 2: "5-20分钟", 3: "30分钟以内", 4: "30分钟以上" };
+                    const PRIORITY_DUR: Record<number, string> = { 1: "1-5分钟", 2: "5-20分钟", 3: "30分钟以内", 4: "30-60分钟", 5: "1小时以上" };
                     return (
                       <button
                         onClick={() => handleAssistantStatusChange("start")}
