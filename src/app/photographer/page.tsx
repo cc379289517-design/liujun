@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import AssistantDock from "./AssistantDock";
 import type { DockAssistant } from "./AssistantDock";
+import { STATUS as DOCK_STATUS } from "./AssistantDock";
 
 type ThemeMode = "light" | "dark" | "auto";
 
@@ -634,19 +635,25 @@ export default function PhotographerPage() {
     ]).then(([profilesData, tasksData]) => {
       const profiles = Array.isArray(profilesData) ? profilesData : [];
       const allTasks = Array.isArray(tasksData) ? tasksData : [];
-      // Build a map: assistantId -> { desc, room, status }
-      const assistantTaskInfo = new Map<string, { desc: string; room: string; status: string }>();
+      // 按助理分组：收集该助理身上的所有活跃任务
+      const assistantTaskInfo = new Map<string, { descs: string[]; room: string; status: string }>();
       for (const t of allTasks) {
         if (t.assistantId && t.category && (t.status === "executing" || t.status === "waiting" || t.status === "paused")) {
-          let desc = `${t.category.name} · ${t.roomNumber}室 · ${PRIORITY_DUR[t.priority] || ""}`;
+          let desc = `${t.roomNumber}室 · ${t.category.name} · ${PRIORITY_DUR[t.priority] || ""}`;
           if (t.status === "executing" && t.startedAt) {
             const elapsed = Math.floor((Date.now() - new Date(t.startedAt).getTime()) / 60000);
             desc += ` · 已${elapsed}分钟`;
           }
           const effectiveStatus = t.status === "executing" ? "executing" : t.status === "waiting" ? "assigned" : "busy";
           const existing = assistantTaskInfo.get(t.assistantId);
-          if (!existing || effectiveStatus === "executing" || (effectiveStatus === "assigned" && existing.status === "busy")) {
-            assistantTaskInfo.set(t.assistantId, { desc, room: t.roomNumber, status: effectiveStatus });
+          if (existing) {
+            existing.descs.push(desc);
+            if (effectiveStatus === "executing" || (effectiveStatus === "assigned" && existing.status === "busy")) {
+              existing.status = effectiveStatus;
+              existing.room = t.roomNumber;
+            }
+          } else {
+            assistantTaskInfo.set(t.assistantId, { descs: [desc], room: t.roomNumber, status: effectiveStatus });
           }
         }
       }
@@ -655,7 +662,7 @@ export default function PhotographerPage() {
         return {
           ...p,
           status: info?.status || p.status,
-          currentTask: info?.desc || null,
+          currentTask: info?.descs.join("\n") || null,
           currentRoom: info?.room || p.currentRoom || null,
         };
       }));
@@ -665,6 +672,34 @@ export default function PhotographerPage() {
   useEffect(() => {
     refreshAssistants();
   }, [refreshAssistants]);
+
+  // 8秒轮询：用同一份任务数据同步所有视图
+  useEffect(() => {
+    if (!profile) return;
+    const poll = () => {
+      // 刷新助理数据（状态栏 + 地图标记）
+      refreshAssistants();
+      // 刷新当前用户的任务列表（复用 refreshAssistants 已请求的数据避免重复）
+      const taskParam = profile.role === "assistant" ? `assistantId=${profile.id}` : `photographerId=${profile.id}`;
+      fetch(`/api/tasks?${taskParam}&todayOnly=true`, { cache: "no-store" })
+        .then((r) => r.json())
+        .then((taskData) => {
+          if (Array.isArray(taskData)) {
+            setTasks(sortTasksByStatus(taskData.map(apiTaskToDisplay)));
+            if (profile.role === "assistant") {
+              const active = (taskData as TaskFromAPI[]).find((t) => t.status === "executing")
+                || (taskData as TaskFromAPI[]).find((t) => t.status === "waiting" && t.assistantId);
+              setCurrentRawTask(active || null);
+            }
+          }
+        })
+        .catch(console.error);
+    };
+    // 首次立即执行一次，确保初始数据同步
+    poll();
+    const timer = setInterval(poll, 8000);
+    return () => clearInterval(timer);
+  }, [profile, refreshAssistants]);
 
   // Map pan handlers
   const handleMapPanDown = useCallback(
@@ -948,11 +983,25 @@ export default function PhotographerPage() {
               onLoad={handleFloorPlanLoad}
             />
             {/* 助理地图标记 */}
-            {assistants.filter((a) => a.currentRoom && (a.status === "assigned" || a.status === "executing")).map((a) => {
+            {(() => {
+              const visible = assistants.filter((a) => a.currentRoom && (a.status === "assigned" || a.status === "executing"));
+              // 计算同房间内的索引，用于水平偏移防重叠
+              const roomCount = new Map<string, number>();
+              const roomIdx = new Map<string, number>();
+              for (const a of visible) {
+                const r = a.currentRoom!;
+                roomIdx.set(a.id, roomCount.get(r) || 0);
+                roomCount.set(r, (roomCount.get(r) || 0) + 1);
+              }
+              return visible.map((a) => {
               const room = activeBuilding.rooms.find((r) => r.roomNumber === a.currentRoom);
               if (!room || (!room.xPosition && !room.yPosition)) return null;
               const isAssigned = a.status === "assigned";
               const isHovered = hoveredMapAssistant === a.id;
+              const idx = roomIdx.get(a.id) || 0;
+              const total = roomCount.get(a.currentRoom!) || 1;
+              // 同房间多人时水平偏移：以中心为基准左右展开，间距 22px
+              const offset = total > 1 ? (idx - (total - 1) / 2) * 22 : 0;
               return (
                 <div
                   key={a.id}
@@ -960,8 +1009,8 @@ export default function PhotographerPage() {
                   style={{
                     left: `${room.xPosition}%`,
                     top: `${room.yPosition}%`,
-                    transform: `translate(-50%, -50%) scale(${isHovered ? 1.35 : 1})`,
-                    zIndex: isHovered ? 50 : 10,
+                    transform: `translate(calc(-50% + ${offset}px), -50%) scale(${isHovered ? 1.35 : 1})`,
+                    zIndex: isHovered ? 50 : 10 + idx,
                     transition: "transform .3s cubic-bezier(.34,1.56,.64,1)",
                   }}
                   onMouseEnter={(e) => { e.stopPropagation(); setHoveredMapAssistant(a.id); }}
@@ -988,19 +1037,27 @@ export default function PhotographerPage() {
                       <div className="absolute -bottom-0.5 -right-0.5 w-2 h-2 rounded-full bg-orange-500 border border-white" />
                     </div>
                   )}
-                  {/* Tooltip */}
+                  {/* Tooltip — hover 显示所有任务 */}
                   {isHovered && (
                     <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 pointer-events-none whitespace-nowrap z-50">
                       <div className="px-3 py-2 rounded-xl bg-white/95 backdrop-blur-xl shadow-lg border border-gray-100 text-center">
                         {isAssigned ? (
                           <>
                             <p className="text-xs font-semibold text-blue-600">{a.name} · 待就位</p>
-                            <p className="text-[10px] text-[--text-muted] mt-0.5">{a.currentTask || `前往${a.currentRoom}室`}</p>
+                            {a.currentTask ? a.currentTask.split("\n").map((line, i) => (
+                              <p key={i} className="text-[10px] text-[--text-muted] mt-0.5">{line}</p>
+                            )) : (
+                              <p className="text-[10px] text-[--text-muted] mt-0.5">{`前往${a.currentRoom}室`}</p>
+                            )}
                           </>
                         ) : (
                           <>
                             <p className="text-xs font-semibold text-orange-600">{a.name} · 进行中</p>
-                            <p className="text-[10px] text-[--text-muted] mt-0.5">{a.currentTask || "执行任务中"}</p>
+                            {a.currentTask ? a.currentTask.split("\n").map((line, i) => (
+                              <p key={i} className="text-[10px] text-[--text-muted] mt-0.5">{line}</p>
+                            )) : (
+                              <p className="text-[10px] text-[--text-muted] mt-0.5">执行任务中</p>
+                            )}
                           </>
                         )}
                       </div>
@@ -1008,7 +1065,8 @@ export default function PhotographerPage() {
                   )}
                 </div>
               );
-            })}
+              });
+            })()}
           </div>
         ) : (
           <div className="w-full h-full flex items-center justify-center text-[--text-muted] text-sm">
@@ -1612,12 +1670,24 @@ export default function PhotographerPage() {
                                       : "hover:bg-gray-50 border border-transparent cursor-pointer"
                                   }`}
                                 >
-                                  <div className="w-8 h-8 rounded-full overflow-hidden flex-shrink-0 bg-gradient-to-br from-gray-200 to-gray-300 flex items-center justify-center">
-                                    {p.avatar ? (
-                                      <img src={p.avatar} alt={p.name} className="w-full h-full object-cover" />
-                                    ) : (
-                                      <span className="text-white text-xs font-bold">{p.name[0]}</span>
-                                    )}
+                                  <div className="relative w-8 h-8 flex-shrink-0">
+                                    <div className="w-full h-full rounded-full overflow-hidden bg-gradient-to-br from-gray-200 to-gray-300 flex items-center justify-center">
+                                      {p.avatar ? (
+                                        <img src={p.avatar} alt={p.name} className="w-full h-full object-cover" />
+                                      ) : (
+                                        <span className="text-white text-xs font-bold">{p.name[0]}</span>
+                                      )}
+                                    </div>
+                                    {p.role === "assistant" && (() => {
+                                      const a = assistants.find((x) => x.id === p.id);
+                                      const st = a ? (DOCK_STATUS[a.status] || DOCK_STATUS.idle) : null;
+                                      return st ? (
+                                        <span
+                                          className="absolute bottom-0 right-0 rounded-full"
+                                          style={{ width: 8, height: 8, backgroundColor: st.color, boxShadow: "0 0 0 1.5px white" }}
+                                        />
+                                      ) : null;
+                                    })()}
                                   </div>
                                   <div className="min-w-0 flex-1">
                                     <p className="text-xs font-medium text-[--text-primary] truncate">

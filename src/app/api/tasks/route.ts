@@ -1,7 +1,7 @@
 import { NextRequest } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { TaskStatus } from "@/generated/prisma/client";
-import { assignTask, canInterrupt, interruptAssistant } from "@/lib/scheduler";
+import { assignTask, canInterrupt, interruptAssistant, sweepWaitingTasks, cleanupStaleTasks, syncProfileStatus } from "@/lib/scheduler";
 
 const TASK_INCLUDE = {
   photographer: { select: { id: true, name: true, currentRoom: true, buildingId: true } },
@@ -48,6 +48,12 @@ export async function GET(request: NextRequest) {
       where.createdAt = { gte: monday, lt: nextMonday };
     }
 
+    // 每日首次请求时清理过期任务
+    await cleanupStaleTasks();
+
+    // 同步助理 profile.status 与实际任务一致
+    await syncProfileStatus();
+
     const tasks = await prisma.bookingTask.findMany({
       where,
       include: TASK_INCLUDE,
@@ -93,6 +99,9 @@ export async function DELETE(request: NextRequest) {
     }
 
     const result = await prisma.bookingTask.deleteMany({ where });
+
+    // 助理释放后，扫描等待队列自动派单
+    await sweepWaitingTasks();
 
     return Response.json({ deleted: result.count });
   } catch (error) {

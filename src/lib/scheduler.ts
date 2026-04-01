@@ -68,6 +68,140 @@ export async function assignTask(taskId: string, buildingId?: number): Promise<s
 }
 
 /**
+ * 自动认领等待中的任务
+ * 助理变为 idle 时调用，按优先级从高到低找第一个未分配的等待任务并分配
+ */
+export async function autoClaimWaitingTask(assistantId: string): Promise<string | null> {
+  const assistant = await prisma.profile.findUnique({ where: { id: assistantId } });
+  if (!assistant || assistant.status !== ProfileStatus.idle || !assistant.isOnline || assistant.subStatus) return null;
+
+  // 确认该助理确实没有活跃任务
+  const existingTask = await prisma.bookingTask.findFirst({
+    where: {
+      assistantId,
+      status: { in: [TaskStatus.waiting, TaskStatus.executing, TaskStatus.paused] },
+    },
+  });
+  if (existingTask) return null;
+
+  // 查找同楼座、未分配助理的等待任务（按优先级升序、创建时间升序）
+  const waitingTask = await prisma.bookingTask.findFirst({
+    where: {
+      status: TaskStatus.waiting,
+      assistantId: null,
+      photographer: { buildingId: assistant.buildingId },
+    },
+    orderBy: [{ priority: "asc" }, { createdAt: "asc" }],
+  });
+
+  if (!waitingTask) return null;
+
+  await prisma.$transaction([
+    prisma.bookingTask.update({
+      where: { id: waitingTask.id },
+      data: { assistantId },
+    }),
+    prisma.profile.update({
+      where: { id: assistantId },
+      data: { status: ProfileStatus.assigned },
+    }),
+  ]);
+
+  console.log(`[autoClaimWaitingTask] 助理 ${assistantId} 自动认领任务 ${waitingTask.id} (P${waitingTask.priority})`);
+  return waitingTask.id;
+}
+
+/**
+ * 全局扫描：将所有空闲助理与等待中未分配的任务进行匹配
+ * 按优先级从高到低、创建时间从早到晚依次分配
+ * 使用防抖避免并发重复执行
+ * 返回本次分配的数量
+ */
+let _sweepRunning = false;
+export async function sweepWaitingTasks(): Promise<number> {
+  // 防止并发执行
+  if (_sweepRunning) return 0;
+  _sweepRunning = true;
+
+  try {
+    // 1. 查找所有空闲且可用的助理
+    const idleAssistants = await prisma.profile.findMany({
+      where: {
+        role: "assistant",
+        status: ProfileStatus.idle,
+        isOnline: true,
+        subStatus: null,
+      },
+    });
+
+    if (idleAssistants.length === 0) return 0;
+
+    // 2. 排除已有活跃任务的助理（防止重复分配）
+    const busyAssistantIds = (await prisma.bookingTask.findMany({
+      where: {
+        status: { in: [TaskStatus.waiting, TaskStatus.executing, TaskStatus.paused] },
+        assistantId: { not: null },
+      },
+      select: { assistantId: true },
+      distinct: ["assistantId"],
+    })).map((t) => t.assistantId!);
+
+    const trulyIdle = idleAssistants.filter((a) => !busyAssistantIds.includes(a.id));
+    if (trulyIdle.length === 0) return 0;
+
+    // 3. 查找等待中且未分配助理的任务
+    const waitingTasks = await prisma.bookingTask.findMany({
+      where: {
+        status: TaskStatus.waiting,
+        assistantId: null,
+      },
+      include: { photographer: { select: { buildingId: true } } },
+      orderBy: [{ priority: "asc" }, { createdAt: "asc" }],
+    });
+
+    if (waitingTasks.length === 0) return 0;
+
+    // 4. 按楼座分组空闲助理
+    const assistantsByBuilding = new Map<number, string[]>();
+    for (const a of trulyIdle) {
+      if (a.buildingId == null) continue;
+      const list = assistantsByBuilding.get(a.buildingId) || [];
+      list.push(a.id);
+      assistantsByBuilding.set(a.buildingId, list);
+    }
+
+    // 5. 按优先级顺序逐个分配
+    let assignedCount = 0;
+    for (const task of waitingTasks) {
+      const buildingId = task.photographer.buildingId;
+      if (buildingId == null) continue;
+      const available = assistantsByBuilding.get(buildingId);
+      if (!available || available.length === 0) continue;
+
+      const assistantId = available.shift()!;
+
+      await prisma.$transaction([
+        prisma.bookingTask.update({
+          where: { id: task.id },
+          data: { assistantId },
+        }),
+        prisma.profile.update({
+          where: { id: assistantId },
+          data: { status: ProfileStatus.assigned },
+        }),
+      ]);
+
+      console.log(`[sweepWaitingTasks] 助理 ${assistantId} 分配任务 ${task.id} (P${task.priority})`);
+      assignedCount++;
+    }
+
+    return assignedCount;
+  } finally {
+    _sweepRunning = false;
+  }
+}
+
+/**
  * 判断是否可以插单
  * P1 任务可以插断正在执行 P4 的未锁定助理
  */
@@ -265,5 +399,134 @@ export async function completeTask(taskId: string): Promise<void> {
         data: { status: ProfileStatus.idle },
       }),
     ]);
+
+    // 全局扫描：将所有空闲助理与等待中的任务匹配
+    await sweepWaitingTasks();
+  }
+}
+
+/**
+ * 每日自动清理：将昨天及更早的 waiting/paused 任��标记为已完成，释放助理
+ * 使用日期标记确保每天只执行一次
+ */
+let _lastCleanupDate = "";
+export async function cleanupStaleTasks(): Promise<number> {
+  const today = new Date();
+  const todayStr = `${today.getFullYear()}-${today.getMonth()}-${today.getDate()}`;
+  if (_lastCleanupDate === todayStr) return 0;
+  _lastCleanupDate = todayStr;
+
+  const startOfToday = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+
+  // 查找昨天及更早的未完成任务（waiting / paused）
+  const staleTasks = await prisma.bookingTask.findMany({
+    where: {
+      createdAt: { lt: startOfToday },
+      status: { in: [TaskStatus.waiting, TaskStatus.paused] },
+    },
+    select: { id: true, assistantId: true },
+  });
+
+  if (staleTasks.length === 0) return 0;
+
+  // 收集需要释放的助理ID
+  const assistantIds = staleTasks
+    .map((t) => t.assistantId)
+    .filter((id): id is string => id !== null);
+
+  // 批量标记为已完成
+  await prisma.bookingTask.updateMany({
+    where: {
+      id: { in: staleTasks.map((t) => t.id) },
+    },
+    data: { status: TaskStatus.completed, completedAt: startOfToday },
+  });
+
+  // 释放助理状态为 idle（仅当该助理没有今天的活跃任务时）
+  if (assistantIds.length > 0) {
+    // 找出今天仍有活跃任务的助理
+    const busyToday = (await prisma.bookingTask.findMany({
+      where: {
+        assistantId: { in: assistantIds },
+        createdAt: { gte: startOfToday },
+        status: { in: [TaskStatus.waiting, TaskStatus.executing, TaskStatus.paused] },
+      },
+      select: { assistantId: true },
+      distinct: ["assistantId"],
+    })).map((t) => t.assistantId!);
+
+    const toRelease = assistantIds.filter((id) => !busyToday.includes(id));
+    if (toRelease.length > 0) {
+      await prisma.profile.updateMany({
+        where: { id: { in: toRelease } },
+        data: { status: ProfileStatus.idle },
+      });
+    }
+  }
+
+  console.log(`[cleanupStaleTasks] 清理了 ${staleTasks.length} 条过期任务，释放了 ${assistantIds.length} 位助理`);
+  return staleTasks.length;
+}
+
+/**
+ * 同步助理 profile.status 与实际任务状态
+ * 以任务表为真实来源，修正 profile 状态不一致的情况
+ */
+let _syncRunning = false;
+export async function syncProfileStatus(): Promise<void> {
+  if (_syncRunning) return;
+  _syncRunning = true;
+
+  try {
+    const assistants = await prisma.profile.findMany({
+      where: { role: "assistant" },
+      select: { id: true, status: true },
+    });
+
+    if (assistants.length === 0) return;
+
+    // 查每个助理当前的活跃任务（不限日期，确保跨天数据也能正确反映）
+    const activeTasks = await prisma.bookingTask.findMany({
+      where: {
+        assistantId: { in: assistants.map((a) => a.id) },
+        status: { in: [TaskStatus.waiting, TaskStatus.executing, TaskStatus.paused] },
+      },
+      select: { assistantId: true, status: true },
+    });
+
+    // 按助理聚合：取最高优先状态 executing > waiting > paused
+    const taskStatusMap = new Map<string, string>();
+    for (const t of activeTasks) {
+      if (!t.assistantId) continue;
+      const cur = taskStatusMap.get(t.assistantId);
+      if (!cur || t.status === "executing" || (t.status === "waiting" && cur === "paused")) {
+        taskStatusMap.set(t.assistantId, t.status);
+      }
+    }
+
+    // 对比并修正
+    for (const a of assistants) {
+      const taskStatus = taskStatusMap.get(a.id);
+      let expectedStatus: ProfileStatus;
+
+      if (!taskStatus) {
+        expectedStatus = ProfileStatus.idle;
+      } else if (taskStatus === "executing") {
+        expectedStatus = ProfileStatus.executing;
+      } else if (taskStatus === "waiting") {
+        expectedStatus = ProfileStatus.assigned;
+      } else {
+        expectedStatus = ProfileStatus.busy;
+      }
+
+      if (a.status !== expectedStatus) {
+        await prisma.profile.update({
+          where: { id: a.id },
+          data: { status: expectedStatus },
+        });
+      }
+    }
+  } finally {
+    _syncRunning = false;
   }
 }

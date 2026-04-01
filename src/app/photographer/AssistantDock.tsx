@@ -15,7 +15,7 @@ export interface DockAssistant {
 
 const STATUS_ORDER: Record<string, number> = { idle: 0, assigned: 1, finishing: 2, busy: 3, executing: 4 };
 
-const STATUS: Record<string, { color: string; label: string }> = {
+export const STATUS: Record<string, { color: string; label: string }> = {
   idle: { color: "#22c55e", label: "空闲" },
   assigned: { color: "#3b82f6", label: "待就位" },
   finishing: { color: "#86efac", label: "快结束" },
@@ -134,7 +134,9 @@ export default function AssistantDock({ assistants }: { assistants: DockAssistan
                       {a.name}
                     </p>
                     <p className="text-[10px] text-[--text-muted] mt-0.5">
-                      {a.currentTask || (a.currentRoom ? `${a.currentRoom}室` : "—")}
+                      {a.currentTask
+                        ? a.currentTask.split("\n").map((line, i) => <span key={i}>{i > 0 && <br />}{line}</span>)
+                        : (a.currentRoom ? `${a.currentRoom}室` : "—")}
                     </p>
                   </div>
                 </div>

@@ -1,6 +1,6 @@
 import { NextRequest } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { completeTask } from "@/lib/scheduler";
+import { completeTask, autoClaimWaitingTask, assignTask, sweepWaitingTasks } from "@/lib/scheduler";
 import { TaskStatus, ProfileStatus } from "@/generated/prisma/client";
 
 type RouteContext = { params: Promise<{ id: string }> };
@@ -55,6 +55,9 @@ export async function DELETE(_request: NextRequest, { params }: RouteContext) {
     }
 
     await prisma.bookingTask.delete({ where: { id } });
+
+    // 助理释放后，扫描等待队列自动派单
+    await sweepWaitingTasks();
 
     return Response.json({ success: true });
   } catch (error) {
@@ -125,6 +128,73 @@ export async function PATCH(request: NextRequest, { params }: RouteContext) {
         return Response.json(updated);
       }
 
+      case "setStatus": {
+        const { newStatus } = body as { newStatus: string };
+        const validStatuses = ["waiting", "executing", "paused", "completed"];
+        if (!newStatus || !validStatuses.includes(newStatus)) {
+          return Response.json(
+            { error: "Invalid newStatus. Use: waiting, executing, paused, completed" },
+            { status: 400 }
+          );
+        }
+
+        // completed 走 completeTask 复用父任务恢复逻辑
+        if (newStatus === "completed") {
+          await completeTask(id);
+          const updated = await prisma.bookingTask.findUnique({ where: { id } });
+          return Response.json(updated);
+        }
+
+        // 构建更新数据
+        const setStatusData: Record<string, unknown> = {
+          status: newStatus as TaskStatus,
+        };
+
+        // 从 completed 回退时清 completedAt
+        if (task.status === "completed") {
+          setStatusData.completedAt = null;
+        }
+
+        if (newStatus === "executing") {
+          setStatusData.startedAt = new Date();
+        } else if (newStatus === "waiting") {
+          setStatusData.startedAt = null;
+        }
+
+        // 事务：更新任务 + 助理状态
+        const updated = await prisma.$transaction(async (tx) => {
+          const updatedTask = await tx.bookingTask.update({
+            where: { id },
+            data: setStatusData,
+          });
+
+          if (task.assistantId) {
+            const profileStatus =
+              newStatus === "executing"
+                ? ProfileStatus.executing
+                : newStatus === "paused"
+                  ? ProfileStatus.busy
+                  : newStatus === "waiting"
+                    ? ProfileStatus.assigned
+                    : ProfileStatus.idle;
+
+            await tx.profile.update({
+              where: { id: task.assistantId },
+              data: { status: profileStatus },
+            });
+          }
+
+          return updatedTask;
+        });
+
+        // 任务回到 waiting 且无助理时，尝试自动派单
+        if (newStatus === "waiting" && !task.assistantId) {
+          await assignTask(id);
+        }
+
+        return Response.json(updated);
+      }
+
       case "extend": {
         if (!estMinutes) {
           return Response.json(
@@ -142,7 +212,7 @@ export async function PATCH(request: NextRequest, { params }: RouteContext) {
 
       default:
         return Response.json(
-          { error: "Invalid action. Use: start, pause, complete, extend" },
+          { error: "Invalid action. Use: start, pause, complete, extend, setStatus" },
           { status: 400 }
         );
     }

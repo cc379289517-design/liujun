@@ -42,12 +42,34 @@ const TYPE_COLORS: Record<string, string> = {
   "其他长时任务": "bg-blue-400", "其他": "bg-blue-400",
 };
 
+const CATEGORY_GROUP: Record<string, string> = {
+  "短时手持": "手持", "手持": "手持",
+  "服装穿戴": "服装穿戴", "穿戴对角度": "服装穿戴",
+  "手工DIY协助": "手工DIY", "手工DIY制作": "手工DIY", "手工DIY": "手工DIY",
+  "短时熨烫": "熨烫", "长时熨烫": "熨烫", "熨烫": "熨烫",
+  "其他长时任务": "其他", "其他": "其他",
+};
+
+const STATUS_OPTIONS: { value: string; label: string }[] = [
+  { value: "waiting", label: "等待中" },
+  { value: "executing", label: "进行中" },
+  { value: "paused", label: "已暂停" },
+  { value: "completed", label: "已完成" },
+];
+
+const PRIORITY_DUR: Record<number, string> = {
+  1: "1-5分钟", 2: "5-20分钟", 3: "30分钟以内", 4: "30-60分钟", 5: "1小时以上",
+};
+
 export default function StatsTab() {
   const [tasks, setTasks] = useState<TaskFromAPI[]>([]);
   const [loading, setLoading] = useState(true);
   const [filterStatus, setFilterStatus] = useState("");
   const [filterPriority, setFilterPriority] = useState("");
   const [filterCategory, setFilterCategory] = useState("");
+  const [updatingId, setUpdatingId] = useState<string | null>(null);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [batchUpdating, setBatchUpdating] = useState(false);
 
   const fetchTasks = useCallback(async () => {
     setLoading(true);
@@ -64,6 +86,73 @@ export default function StatsTab() {
   }, []);
 
   useEffect(() => { fetchTasks(); }, [fetchTasks]);
+
+  const handleStatusChange = useCallback(async (taskId: string, newStatus: string) => {
+    setUpdatingId(taskId);
+    // 乐观更新：立即更新本地状态，避免页面跳动
+    setTasks((prev) => prev.map((t) => t.id === taskId ? { ...t, status: newStatus as TaskFromAPI["status"] } : t));
+    try {
+      const res = await fetch(`/api/tasks/${taskId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "setStatus", newStatus }),
+      });
+      if (res.ok) {
+        // 静默刷新，不触发 loading
+        const listRes = await fetch("/api/tasks");
+        if (listRes.ok) {
+          const data = await listRes.json();
+          setTasks(Array.isArray(data) ? data : []);
+        }
+      } else {
+        // 失败时回滚
+        const listRes = await fetch("/api/tasks");
+        if (listRes.ok) {
+          const data = await listRes.json();
+          setTasks(Array.isArray(data) ? data : []);
+        }
+      }
+    } catch (e) {
+      console.error("Failed to update task status", e);
+    }
+    setUpdatingId(null);
+  }, []);
+
+  const toggleSelect = useCallback((id: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }, []);
+
+  const handleBatchStatusChange = useCallback(async (newStatus: string) => {
+    if (selectedIds.size === 0) return;
+    setBatchUpdating(true);
+    const ids = [...selectedIds];
+    // 乐观更新
+    setTasks((prev) => prev.map((t) => ids.includes(t.id) ? { ...t, status: newStatus as TaskFromAPI["status"] } : t));
+    try {
+      await Promise.all(
+        ids.map((id) =>
+          fetch(`/api/tasks/${id}`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ action: "setStatus", newStatus }),
+          })
+        )
+      );
+      const listRes = await fetch("/api/tasks");
+      if (listRes.ok) {
+        const data = await listRes.json();
+        setTasks(Array.isArray(data) ? data : []);
+      }
+    } catch (e) {
+      console.error("Batch update failed", e);
+    }
+    setSelectedIds(new Set());
+    setBatchUpdating(false);
+  }, [selectedIds]);
 
   const filtered = useMemo(() => tasks.filter((t) => {
     if (filterStatus && t.status !== filterStatus) return false;
@@ -87,13 +176,6 @@ export default function StatsTab() {
       : 0;
 
     // 按类型统计（归类到5大预约类型）
-    const CATEGORY_GROUP: Record<string, string> = {
-      "短时手持": "手持", "手持": "手持",
-      "服装穿戴": "服装穿戴", "穿戴对角度": "服装穿戴",
-      "手工DIY协助": "手工DIY", "手工DIY制作": "手工DIY", "手工DIY": "手工DIY",
-      "短时熨烫": "熨烫", "长时熨烫": "熨烫", "熨烫": "熨烫",
-      "其他长时任务": "其他", "其他": "其他",
-    };
     const byCategory: Record<string, number> = {};
     for (const t of tasks) {
       const group = CATEGORY_GROUP[t.category.name] || "其他";
@@ -142,17 +224,23 @@ export default function StatsTab() {
   const formatTime = (iso: string | null) => {
     if (!iso) return "—";
     const d = new Date(iso);
-    return `${(d.getMonth() + 1).toString().padStart(2, "0")}/${d.getDate().toString().padStart(2, "0")} ${d.getHours().toString().padStart(2, "0")}:${d.getMinutes().toString().padStart(2, "0")}`;
+    return `${d.getHours().toString().padStart(2, "0")}:${d.getMinutes().toString().padStart(2, "0")}`;
   };
 
   const getDuration = (t: TaskFromAPI) => {
+    let mins = 0;
     if (t.status === "completed" && t.startedAt && t.completedAt) {
-      return `${Math.floor((new Date(t.completedAt).getTime() - new Date(t.startedAt).getTime()) / 60000)}分钟`;
+      mins = (new Date(t.completedAt).getTime() - new Date(t.startedAt).getTime()) / 60000;
+    } else if (t.status === "executing" && t.startedAt) {
+      mins = (Date.now() - new Date(t.startedAt).getTime()) / 60000;
+    } else {
+      return "—";
     }
-    if (t.status === "executing" && t.startedAt) {
-      return `已${Math.floor((Date.now() - new Date(t.startedAt).getTime()) / 60000)}分钟`;
+    const prefix = t.status === "executing" ? "已" : "";
+    if (mins >= 60) {
+      return `${prefix}${(mins / 60).toFixed(1)}小时`;
     }
-    return "—";
+    return `${prefix}${Math.floor(mins)}分钟`;
   };
 
   if (loading) {
@@ -311,7 +399,27 @@ export default function StatsTab() {
       {/* Task detail table */}
       <div className="card p-5">
         <div className="flex items-center justify-between mb-4">
-          <h3 className="text-sm font-semibold text-[--text-primary]">任务明细 ({filtered.length})</h3>
+          <div className="flex items-center gap-3">
+            <h3 className="text-sm font-semibold text-[--text-primary]">任务明细 ({filtered.length})</h3>
+            {selectedIds.size > 0 && (
+              <div className="flex items-center gap-1.5">
+                <span className="text-xs text-[--text-muted]">已选 {selectedIds.size} 项，批量改为:</span>
+                {STATUS_OPTIONS.map((o) => {
+                  const optSt = STATUS_STYLE[o.value];
+                  return (
+                    <button
+                      key={o.value}
+                      disabled={batchUpdating}
+                      onClick={() => handleBatchStatusChange(o.value)}
+                      className={`text-xs font-bold px-3 py-1 rounded-lg border border-gray-200 hover:opacity-80 transition-opacity ${optSt.cls.split(" ").find((c) => c.startsWith("text-")) || ""} ${batchUpdating ? "opacity-50 pointer-events-none" : ""}`}
+                    >
+                      {o.label}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
           <div className="flex gap-2">
             <select
               value={filterStatus}
@@ -331,7 +439,7 @@ export default function StatsTab() {
             >
               <option value="">全部优先级</option>
               <option value="1">P1 紧急</option>
-              <option value="2">P2 ��</option>
+              <option value="2">P2 高</option>
               <option value="3">P3 中</option>
               <option value="4">P4 低</option>
             </select>
@@ -353,8 +461,32 @@ export default function StatsTab() {
         </div>
 
         <div className="space-y-1">
-          <div className="grid grid-cols-9 gap-2 px-3 text-[10px] text-[--text-muted] font-medium uppercase tracking-wider">
-            <span>类型</span><span>房间</span><span>优先级</span><span>摄影师</span><span>助理</span><span>创建时间</span><span>开始时间</span><span>用时</span><span>状态</span>
+          {/* 表头：11列 = 勾选 + 优先级 房间 摄影师 助理 类型 任务时间 实际用时 创建时间 开始时间 状态 */}
+          <div className="grid gap-2 px-3 py-2.5 text-xs text-[--text-muted] font-semibold tracking-wider items-center bg-gray-50 rounded-xl" style={{ gridTemplateColumns: "28px 1fr 1fr 1fr 1fr 1fr 1fr 1fr 1fr 1fr 56px" }}>
+            <span className="flex justify-center">
+              <input
+                type="checkbox"
+                checked={filtered.length > 0 && filtered.every((t) => selectedIds.has(t.id))}
+                onChange={(e) => {
+                  if (e.target.checked) {
+                    setSelectedIds(new Set(filtered.map((t) => t.id)));
+                  } else {
+                    setSelectedIds(new Set());
+                  }
+                }}
+                className="w-3.5 h-3.5 rounded border-gray-300 accent-purple-500 cursor-pointer"
+              />
+            </span>
+            <span className="text-center">优先级</span>
+            <span className="text-center">房间</span>
+            <span className="text-center">摄影师</span>
+            <span className="text-center">助理</span>
+            <span className="text-center">类型</span>
+            <span className="text-center">任务时间</span>
+            <span className="text-center">实际用时</span>
+            <span className="text-center">创建时间</span>
+            <span className="text-center">开始时间</span>
+            <span className="text-center">状态</span>
           </div>
           {filtered.length === 0 ? (
             <div className="text-center py-8 text-[--text-muted] text-sm">暂无数据</div>
@@ -362,17 +494,47 @@ export default function StatsTab() {
             filtered.map((t) => {
               const st = STATUS_STYLE[t.status] || STATUS_STYLE.waiting;
               const pr = PRIORITY_LABEL[t.priority] || PRIORITY_LABEL[4];
+              const groupedType = CATEGORY_GROUP[t.category.name] || "其他";
               return (
-                <div key={t.id} className="grid grid-cols-9 gap-2 px-3 py-2.5 rounded-xl bg-[--bg-base] hover:bg-gray-50 transition-colors items-center">
-                  <span className="text-xs font-medium text-[--text-primary]">{t.category.name}</span>
-                  <span className="text-xs text-[--text-secondary]">{t.roomNumber}室</span>
-                  <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded w-fit ${pr.cls}`}>{pr.label}</span>
-                  <span className="text-xs text-[--text-secondary]">{t.photographer.name}</span>
-                  <span className="text-xs text-[--text-secondary]">{t.assistant?.name || "—"}</span>
-                  <span className="text-xs text-[--text-muted] tabular-nums">{formatTime(t.createdAt)}</span>
-                  <span className="text-xs text-[--text-muted] tabular-nums">{formatTime(t.startedAt)}</span>
-                  <span className="text-xs text-[--text-muted]">{getDuration(t)}</span>
-                  <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded w-fit ${st.cls}`}>{st.label}</span>
+                <div key={t.id} className="grid gap-2 px-3 py-2.5 rounded-xl bg-[--bg-base] hover:bg-gray-50 transition-colors items-center" style={{ gridTemplateColumns: "28px 1fr 1fr 1fr 1fr 1fr 1fr 1fr 1fr 1fr 56px" }}>
+                  <span className="flex justify-center">
+                    <input
+                      type="checkbox"
+                      checked={selectedIds.has(t.id)}
+                      onChange={() => toggleSelect(t.id)}
+                      className="w-3.5 h-3.5 rounded border-gray-300 accent-purple-500 cursor-pointer"
+                    />
+                  </span>
+                  <span className="flex justify-center"><span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${pr.cls}`}>{pr.label}</span></span>
+                  <span className="text-xs text-[--text-secondary] text-center">{t.roomNumber}室</span>
+                  <span className="text-xs text-[--text-secondary] text-center">{t.photographer.name}</span>
+                  <span className="text-xs text-[--text-secondary] text-center">{t.assistant?.name || "—"}</span>
+                  <span className="text-xs font-medium text-[--text-primary] text-center">{groupedType}</span>
+                  <span className="text-xs text-[--text-muted] text-center">{PRIORITY_DUR[t.priority] || "—"}</span>
+                  <span className="text-xs text-[--text-muted] text-center">{getDuration(t)}</span>
+                  <span className="text-xs text-[--text-muted] tabular-nums text-center">{formatTime(t.createdAt)}</span>
+                  <span className="text-xs text-[--text-muted] tabular-nums text-center">{formatTime(t.startedAt)}</span>
+                  <div className="relative group flex justify-center">
+                    <span className={`text-[10px] font-bold px-1 py-0.5 rounded cursor-pointer ${st.cls} ${updatingId === t.id ? "opacity-50" : ""}`}>
+                      {st.label}
+                    </span>
+                    {updatingId !== t.id && (
+                      <div className="absolute left-1/2 -translate-x-1/2 top-full mt-0.5 z-20 hidden group-hover:flex flex-col bg-white rounded-lg shadow-lg border border-gray-200 py-1 min-w-[60px]">
+                        {STATUS_OPTIONS.filter((o) => o.value !== t.status).map((o) => {
+                          const optSt = STATUS_STYLE[o.value];
+                          return (
+                            <button
+                              key={o.value}
+                              onClick={() => handleStatusChange(t.id, o.value)}
+                              className={`text-[10px] font-bold px-2 py-1 text-center hover:bg-gray-50 whitespace-nowrap ${optSt.cls.split(" ").find((c) => c.startsWith("text-")) || ""}`}
+                            >
+                              {o.label}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
                 </div>
               );
             })
