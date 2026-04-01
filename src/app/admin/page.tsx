@@ -10,7 +10,7 @@ import StatsTab from "./StatsTab";
 type TabKey = "profiles" | "spaces" | "tasks" | "approvals" | "stats";
 
 type Room = { id: number; buildingId: number; roomNumber: string; floor: number; xPosition: number; yPosition: number; fenceRadius: number };
-type Building = { id: number; name: string; floorPlanUrl: string | null; rooms: Room[] };
+type Building = { id: number; name: string; floorPlanUrl: string | null; cropX?: number | null; cropY?: number | null; cropW?: number | null; cropH?: number | null; rooms: Room[] };
 type Profile = { id: string; employeeId: string | null; name: string; avatar: string | null; role: "photographer" | "assistant" | "leader"; buildingId: number; currentRoom: string | null; status: string; onlineStatus: string; isOnline: boolean; department: string | null; group: string | null; building: { id: number; name: string } };
 type Category = { id: number; name: string; description: string | null; priorityLevel: number; minDuration: number; maxDuration: number; estDuration: number; hexColor: string; sortRank: number };
 type SystemConfigMap = Record<string, { value: string; label: string | null }>;

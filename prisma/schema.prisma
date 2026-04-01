@@ -14,6 +14,10 @@ model Building {
   id            Int      @id @default(autoincrement())
   name          String   // e.g. "1号楼"
   floorPlanUrl  String?  @map("floor_plan_url")
+  cropX         Float?   @map("crop_x")
+  cropY         Float?   @map("crop_y")
+  cropW         Float?   @map("crop_w")
+  cropH         Float?   @map("crop_h")
   rooms         Room[]
   profiles      Profile[]
   createdAt     DateTime @default(now()) @map("created_at")

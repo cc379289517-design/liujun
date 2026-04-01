@@ -25,32 +25,32 @@ async function getConfig() {
  * 自动分配最优空闲助理
  * 优先匹配同楼座、状态空闲的助理
  */
-export async function assignTask(taskId: string): Promise<string | null> {
-  const task = await prisma.bookingTask.findUnique({
-    where: { id: taskId },
-    include: { photographer: true },
-  });
+export async function assignTask(taskId: string, buildingId?: number): Promise<string | null> {
+  let effectiveBuildingId = buildingId;
 
-  if (!task) return null;
+  if (effectiveBuildingId == null) {
+    const task = await prisma.bookingTask.findUnique({
+      where: { id: taskId },
+      include: { photographer: true },
+    });
+    if (!task) return null;
+    effectiveBuildingId = task.photographer.buildingId;
+  }
 
-  // 查找空闲助理，优先同楼座
+  // 查找同楼座的空闲助理
   const availableAssistants = await prisma.profile.findMany({
     where: {
       role: "assistant",
       status: ProfileStatus.idle,
       isOnline: true,
-      subStatus: null, // 排除有微标签的（请假/不适等）
+      subStatus: null,
+      buildingId: effectiveBuildingId,
     },
-    orderBy: [{ buildingId: "asc" }],
   });
 
   if (availableAssistants.length === 0) return null;
 
-  // 优先选择同楼座的助理
-  const sameBuilding = availableAssistants.find(
-    (a) => a.buildingId === task.photographer.buildingId
-  );
-  const selected = sameBuilding ?? availableAssistants[0];
+  const selected = availableAssistants[0];
 
   // 分配任务（助理状态设为待就位，等待助理确认开始）
   await prisma.$transaction([

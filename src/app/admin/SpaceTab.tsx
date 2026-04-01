@@ -7,6 +7,10 @@ type Building = {
   id: number;
   name: string;
   floorPlanUrl: string | null;
+  cropX?: number | null;
+  cropY?: number | null;
+  cropW?: number | null;
+  cropH?: number | null;
   rooms: Room[];
 };
 
@@ -94,6 +98,19 @@ export default function SpaceTab({ buildings: buildingsProp, onRefresh }: SpaceT
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ roomId, xPosition, yPosition, fenceRadius }),
+    });
+  }
+
+  async function updateBuildingCrop(buildingId: number, crop: { cropX: number; cropY: number; cropW: number; cropH: number } | null) {
+    const data = crop || { cropX: null, cropY: null, cropW: null, cropH: null };
+    // Optimistic local update
+    setLocalBuildings((prev) =>
+      prev.map((b) => (b.id === buildingId ? { ...b, ...data } : b))
+    );
+    await fetch(`/api/buildings/${buildingId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(data),
     });
   }
 
@@ -259,6 +276,7 @@ export default function SpaceTab({ buildings: buildingsProp, onRefresh }: SpaceT
                 onRoomUpdate={(roomId, x, y, fenceRadius) =>
                   updateRoomCoords(selectedBuilding.id, roomId, x, y, fenceRadius)
                 }
+                onCropUpdate={(crop) => updateBuildingCrop(selectedBuilding.id, crop)}
               />
             </div>
 

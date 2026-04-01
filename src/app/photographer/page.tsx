@@ -39,6 +39,7 @@ type DisplayTask = {
   hasProgress: boolean;
   assistantName: string | null;
   photographerName: string | null;
+  createdAt: string;
 };
 
 const STATUS_STYLE: Record<string, { statusLabel: string; statusCls: string; tagCls: string; hasProgress: boolean }> = {
@@ -92,6 +93,7 @@ function apiTaskToDisplay(t: TaskFromAPI): DisplayTask {
     progress,
     assistantName: t.assistant?.name || null,
     photographerName: t.photographer?.name || null,
+    createdAt: t.createdAt,
     ...style,
   };
 }
@@ -169,6 +171,246 @@ const categories = [
   },
 ];
 
+const PRIORITY_DUR: Record<number, string> = { 1: "1-5分钟", 2: "5-20分钟", 3: "30分钟以内", 4: "30-60分钟", 5: "1小时以上" };
+
+/* ============ Dock-style draggable building tabs ============ */
+type DockEntry = [number, { name: string; profiles: { id: string }[] }];
+
+function DockBuildingTabs({
+  entries,
+  activeBld,
+  onSelect,
+  onReorder,
+}: {
+  entries: DockEntry[];
+  activeBld: number | null;
+  onSelect: (id: number) => void;
+  onReorder: (order: number[]) => void;
+}) {
+  const itemRefs = useRef<Map<number, HTMLButtonElement>>(new Map());
+  const [drag, setDrag] = useState<{
+    id: number;
+    startX: number;
+    currentX: number;
+    pointerId: number;
+  } | null>(null);
+  // visualOrder: the logical order items should appear in (indices into entries)
+  const [visualOrder, setVisualOrder] = useState<number[]>(() => entries.map(([id]) => id));
+  const dragRef = useRef(drag);
+  dragRef.current = drag;
+  const visualOrderRef = useRef(visualOrder);
+  visualOrderRef.current = visualOrder;
+  const suppressClickRef = useRef(false);
+  // snapshot of each item's left edge at drag start (keyed by id)
+  const startRectsRef = useRef<Map<number, { left: number; width: number }>>(new Map());
+  // whether we're in the "settling" phase right after drop
+  const [settling, setSettling] = useState(false);
+  const settleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Cleanup settle timer on unmount
+  useEffect(() => () => { if (settleTimerRef.current) clearTimeout(settleTimerRef.current); }, []);
+
+  // Sync when entries change from parent
+  useEffect(() => {
+    setVisualOrder(entries.map(([id]) => id));
+  }, [entries]);
+
+  // Snapshot positions at drag start
+  const snapshotPositions = useCallback(() => {
+    const m = new Map<number, { left: number; width: number }>();
+    for (const [id] of entries) {
+      const el = itemRefs.current.get(id);
+      if (el) {
+        const r = el.getBoundingClientRect();
+        m.set(id, { left: r.left, width: r.width });
+      }
+    }
+    startRectsRef.current = m;
+  }, [entries]);
+
+  const handlePointerDown = useCallback((e: React.PointerEvent, id: number) => {
+    const el = itemRefs.current.get(id);
+    if (!el) return;
+    el.setPointerCapture(e.pointerId);
+    snapshotPositions();
+    setDrag({ id, startX: e.clientX, currentX: e.clientX, pointerId: e.pointerId });
+    setVisualOrder(visualOrderRef.current);
+    setSettling(false);
+  }, [snapshotPositions]);
+
+  const handlePointerMove = useCallback((e: React.PointerEvent) => {
+    const d = dragRef.current;
+    if (!d) return;
+    const newX = e.clientX;
+    setDrag((prev) => prev ? { ...prev, currentX: newX } : prev);
+
+    // Where is the dragged item's center now?
+    const dragEl = itemRefs.current.get(d.id);
+    if (!dragEl) return;
+    const startRect = startRectsRef.current.get(d.id);
+    if (!startRect) return;
+    const dx = newX - d.startX;
+    const draggedCenter = startRect.left + startRect.width / 2 + dx;
+
+    // Compute new visual order based on dragged center vs other items' resting centers
+    const currentOrder = visualOrderRef.current;
+    const ids = entries.map(([id]) => id);
+
+    // Compute "resting" center for each slot in visual order
+    // We need to know: if items were laid out in visualOrder, what center would each slot have?
+    // Use the snapshot widths + gap(8px)
+    const gap = 8;
+    const slotPositions: { id: number; center: number }[] = [];
+    let x = startRectsRef.current.get(currentOrder[0])?.left ?? 0;
+    // Recalculate from the leftmost item's original position
+    const firstOrigLeft = Math.min(...Array.from(startRectsRef.current.values()).map((r) => r.left));
+    x = firstOrigLeft;
+    for (const slotId of currentOrder) {
+      const w = startRectsRef.current.get(slotId)?.width ?? 60;
+      slotPositions.push({ id: slotId, center: x + w / 2 });
+      x += w + gap;
+    }
+
+    // Remove dragged, find where to insert based on draggedCenter
+    const others = currentOrder.filter((id) => id !== d.id);
+    const otherSlots = slotPositions.filter((s) => s.id !== d.id);
+
+    let insertIdx = others.length;
+    for (let i = 0; i < otherSlots.length; i++) {
+      if (draggedCenter < otherSlots[i].center) {
+        insertIdx = i;
+        break;
+      }
+    }
+
+    const newOrder = [...others];
+    newOrder.splice(insertIdx, 0, d.id);
+
+    // Only update if changed
+    if (newOrder.some((id, i) => currentOrder[i] !== id)) {
+      setVisualOrder(newOrder);
+    }
+  }, [entries]);
+
+  const handlePointerUp = useCallback(() => {
+    const d = dragRef.current;
+    if (!d) return;
+    const wasDragged = Math.abs(d.currentX - d.startX) > 3;
+    // Start settling animation
+    setSettling(true);
+    setDrag(null);
+    // Commit order after settle animation
+    const finalOrder = [...visualOrderRef.current];
+    settleTimerRef.current = setTimeout(() => {
+      startRectsRef.current = new Map();
+      onReorder(finalOrder);
+      setSettling(false);
+    }, 320);
+    if (wasDragged) {
+      suppressClickRef.current = true;
+      setTimeout(() => { suppressClickRef.current = false; }, 100);
+    }
+  }, [onReorder]);
+
+  // Compute translateX for each item based on visual order vs DOM order
+  // DOM order = entries order (fixed), visual order = where they should appear
+  const gap = 8;
+  const entryIds = entries.map(([id]) => id);
+
+  // Build slot X positions based on visual order
+  const slotLefts: number[] = [];
+  let xAccum = 0;
+  for (const id of visualOrder) {
+    slotLefts.push(xAccum);
+    const w = startRectsRef.current.get(id)?.width ?? 0;
+    xAccum += w + gap;
+  }
+
+  // Build DOM-order X positions
+  const domLefts: number[] = [];
+  let xAccum2 = 0;
+  for (const id of entryIds) {
+    domLefts.push(xAccum2);
+    const w = startRectsRef.current.get(id)?.width ?? 0;
+    xAccum2 += w + gap;
+  }
+
+  // For each item: find its slot index in visualOrder, compute offset from its DOM position
+  const offsets = new Map<number, number>();
+  for (let domIdx = 0; domIdx < entryIds.length; domIdx++) {
+    const id = entryIds[domIdx];
+    const slotIdx = visualOrder.indexOf(id);
+    if (slotIdx !== -1 && startRectsRef.current.size > 0) {
+      offsets.set(id, slotLefts[slotIdx] - domLefts[domIdx]);
+    } else {
+      offsets.set(id, 0);
+    }
+  }
+
+  const isDragging = drag !== null;
+
+  return (
+    <div
+      className="px-5 pb-3 flex items-center gap-2 relative"
+      onPointerMove={handlePointerMove}
+      onPointerUp={handlePointerUp}
+      style={{ touchAction: "none" }}
+    >
+      {/* Render in DOM (entries) order — always fixed */}
+      {entries.map(([bId, data]) => {
+        const isThisDragging = drag?.id === bId;
+        const isActive = activeBld === bId;
+        const offset = offsets.get(bId) ?? 0;
+
+        let style: React.CSSProperties;
+        if (isThisDragging && drag) {
+          // Dragged item: follow cursor directly, no transition
+          const dx = drag.currentX - drag.startX;
+          style = {
+            transform: `translateX(${dx}px) scale(1.06)`,
+            zIndex: 50,
+            boxShadow: "0 10px 30px rgba(0,0,0,0.18), 0 2px 8px rgba(0,0,0,0.1)",
+            transition: "box-shadow 0.15s ease, transform 0s",
+            cursor: "grabbing",
+          };
+        } else if (isDragging || settling) {
+          // Other items: smooth slide to their visual slot
+          style = {
+            transform: offset ? `translateX(${offset}px)` : "none",
+            transition: "transform 0.32s cubic-bezier(.2,1,.3,1)",
+            cursor: "grab",
+            zIndex: 1,
+          };
+        } else {
+          // Idle
+          style = {
+            transform: "none",
+            transition: "none",
+            cursor: "grab",
+          };
+        }
+
+        return (
+          <button
+            key={bId}
+            ref={(el) => { if (el) itemRefs.current.set(bId, el); }}
+            onPointerDown={(e) => handlePointerDown(e, bId)}
+            onClick={() => { if (!suppressClickRef.current) onSelect(bId); }}
+            className={`px-3 py-1.5 rounded-lg text-[11px] font-semibold select-none relative ${
+              isActive
+                ? "bg-orange-500 text-white shadow-sm shadow-orange-200"
+                : "bg-gray-100 text-[--text-secondary] hover:bg-gray-200"
+            }`}
+            style={style}
+          >
+            {data.name} <span className={`ml-0.5 ${isActive ? "text-white/80" : "text-[--text-muted]"}`}>{data.profiles.length}人</span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 export default function PhotographerPage() {
   const [hoveredCat, setHoveredCat] = useState<string | null>(null);
   const [themeMode, setThemeMode] = useState<ThemeMode>(() => {
@@ -180,7 +422,7 @@ export default function PhotographerPage() {
   const [resolvedTheme, setResolvedTheme] = useState<"light" | "dark">("light");
   const [now, setNow] = useState(() => new Date());
   const [tasks, setTasks] = useState<DisplayTask[]>([]);
-  const [buildings, setBuildings] = useState<{ id: number; name: string; floorPlanUrl: string | null; rooms: { id: number; roomNumber: string; xPosition: number; yPosition: number }[] }[]>([]);
+  const [buildings, setBuildings] = useState<{ id: number; name: string; floorPlanUrl: string | null; cropX?: number | null; cropY?: number | null; cropW?: number | null; cropH?: number | null; rooms: { id: number; roomNumber: string; xPosition: number; yPosition: number }[] }[]>([]);
   const [activeBuildingId, setActiveBuildingId] = useState<number | null>(null);
   const [assistants, setAssistants] = useState<DockAssistant[]>([]);
   const [genie, setGenie] = useState<{
@@ -204,7 +446,11 @@ export default function PhotographerPage() {
   const [hoveredMapAssistant, setHoveredMapAssistant] = useState<string | null>(null);
   const [showAvatarModal, setShowAvatarModal] = useState(false);
   const [showStatsModal, setShowStatsModal] = useState(false);
+  const [statsHoveredDay, setStatsHoveredDay] = useState<number | null>(null);
+  const [weeklyTasks, setWeeklyTasks] = useState<TaskFromAPI[]>([]);
   const [showIdentityModal, setShowIdentityModal] = useState(false);
+  const [identityBuildingFilter, setIdentityBuildingFilter] = useState<number | null>(null);
+  const [identityBuildingOrder, setIdentityBuildingOrder] = useState<number[]>([]);
   const [allProfiles, setAllProfiles] = useState<{ id: string; name: string; role: string; employeeId: string | null; department: string | null; group: string | null; avatar: string | null; buildingId: number; building: { id: number; name: string } }[]>([]);
   // 助理当前任务（原始 API 数据）
   const [currentRawTask, setCurrentRawTask] = useState<TaskFromAPI | null>(null);
@@ -215,6 +461,12 @@ export default function PhotographerPage() {
   const MAP_BASE_MIN_ZOOM = 1;
   const MAP_MAX_ZOOM = 5;
   const MAP_ZOOM_STEP = 0.15;
+
+  // Whether active building has a crop region set (computed early for use in handlers)
+  const hasCrop = (() => {
+    const ab = buildings.find((b) => b.id === activeBuildingId);
+    return !!(ab && ab.cropX != null && ab.cropY != null && ab.cropW != null && ab.cropH != null);
+  })();
   // Dynamic minimum zoom that covers the container fully (object-fit:cover style)
   const [mapCoverZoom, setMapCoverZoom] = useState(MAP_BASE_MIN_ZOOM);
   const [mapZoom, setMapZoom] = useState(MAP_BASE_MIN_ZOOM);
@@ -261,24 +513,73 @@ export default function PhotographerPage() {
     []
   );
 
+  // Compute zoom & pan to center on a crop region (percentage-based)
+  const computeCropView = useCallback((crop: { cropX: number; cropY: number; cropW: number; cropH: number }) => {
+    const container = mapContainerRef.current;
+    const inner = mapInnerRef.current;
+    if (!container || !inner) return null;
+    const img = inner.querySelector("img");
+    if (!img || !img.naturalWidth || !img.naturalHeight) return null;
+
+    const cw = container.clientWidth;
+    const ch = container.clientHeight;
+    // At zoom=1, image displayed size
+    const imgW = inner.scrollWidth; // = cw (w-full)
+    const imgH = imgW * (img.naturalHeight / img.naturalWidth);
+
+    // Crop region in pixels at zoom=1
+    const cropPxX = (crop.cropX / 100) * imgW;
+    const cropPxY = (crop.cropY / 100) * imgH;
+    const cropPxW = (crop.cropW / 100) * imgW;
+    const cropPxH = (crop.cropH / 100) * imgH;
+
+    // Zoom to fill container with crop region
+    const zoomX = cw / cropPxW;
+    const zoomY = ch / cropPxH;
+    const z = Math.min(zoomX, zoomY, MAP_MAX_ZOOM);
+
+    // Pan to center the crop region
+    const panX = (cw - cropPxW * z) / 2 - cropPxX * z;
+    const panY = (ch - cropPxH * z) / 2 - cropPxY * z;
+
+    return { zoom: Math.round(z * 100) / 100, pan: { x: panX, y: panY } };
+  }, []);
+
   const resetMapView = useCallback(() => {
+    // Try crop-based view first
+    const ab = buildings.find((b) => b.id === activeBuildingId);
+    if (ab && ab.cropX != null && ab.cropY != null && ab.cropW != null && ab.cropH != null) {
+      const view = computeCropView({ cropX: ab.cropX, cropY: ab.cropY, cropW: ab.cropW, cropH: ab.cropH });
+      if (view) {
+        setMapCoverZoom(Math.min(view.zoom, MAP_MAX_ZOOM));
+        setMapZoom(view.zoom);
+        setMapPan(view.pan);
+        return;
+      }
+    }
     const z = computeCoverZoom();
     setMapCoverZoom(z);
     setMapZoom(z);
     setMapPan(clampMapPan(0, 0, z));
-  }, [clampMapPan, computeCoverZoom]);
+  }, [clampMapPan, computeCoverZoom, buildings, activeBuildingId, computeCropView]);
 
   // Handle floor plan image load — recalculate cover zoom
-  const handleFloorPlanLoad = useCallback(() => {
-    const z = computeCoverZoom();
-    setMapCoverZoom(z);
-    setMapZoom(z);
-    setMapPan(clampMapPan(0, 0, z));
-  }, [clampMapPan, computeCoverZoom]);
+  const handleFloorPlanLoad = resetMapView;
 
   // Recalculate cover zoom on window resize
   useEffect(() => {
     const onResize = () => {
+      // If crop is set, recalculate crop-based view
+      const ab = buildings.find((b) => b.id === activeBuildingId);
+      if (ab && ab.cropX != null && ab.cropY != null && ab.cropW != null && ab.cropH != null) {
+        const view = computeCropView({ cropX: ab.cropX, cropY: ab.cropY, cropW: ab.cropW, cropH: ab.cropH });
+        if (view) {
+          setMapCoverZoom(Math.min(view.zoom, MAP_MAX_ZOOM));
+          setMapZoom(view.zoom);
+          setMapPan(view.pan);
+          return;
+        }
+      }
       const z = computeCoverZoom();
       setMapCoverZoom(z);
       setMapZoom((prev) => Math.max(z, prev));
@@ -286,7 +587,7 @@ export default function PhotographerPage() {
     };
     window.addEventListener("resize", onResize);
     return () => window.removeEventListener("resize", onResize);
-  }, [computeCoverZoom, clampMapPan, mapZoom]);
+  }, [computeCoverZoom, clampMapPan, mapZoom, buildings, activeBuildingId, computeCropView]);
 
   // Reset view when switching buildings
   useEffect(() => {
@@ -295,19 +596,46 @@ export default function PhotographerPage() {
     setMapPan({ x: 0, y: 0 });
   }, [activeBuildingId]);
 
+  // Re-center on crop area when buildings data arrives or changes
+  useEffect(() => {
+    const ab = buildings.find((b) => b.id === activeBuildingId);
+    if (ab && ab.cropX != null && ab.cropY != null && ab.cropW != null && ab.cropH != null) {
+      // Small delay to ensure the image has rendered and refs are measured
+      const timer = setTimeout(() => {
+        const view = computeCropView({ cropX: ab.cropX!, cropY: ab.cropY!, cropW: ab.cropW!, cropH: ab.cropH! });
+        if (view) {
+          setMapCoverZoom(Math.min(view.zoom, MAP_MAX_ZOOM));
+          setMapZoom(view.zoom);
+          setMapPan(view.pan);
+        }
+      }, 100);
+      return () => clearTimeout(timer);
+    }
+  }, [buildings, activeBuildingId, computeCropView]);
+
+  // Fetch weekly tasks when stats modal opens
+  useEffect(() => {
+    if (!showStatsModal) return;
+    const params = new URLSearchParams({ weekOnly: "true" });
+    if (profile?.role === "photographer") params.set("photographerId", profile.id);
+    if (profile?.role === "assistant") params.set("assistantId", profile.id);
+    fetch(`/api/tasks?${params}`)
+      .then((r) => r.json())
+      .then((data: TaskFromAPI[]) => setWeeklyTasks(Array.isArray(data) ? data : []))
+      .catch(() => setWeeklyTasks([]));
+  }, [showStatsModal, profile]);
+
   // Fetch assistants + their active tasks for the active building
   const refreshAssistants = useCallback(() => {
     if (!activeBuildingId) return;
     Promise.all([
-      fetch(`/api/profiles?role=assistant&buildingId=${activeBuildingId}`).then((r) => r.json()),
-      fetch("/api/tasks").then((r) => r.json()).catch(() => []),
+      fetch(`/api/profiles?role=assistant&buildingId=${activeBuildingId}`, { cache: "no-store" }).then((r) => r.json()),
+      fetch("/api/tasks?todayOnly=true", { cache: "no-store" }).then((r) => r.json()).catch(() => []),
     ]).then(([profilesData, tasksData]) => {
       const profiles = Array.isArray(profilesData) ? profilesData : [];
       const allTasks = Array.isArray(tasksData) ? tasksData : [];
-      // Build a map: assistantId -> current task description
-      const PRIORITY_DUR: Record<number, string> = { 1: "1-5分钟", 2: "5-20分钟", 3: "30分钟以内", 4: "30-60分钟", 5: "1小时以上" };
-      const taskMap = new Map<string, string>();
-      const taskRoomMap = new Map<string, string>();
+      // Build a map: assistantId -> { desc, room, status }
+      const assistantTaskInfo = new Map<string, { desc: string; room: string; status: string }>();
       for (const t of allTasks) {
         if (t.assistantId && t.category && (t.status === "executing" || t.status === "waiting" || t.status === "paused")) {
           let desc = `${t.category.name} · ${t.roomNumber}室 · ${PRIORITY_DUR[t.priority] || ""}`;
@@ -315,15 +643,22 @@ export default function PhotographerPage() {
             const elapsed = Math.floor((Date.now() - new Date(t.startedAt).getTime()) / 60000);
             desc += ` · 已${elapsed}分钟`;
           }
-          taskMap.set(t.assistantId, desc);
-          taskRoomMap.set(t.assistantId, t.roomNumber);
+          const effectiveStatus = t.status === "executing" ? "executing" : t.status === "waiting" ? "assigned" : "busy";
+          const existing = assistantTaskInfo.get(t.assistantId);
+          if (!existing || effectiveStatus === "executing" || (effectiveStatus === "assigned" && existing.status === "busy")) {
+            assistantTaskInfo.set(t.assistantId, { desc, room: t.roomNumber, status: effectiveStatus });
+          }
         }
       }
-      setAssistants(profiles.map((p: DockAssistant) => ({
-        ...p,
-        currentTask: taskMap.get(p.id) || null,
-        currentRoom: taskRoomMap.get(p.id) || p.currentRoom || null,
-      })));
+      setAssistants(profiles.map((p: DockAssistant) => {
+        const info = assistantTaskInfo.get(p.id);
+        return {
+          ...p,
+          status: info?.status || p.status,
+          currentTask: info?.desc || null,
+          currentRoom: info?.room || p.currentRoom || null,
+        };
+      }));
     }).catch(console.error);
   }, [activeBuildingId]);
 
@@ -334,13 +669,14 @@ export default function PhotographerPage() {
   // Map pan handlers
   const handleMapPanDown = useCallback(
     (e: React.MouseEvent) => {
+      if (hasCrop) return;
       e.preventDefault();
       setMapPanning({
         startX: e.clientX, startY: e.clientY,
         origPanX: mapPan.x, origPanY: mapPan.y,
       });
     },
-    [mapPan]
+    [mapPan, hasCrop]
   );
 
   useEffect(() => {
@@ -360,6 +696,7 @@ export default function PhotographerPage() {
 
   // Map wheel zoom
   useEffect(() => {
+    if (hasCrop) return;
     const container = mapContainerRef.current;
     if (!container) return;
     const handleWheel = (e: WheelEvent) => {
@@ -376,7 +713,7 @@ export default function PhotographerPage() {
     };
     container.addEventListener("wheel", handleWheel, { passive: false });
     return () => container.removeEventListener("wheel", handleWheel);
-  }, [mapZoom, mapPan, clampMapZoom, clampMapPan]);
+  }, [mapZoom, mapPan, clampMapZoom, clampMapPan, hasCrop]);
 
   useEffect(() => {
     const tick = () => {
@@ -412,7 +749,7 @@ export default function PhotographerPage() {
             setActiveBuildingId(selected.buildingId);
             // Fetch tasks for this profile
             const taskParam = selected.role === "assistant" ? `assistantId=${selected.id}` : `photographerId=${selected.id}`;
-            fetch(`/api/tasks?${taskParam}`)
+            fetch(`/api/tasks?${taskParam}&todayOnly=true`)
               .then((r) => r.json())
               .then((taskData) => {
                 if (Array.isArray(taskData)) {
@@ -485,7 +822,7 @@ export default function PhotographerPage() {
       if (res.ok) {
         // 重新拉取任务
         if (profile) {
-          const taskRes = await fetch(`/api/tasks?assistantId=${profile.id}`);
+          const taskRes = await fetch(`/api/tasks?assistantId=${profile.id}&todayOnly=true`);
           const taskData = await taskRes.json();
           if (Array.isArray(taskData)) {
             setTasks(sortTasksByStatus(taskData.map(apiTaskToDisplay)));
@@ -551,6 +888,7 @@ export default function PhotographerPage() {
             tagCls: "bg-gray-100/60 text-gray-500",
             assistantName: null,
             photographerName: profile?.name || null,
+            createdAt: new Date().toISOString(),
           },
           ...prev,
         ]));
@@ -588,7 +926,7 @@ export default function PhotographerPage() {
         className="absolute inset-0 overflow-hidden transition-colors duration-700"
         style={{
           background: resolvedTheme === "dark" ? "#0f1117" : "#f2f2f4",
-          cursor: mapPanning ? "grabbing" : "grab",
+          cursor: hasCrop ? "default" : mapPanning ? "grabbing" : "grab",
         }}
         onMouseDown={handleMapPanDown}
       >
@@ -685,7 +1023,7 @@ export default function PhotographerPage() {
       </div>
 
       {/* Map zoom controls */}
-      {activeBuilding?.floorPlanUrl && (
+      {activeBuilding?.floorPlanUrl && !hasCrop && (
         <div
           className={`absolute right-3 top-1/2 -translate-y-1/2 z-30 flex flex-col items-center gap-1.5 rounded-xl p-1.5 ${glass}`}
           onMouseDown={(e) => e.stopPropagation()}
@@ -1218,54 +1556,87 @@ export default function PhotographerPage() {
             <div className="px-5 pb-2">
               <p className="text-[11px] text-[--text-muted]">选择一个身份查看对应视角的页面，当前：<span className="font-medium text-[--text-primary]">{profile?.name}</span></p>
             </div>
-            <div className="flex-1 overflow-y-auto px-5 pb-5">
-              {(["photographer", "assistant", "leader"] as const).map((role) => {
-                const roleLabel = role === "photographer" ? "摄影师" : role === "assistant" ? "助理" : "组长";
-                const roleColor = role === "photographer" ? "text-orange-600" : role === "assistant" ? "text-green-600" : "text-blue-600";
-                const roleBg = role === "photographer" ? "bg-orange-50" : role === "assistant" ? "bg-green-50" : "bg-blue-50";
-                const roleProfiles = allProfiles.filter((p) => p.role === role);
-                if (roleProfiles.length === 0) return null;
-                return (
-                  <div key={role} className="mb-4">
-                    <div className="flex items-center gap-2 mb-2">
-                      <span className={`text-[10px] font-bold px-2 py-0.5 rounded ${roleBg} ${roleColor}`}>{roleLabel}</span>
-                      <span className="text-[10px] text-[--text-muted]">{roleProfiles.length}人</span>
-                    </div>
-                    <div className="grid grid-cols-2 gap-1.5">
-                      {roleProfiles.map((p) => {
-                        const isCurrent = p.id === profile?.id;
-                        return (
-                          <button
-                            key={p.id}
-                            onClick={() => !isCurrent && switchIdentity(p)}
-                            className={`flex items-center gap-2.5 px-3 py-2 rounded-xl text-left transition-all ${
-                              isCurrent
-                                ? "bg-orange-50 border border-orange-200 cursor-default"
-                                : "hover:bg-gray-50 border border-transparent cursor-pointer"
-                            }`}
-                          >
-                            <div className="w-8 h-8 rounded-full overflow-hidden flex-shrink-0 bg-gradient-to-br from-gray-200 to-gray-300 flex items-center justify-center">
-                              {p.avatar ? (
-                                <img src={p.avatar} alt={p.name} className="w-full h-full object-cover" />
-                              ) : (
-                                <span className="text-white text-xs font-bold">{p.name[0]}</span>
-                              )}
-                            </div>
-                            <div className="min-w-0 flex-1">
-                              <p className="text-xs font-medium text-[--text-primary] truncate">
-                                {p.name}
-                                {isCurrent && <span className="text-[9px] text-orange-500 ml-1">当前</span>}
-                              </p>
-                              <p className="text-[10px] text-[--text-muted] truncate">{p.building.name}{p.employeeId ? ` · ${p.employeeId}` : ""}</p>
-                            </div>
-                          </button>
-                        );
-                      })}
-                    </div>
+            {/* Building tabs + filtered profiles */}
+            {(() => {
+              const buildingMap = new Map<number, { name: string; profiles: typeof allProfiles }>();
+              for (const p of allProfiles) {
+                if (!buildingMap.has(p.buildingId)) {
+                  buildingMap.set(p.buildingId, { name: p.building.name, profiles: [] });
+                }
+                buildingMap.get(p.buildingId)!.profiles.push(p);
+              }
+              const allEntries = Array.from(buildingMap.entries());
+              const orderedEntries = identityBuildingOrder.length > 0
+                ? identityBuildingOrder
+                    .map((id) => allEntries.find(([bId]) => bId === id))
+                    .filter(Boolean) as [number, { name: string; profiles: typeof allProfiles }][]
+                : allEntries;
+              for (const entry of allEntries) {
+                if (!orderedEntries.some(([id]) => id === entry[0])) orderedEntries.push(entry);
+              }
+              const activeBld = identityBuildingFilter ?? profile?.buildingId ?? orderedEntries[0]?.[0] ?? null;
+              const activeEntry = activeBld != null ? buildingMap.get(activeBld) : null;
+              const roles = ["photographer", "assistant", "leader"] as const;
+              const roleLabel = (r: string) => r === "photographer" ? "摄影师" : r === "assistant" ? "助理" : "组长";
+              const roleColor = (r: string) => r === "photographer" ? "text-orange-600" : r === "assistant" ? "text-green-600" : "text-blue-600";
+              const roleBg = (r: string) => r === "photographer" ? "bg-orange-50" : r === "assistant" ? "bg-green-50" : "bg-blue-50";
+
+              return (
+                <>
+                  <DockBuildingTabs
+                    entries={orderedEntries}
+                    activeBld={activeBld}
+                    onSelect={(id) => setIdentityBuildingFilter(id)}
+                    onReorder={(newOrder) => setIdentityBuildingOrder(newOrder)}
+                  />
+                  <div className="flex-1 overflow-y-auto px-5 pb-5">
+                    {activeEntry && roles.map((role) => {
+                      const roleProfiles = activeEntry.profiles.filter((p) => p.role === role);
+                      if (roleProfiles.length === 0) return null;
+                      return (
+                        <div key={role} className="mb-3">
+                          <div className="flex items-center gap-2 mb-1.5">
+                            <span className={`text-[10px] font-bold px-2 py-0.5 rounded ${roleBg(role)} ${roleColor(role)}`}>{roleLabel(role)}</span>
+                            <span className="text-[10px] text-[--text-muted]">{roleProfiles.length}人</span>
+                          </div>
+                          <div className="grid grid-cols-2 gap-1.5">
+                            {roleProfiles.map((p) => {
+                              const isCurrent = p.id === profile?.id;
+                              return (
+                                <button
+                                  key={p.id}
+                                  onClick={() => !isCurrent && switchIdentity(p)}
+                                  className={`flex items-center gap-2.5 px-3 py-2 rounded-xl text-left transition-all ${
+                                    isCurrent
+                                      ? "bg-orange-50 border border-orange-200 cursor-default"
+                                      : "hover:bg-gray-50 border border-transparent cursor-pointer"
+                                  }`}
+                                >
+                                  <div className="w-8 h-8 rounded-full overflow-hidden flex-shrink-0 bg-gradient-to-br from-gray-200 to-gray-300 flex items-center justify-center">
+                                    {p.avatar ? (
+                                      <img src={p.avatar} alt={p.name} className="w-full h-full object-cover" />
+                                    ) : (
+                                      <span className="text-white text-xs font-bold">{p.name[0]}</span>
+                                    )}
+                                  </div>
+                                  <div className="min-w-0 flex-1">
+                                    <p className="text-xs font-medium text-[--text-primary] truncate">
+                                      {p.name}
+                                      {isCurrent && <span className="text-[9px] text-orange-500 ml-1">当前</span>}
+                                    </p>
+                                    <p className="text-[10px] text-[--text-muted] truncate">{p.employeeId || ""}</p>
+                                  </div>
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      );
+                    })}
                   </div>
-                );
-              })}
-            </div>
+                </>
+              );
+            })()}
           </div>
         </div>
       )}
@@ -1353,21 +1724,67 @@ export default function PhotographerPage() {
 
               return (
                 <div className="grid grid-cols-2 gap-3 mb-4">
-                  {/* Weekly Chart — 暂用静态示意 */}
+                  {/* Weekly Chart — Interactive hover */}
                   <div className="rounded-xl bg-gray-50/80 px-4 py-3">
-                    <h3 className="text-[11px] font-bold text-[--text-primary] mb-3">本周完成趋势</h3>
-                    <div className="flex items-end gap-2 h-24">
-                      {[
-                        { day: "周一", count: 15 }, { day: "周二", count: 18 }, { day: "周三", count: 12 },
-                        { day: "周四", count: 20 }, { day: "周五", count: 16 }, { day: "周六", count: 22 }, { day: "周日", count: 8 },
-                      ].map((d) => (
-                        <div key={d.day} className="flex-1 flex flex-col items-center gap-0.5">
-                          <span className="text-[9px] font-bold text-[--text-primary]">{d.count}</span>
-                          <div className="w-full rounded-t-md bg-gradient-to-t from-orange-500 to-orange-300" style={{ height: `${(d.count / 22) * 100}%` }} />
-                          <span className="text-[9px] text-[--text-muted]">{d.day}</span>
-                        </div>
-                      ))}
+                    <div className="flex items-center justify-between mb-3">
+                      <h3 className="text-[11px] font-bold text-[--text-primary]">本周完成趋势</h3>
+                      {statsHoveredDay !== null && (
+                        <span className="text-[9px] text-orange-600 font-medium">
+                          {["周一","周二","周三","周四","周五","周六","周日"][statsHoveredDay]} · {(() => {
+                            const now = new Date();
+                            const dow = now.getDay();
+                            const mondayOffset = dow === 0 ? -6 : 1 - dow;
+                            const d = new Date(now);
+                            d.setDate(now.getDate() + mondayOffset + statsHoveredDay);
+                            return `${d.getFullYear()}/${String(d.getMonth()+1).padStart(2,"0")}/${String(d.getDate()).padStart(2,"0")}`;
+                          })()}
+                        </span>
+                      )}
                     </div>
+                    {(() => {
+                      // 计算本周每天的任务数（基于真实数据）
+                      const weekDays = ["周一","周二","周三","周四","周五","周六","周日"];
+                      const now2 = new Date();
+                      const dow2 = now2.getDay();
+                      const mondayOff = dow2 === 0 ? -6 : 1 - dow2;
+                      const monday = new Date(now2.getFullYear(), now2.getMonth(), now2.getDate() + mondayOff);
+                      const weekCounts = Array.from({ length: 7 }, (_, i) => {
+                        const dayStart = new Date(monday.getTime() + i * 24 * 60 * 60 * 1000);
+                        const dayEnd = new Date(dayStart.getTime() + 24 * 60 * 60 * 1000);
+                        return weeklyTasks.filter((wt) => {
+                          const created = new Date(wt.createdAt);
+                          return created >= dayStart && created < dayEnd;
+                        }).length;
+                      });
+                      const wMax = Math.max(...weekCounts, 1);
+                      const todayIdx = dow2 === 0 ? 6 : dow2 - 1;
+                      const activeIdx = statsHoveredDay !== null ? statsHoveredDay : todayIdx;
+                      return (
+                        <div className="flex items-end gap-2 h-28">
+                          {weekDays.map((day, i) => {
+                            const isActive = i === todayIdx;
+                            const barH = weekCounts[i] > 0 ? Math.max((weekCounts[i] / wMax) * 80, 6) : 0;
+                            return (
+                              <div
+                                key={day}
+                                className="flex-1 flex flex-col items-center justify-end h-full"
+                              >
+                                <span className={`text-[9px] font-bold mb-1 ${isActive ? "text-orange-600" : "text-[--text-primary]"}`}>{weekCounts[i]}</span>
+                                <div
+                                  className={`w-3/4 rounded-t-md ${
+                                    isActive
+                                      ? "bg-gradient-to-t from-orange-600 to-orange-400"
+                                      : "bg-gradient-to-t from-orange-400/50 to-orange-200/50"
+                                  }`}
+                                  style={{ height: `${barH}px`, minWidth: "12px" }}
+                                />
+                                <span className={`text-[9px] mt-1 ${isActive ? "text-orange-600 font-bold" : "text-[--text-muted]"}`}>{day}</span>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      );
+                    })()}
                   </div>
 
                   {/* Type Breakdown — 真实数据 */}
@@ -1399,26 +1816,32 @@ export default function PhotographerPage() {
             <div className="rounded-xl border border-gray-100 overflow-hidden">
               <h3 className="text-[11px] font-bold text-[--text-primary] px-4 pt-3 pb-1">今日任务明细</h3>
               <div className="flex items-center text-[9px] text-[--text-muted] font-semibold px-4 py-1.5 bg-gray-50/60">
-                <span className="w-[20%]">类型</span>
-                <span className="w-[12%]">房间</span>
-                <span className="w-[23%]">时间信息</span>
-                <span className="w-[20%]">{profile?.role === "assistant" ? "摄影师" : "助理"}</span>
-                <span className="w-[13%]">用时</span>
-                <span className="w-[12%]">状态</span>
+                <span className="w-[12%]">日期</span>
+                <span className="w-[10%]">房间</span>
+                <span className="w-[14%]">{profile?.role === "assistant" ? "摄影师" : "助理"}</span>
+                <span className="w-[16%]">类型</span>
+                <span className="w-[16%]">预估时间</span>
+                <span className="w-[14%]">实际用时</span>
+                <span className="w-[10%]">状态</span>
               </div>
               {tasks.length === 0 ? (
                 <div className="text-center py-6 text-[--text-muted] text-xs">暂无任务</div>
               ) : (
-                tasks.map((t) => (
-                  <div key={t.id} className="flex items-center text-[10px] px-4 py-2 border-t border-gray-50 hover:bg-gray-50/50 transition-colors">
-                    <span className="w-[20%] font-medium text-[--text-primary]">{t.name}</span>
-                    <span className="w-[12%] text-[--text-muted]">{t.room}室</span>
-                    <span className="w-[23%] text-[--text-muted]">{t.time}</span>
-                    <span className="w-[20%] text-[--text-muted]">{profile?.role === "assistant" ? (t.photographerName || "—") : (t.assistantName || "—")}</span>
-                    <span className="w-[13%] text-[--text-muted]">{t.statusLabel === "已完成" ? t.time : "—"}</span>
-                    <span className={`text-[8px] font-bold px-1.5 py-0.5 rounded ${t.tagCls}`}>{t.statusLabel}</span>
-                  </div>
-                ))
+                tasks.map((t) => {
+                  const d = new Date(t.createdAt);
+                  const shortDate = `${String(d.getMonth()+1).padStart(2,"0")}/${String(d.getDate()).padStart(2,"0")}`;
+                  return (
+                    <div key={t.id} className="flex items-center text-[10px] px-4 py-2 border-t border-gray-50 hover:bg-gray-50/50 transition-colors">
+                      <span className="w-[12%] text-[--text-muted] tabular-nums">{shortDate}</span>
+                      <span className="w-[10%] text-[--text-muted]">{t.room}室</span>
+                      <span className="w-[14%] font-medium text-[--text-primary]">{profile?.role === "assistant" ? (t.photographerName || "—") : (t.assistantName || "—")}</span>
+                      <span className="w-[16%] text-[--text-primary]">{t.name}</span>
+                      <span className="w-[16%] text-[--text-muted]">{t.time}</span>
+                      <span className="w-[14%] text-[--text-muted]">{t.statusLabel === "已完成" ? t.actualTime || "—" : "—"}</span>
+                      <span className={`text-[8px] font-bold px-1.5 py-0.5 rounded ${t.tagCls}`}>{t.statusLabel}</span>
+                    </div>
+                  );
+                })
               )}
             </div>
           </div>
@@ -1445,12 +1868,16 @@ function AvatarModal({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [imgSrc, setImgSrc] = useState<string | null>(currentAvatar);
   const [imgEl, setImgEl] = useState<HTMLImageElement | null>(null);
-  const [offset, setOffset] = useState({ x: 0, y: 0 });
-  const [scale, setScale] = useState(1);
-  const [dragging, setDragging] = useState<{ startX: number; startY: number; origX: number; origY: number } | null>(null);
+  const [view, setView] = useState({ panX: 0, panY: 0, zoom: 1 });
+  const [dragging, setDragging] = useState<{ startX: number; startY: number; origPanX: number; origPanY: number } | null>(null);
   const [saving, setSaving] = useState(false);
 
   const VIEWPORT = 220;
+
+  // Base scale: make image cover the viewport at zoom=1
+  const baseScale = imgEl ? Math.max(VIEWPORT / imgEl.width, VIEWPORT / imgEl.height) : 1;
+  const baseW = imgEl ? imgEl.width * baseScale : 0;
+  const baseH = imgEl ? imgEl.height * baseScale : 0;
 
   // Load image element when src changes
   useEffect(() => {
@@ -1458,9 +1885,7 @@ function AvatarModal({
     const img = new Image();
     img.onload = () => {
       setImgEl(img);
-      const s = Math.max(VIEWPORT / img.width, VIEWPORT / img.height);
-      setScale(s);
-      setOffset({ x: (VIEWPORT - img.width * s) / 2, y: (VIEWPORT - img.height * s) / 2 });
+      setView({ panX: 0, panY: 0, zoom: 1 });
     };
     img.src = imgSrc;
   }, [imgSrc]);
@@ -1476,10 +1901,11 @@ function AvatarModal({
   useEffect(() => {
     if (!dragging) return;
     const handleMove = (e: MouseEvent) => {
-      setOffset({
-        x: dragging.origX + e.clientX - dragging.startX,
-        y: dragging.origY + e.clientY - dragging.startY,
-      });
+      setView((v) => ({
+        ...v,
+        panX: dragging.origPanX + e.clientX - dragging.startX,
+        panY: dragging.origPanY + e.clientY - dragging.startY,
+      }));
     };
     const handleUp = () => setDragging(null);
     window.addEventListener("mousemove", handleMove);
@@ -1497,19 +1923,31 @@ function AvatarModal({
     canvas.height = size;
     const ctx = canvas.getContext("2d")!;
     const ratio = size / VIEWPORT;
+    // Compute where the image visually sits relative to the viewport
+    const effScale = baseScale * view.zoom;
+    const imgLeft = VIEWPORT / 2 + view.panX - (imgEl.width * effScale) / 2;
+    const imgTop = VIEWPORT / 2 + view.panY - (imgEl.height * effScale) / 2;
     ctx.beginPath();
     ctx.arc(size / 2, size / 2, size / 2, 0, Math.PI * 2);
     ctx.clip();
-    ctx.drawImage(imgEl, offset.x * ratio, offset.y * ratio, imgEl.width * scale * ratio, imgEl.height * scale * ratio);
+    ctx.drawImage(imgEl, imgLeft * ratio, imgTop * ratio, imgEl.width * effScale * ratio, imgEl.height * effScale * ratio);
     onSave(canvas.toDataURL("image/jpeg", 0.85));
   }
-
-  const minScale = imgEl ? Math.max(VIEWPORT / imgEl.width, VIEWPORT / imgEl.height) : 1;
 
   return (
     <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-[200]" onClick={onClose}>
       <div className="bg-white rounded-2xl p-5 w-[320px] shadow-2xl" onClick={(e) => e.stopPropagation()}>
-        <h3 className="text-sm font-bold text-gray-800 mb-4">更换头像</h3>
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="text-sm font-bold text-gray-800">更换头像</h3>
+          <button
+            onClick={onClose}
+            className="w-7 h-7 rounded-lg hover:bg-black/5 flex items-center justify-center transition-colors"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+              <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+            </svg>
+          </button>
+        </div>
 
         {/* Circular preview */}
         <div className="flex justify-center mb-4">
@@ -1519,7 +1957,7 @@ function AvatarModal({
             onMouseDown={(e) => {
               if (!imgEl) return;
               e.preventDefault();
-              setDragging({ startX: e.clientX, startY: e.clientY, origX: offset.x, origY: offset.y });
+              setDragging({ startX: e.clientX, startY: e.clientY, origPanX: view.panX, origPanY: view.panY });
             }}
             onDragOver={(e) => e.preventDefault()}
             onDrop={(e) => { e.preventDefault(); const f = e.dataTransfer.files[0]; if (f) handleFile(f); }}
@@ -1531,10 +1969,12 @@ function AvatarModal({
                 draggable={false}
                 style={{
                   position: "absolute",
-                  left: offset.x,
-                  top: offset.y,
-                  width: imgEl.width * scale,
-                  height: imgEl.height * scale,
+                  left: (VIEWPORT - baseW) / 2,
+                  top: (VIEWPORT - baseH) / 2,
+                  width: baseW,
+                  height: baseH,
+                  transform: `translate(${view.panX}px, ${view.panY}px) scale(${view.zoom})`,
+                  transformOrigin: "center center",
                   pointerEvents: "none",
                 }}
               />
@@ -1562,16 +2002,12 @@ function AvatarModal({
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#9ca3af" strokeWidth="2"><circle cx="11" cy="11" r="8" /><line x1="21" y1="21" x2="16.65" y2="16.65" /><line x1="8" y1="11" x2="14" y2="11" /></svg>
             <input
               type="range"
-              min={Math.round(minScale * 100)}
-              max={Math.round(minScale * 400)}
-              value={Math.round(scale * 100)}
+              min={100}
+              max={400}
+              value={Math.round(view.zoom * 100)}
               onChange={(e) => {
-                const newScale = parseInt(e.target.value) / 100;
-                const cx = VIEWPORT / 2;
-                const cy = VIEWPORT / 2;
-                const r = newScale / scale;
-                setOffset({ x: cx - r * (cx - offset.x), y: cy - r * (cy - offset.y) });
-                setScale(newScale);
+                const newZoom = parseInt(e.target.value) / 100;
+                setView((v) => ({ ...v, zoom: newZoom }));
               }}
               className="flex-1 accent-purple-500"
             />

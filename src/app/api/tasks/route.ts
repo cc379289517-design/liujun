@@ -3,6 +3,12 @@ import { prisma } from "@/lib/prisma";
 import { TaskStatus } from "@/generated/prisma/client";
 import { assignTask, canInterrupt, interruptAssistant } from "@/lib/scheduler";
 
+const TASK_INCLUDE = {
+  photographer: { select: { id: true, name: true, currentRoom: true, buildingId: true } },
+  assistant: { select: { id: true, name: true, currentRoom: true } },
+  category: { select: { id: true, name: true, priorityLevel: true } },
+} as const;
+
 /**
  * GET /api/tasks - 查询任务列表
  * 支持 ?status=waiting&priority=1&photographerId=xxx&assistantId=xxx
@@ -15,19 +21,36 @@ export async function GET(request: NextRequest) {
     const photographerId = searchParams.get("photographerId");
     const assistantId = searchParams.get("assistantId");
 
+    const todayOnly = searchParams.get("todayOnly");
+
     const where: Record<string, unknown> = {};
     if (status) where.status = status;
     if (priority) where.priority = parseInt(priority);
     if (photographerId) where.photographerId = photographerId;
     if (assistantId) where.assistantId = assistantId;
 
+    // 只返回今天的任务（基于 createdAt，过了24点自动不显示昨天的）
+    if (todayOnly === "true") {
+      const now = new Date();
+      const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+      const endOfDay = new Date(startOfDay.getTime() + 24 * 60 * 60 * 1000);
+      where.createdAt = { gte: startOfDay, lt: endOfDay };
+    }
+
+    // 返回本周任务（周一到周日）
+    const weekOnly = searchParams.get("weekOnly");
+    if (weekOnly === "true") {
+      const now = new Date();
+      const dow = now.getDay(); // 0=周日
+      const mondayOffset = dow === 0 ? -6 : 1 - dow;
+      const monday = new Date(now.getFullYear(), now.getMonth(), now.getDate() + mondayOffset);
+      const nextMonday = new Date(monday.getTime() + 7 * 24 * 60 * 60 * 1000);
+      where.createdAt = { gte: monday, lt: nextMonday };
+    }
+
     const tasks = await prisma.bookingTask.findMany({
       where,
-      include: {
-        photographer: { select: { id: true, name: true, currentRoom: true } },
-        assistant: { select: { id: true, name: true, currentRoom: true } },
-        category: { select: { id: true, name: true, priorityLevel: true } },
-      },
+      include: TASK_INCLUDE,
       orderBy: [{ priority: "asc" }, { createdAt: "asc" }],
     });
 
@@ -138,22 +161,21 @@ export async function POST(request: NextRequest) {
         estEndTime,
         note,
       },
-      include: {
-        photographer: { select: { id: true, name: true, currentRoom: true } },
-        assistant: { select: { id: true, name: true, currentRoom: true } },
-        category: { select: { id: true, name: true, priorityLevel: true } },
-      },
+      include: TASK_INCLUDE,
     });
 
     // 自动派单（非指定助理模式）
     if (!isSpecified) {
-      // P1 紧急任务：尝试插单
+      const buildingId = task.photographer.buildingId;
+
+      // P1 紧急任务：尝试插单（仅同楼座）
       if (category.priorityLevel === 1) {
         const busyAssistants = await prisma.profile.findMany({
           where: {
             role: "assistant",
             status: { in: ["executing", "busy"] },
             isOnline: true,
+            buildingId,
           },
         });
 
@@ -163,11 +185,7 @@ export async function POST(request: NextRequest) {
             await interruptAssistant(assistant.id, task.id);
             const updated = await prisma.bookingTask.findUnique({
               where: { id: task.id },
-              include: {
-                photographer: { select: { id: true, name: true, currentRoom: true } },
-                assistant: { select: { id: true, name: true, currentRoom: true } },
-                category: { select: { id: true, name: true, priorityLevel: true } },
-              },
+              include: TASK_INCLUDE,
             });
             return Response.json(updated, { status: 201 });
           }
@@ -175,15 +193,11 @@ export async function POST(request: NextRequest) {
       }
 
       // 普通派单：查找空闲助理
-      const assignedId = await assignTask(task.id);
+      const assignedId = await assignTask(task.id, buildingId);
       if (assignedId) {
         const updated = await prisma.bookingTask.findUnique({
           where: { id: task.id },
-          include: {
-            photographer: { select: { id: true, name: true, currentRoom: true } },
-            assistant: { select: { id: true, name: true, currentRoom: true } },
-            category: { select: { id: true, name: true, priorityLevel: true } },
-          },
+          include: TASK_INCLUDE,
         });
         return Response.json(updated, { status: 201 });
       }
