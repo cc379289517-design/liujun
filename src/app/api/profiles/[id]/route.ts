@@ -68,7 +68,7 @@ export async function PATCH(request: NextRequest, { params }: RouteContext) {
     const updated = await prisma.profile.update({
       where: { id },
       data,
-      include: { building: { select: { id: true, name: true } } },
+      include: { building: { select: { id: true, name: true, extraVenues: true } } },
     });
 
     return Response.json(updated);

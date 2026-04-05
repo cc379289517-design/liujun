@@ -40,7 +40,7 @@ export async function assignTask(taskId: string, buildingId?: number): Promise<s
   // 查找同楼座的空闲助理
   const availableAssistants = await prisma.profile.findMany({
     where: {
-      role: "assistant",
+      role: { in: ["assistant", "assistant_leader"] },
       status: ProfileStatus.idle,
       isOnline: true,
       subStatus: null,
@@ -127,7 +127,7 @@ export async function sweepWaitingTasks(): Promise<number> {
     // 1. 查找所有空闲且可用的助理
     const idleAssistants = await prisma.profile.findMany({
       where: {
-        role: "assistant",
+        role: { in: ["assistant", "assistant_leader"] },
         status: ProfileStatus.idle,
         isOnline: true,
         subStatus: null,
@@ -479,7 +479,7 @@ export async function syncProfileStatus(): Promise<void> {
 
   try {
     const assistants = await prisma.profile.findMany({
-      where: { role: "assistant" },
+      where: { role: { in: ["assistant", "assistant_leader"] } },
       select: { id: true, status: true },
     });
 

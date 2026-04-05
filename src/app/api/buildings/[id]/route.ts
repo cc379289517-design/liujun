@@ -35,6 +35,7 @@ export async function PATCH(request: NextRequest, { params }: RouteContext) {
       if (body.cropY !== undefined) data.cropY = body.cropY;
       if (body.cropW !== undefined) data.cropW = body.cropW;
       if (body.cropH !== undefined) data.cropH = body.cropH;
+      if (body.extraVenues !== undefined) data.extraVenues = body.extraVenues;
     }
 
     const building = await prisma.building.update({

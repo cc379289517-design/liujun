@@ -25,9 +25,9 @@ export async function POST(request: NextRequest) {
     const body = await request.json();
     const { name, description, priorityLevel, minDuration, maxDuration, hexColor, sortRank, estDuration } = body;
 
-    if (!name || !priorityLevel || !minDuration || !maxDuration) {
+    if (!name || !priorityLevel) {
       return Response.json(
-        { error: "name, priorityLevel, minDuration, maxDuration are required" },
+        { error: "name, priorityLevel are required" },
         { status: 400 }
       );
     }
@@ -37,8 +37,8 @@ export async function POST(request: NextRequest) {
         name,
         description: description || null,
         priorityLevel: parseInt(priorityLevel),
-        minDuration: parseInt(minDuration),
-        maxDuration: parseInt(maxDuration),
+        minDuration: minDuration != null ? parseInt(minDuration) : 0,
+        maxDuration: maxDuration != null ? parseInt(maxDuration) : 0,
         estDuration: estDuration ? parseInt(estDuration) : undefined,
         hexColor: hexColor || null,
         sortRank: sortRank !== undefined ? parseInt(sortRank) : 0,

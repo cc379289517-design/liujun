@@ -69,7 +69,12 @@ export default function AssistantDock({ assistants }: { assistants: DockAssistan
     setHoveredId(null);
   }, []);
 
-  const sorted = [...assistants].sort((a, b) => (STATUS_ORDER[a.status] ?? 9) - (STATUS_ORDER[b.status] ?? 9));
+  const sorted = [...assistants].sort((a, b) => {
+    const aOff = a.onlineStatus === "offline" || a.onlineStatus === "on_break" ? 1 : 0;
+    const bOff = b.onlineStatus === "offline" || b.onlineStatus === "on_break" ? 1 : 0;
+    if (aOff !== bOff) return aOff - bOff;
+    return (STATUS_ORDER[a.status] ?? 9) - (STATUS_ORDER[b.status] ?? 9);
+  });
   const sizes = getSizes(sorted.length, mouseY);
   const active = mouseY >= 0;
 
@@ -101,6 +106,7 @@ export default function AssistantDock({ assistants }: { assistants: DockAssistan
             const cfg = STATUS[a.status] || STATUS.idle;
             const hovered = hoveredId === a.id;
             const dotSize = 8 + (size - BASE) / (MAX - BASE) * 4;
+            const isOffline = a.onlineStatus === "offline" || a.onlineStatus === "on_break";
 
             return (
               <div
@@ -128,16 +134,38 @@ export default function AssistantDock({ assistants }: { assistants: DockAssistan
                   }}
                 >
                   <div className="px-3 py-1.5 rounded-xl glass text-right">
-                    <p className="text-xs font-semibold text-[--text-primary]">
-                      <span style={{ color: cfg.color }}>{cfg.label}</span>
-                      <span className="mx-1">·</span>
-                      {a.name}
-                    </p>
-                    <p className="text-[10px] text-[--text-muted] mt-0.5">
-                      {a.currentTask
-                        ? a.currentTask.split("\n").map((line, i) => <span key={i}>{i > 0 && <br />}{line}</span>)
-                        : (a.currentRoom ? `${a.currentRoom}室` : "—")}
-                    </p>
+                    {(() => {
+                      if (isOffline) {
+                        const offLabel = a.onlineStatus === "on_break" ? "休假" : "下线";
+                        return (
+                          <>
+                            <p className="text-xs font-semibold text-gray-400">{a.name} · {offLabel}</p>
+                            <p className="text-[10px] text-[--text-muted] mt-0.5">{a.currentRoom ? `${a.currentRoom}室` : "—"}</p>
+                          </>
+                        );
+                      }
+                      const tasks = a.currentTask ? a.currentTask.split("\n---\n") : [];
+                      if (tasks.length === 0) {
+                        return (
+                          <>
+                            <p className="text-xs font-semibold" style={{ color: cfg.color }}>{a.name} · {cfg.label}</p>
+                            <p className="text-[10px] text-[--text-muted] mt-0.5">{a.currentRoom ? `${a.currentRoom}室` : "—"}</p>
+                          </>
+                        );
+                      }
+                      return tasks.map((block, i) => {
+                        const lines = block.split("\n");
+                        const hasElapsed = lines.length > 1;
+                        const elapsedText = hasElapsed ? ` · ${lines[0]}` : "";
+                        const detail = hasElapsed ? lines[1] : lines[0];
+                        return (
+                          <div key={i} className={i > 0 ? "mt-1.5 pt-1.5 border-t border-white/20" : ""}>
+                            <p className="text-xs font-semibold" style={{ color: cfg.color }}>{a.name} · {cfg.label}{elapsedText}</p>
+                            <p className="text-[10px] text-[--text-muted] mt-0.5">{detail}</p>
+                          </div>
+                        );
+                      });
+                    })()}
                   </div>
                 </div>
 
@@ -145,6 +173,7 @@ export default function AssistantDock({ assistants }: { assistants: DockAssistan
                 <div
                   className="w-full h-full rounded-full overflow-hidden"
                   style={{
+                    filter: isOffline ? "grayscale(1)" : "none",
                     boxShadow: hovered
                       ? "0 6px 24px rgba(0,0,0,0.18), 0 0 0 2px rgba(255,255,255,0.7)"
                       : "0 2px 8px rgba(0,0,0,0.1), 0 0 0 1.5px rgba(255,255,255,0.5)",
@@ -174,7 +203,7 @@ export default function AssistantDock({ assistants }: { assistants: DockAssistan
                   style={{
                     width: dotSize,
                     height: dotSize,
-                    backgroundColor: cfg.color,
+                    backgroundColor: isOffline ? "#9ca3af" : cfg.color,
                     bottom: 0,
                     right: 0,
                     boxShadow: "0 0 0 2px white",

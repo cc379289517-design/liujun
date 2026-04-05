@@ -33,3 +33,17 @@ export async function PATCH(request: NextRequest, { params }: RouteContext) {
     return Response.json({ error: "Failed to update category" }, { status: 500 });
   }
 }
+
+/**
+ * DELETE /api/categories/[id] - delete a category
+ */
+export async function DELETE(_request: NextRequest, { params }: RouteContext) {
+  try {
+    const { id } = await params;
+    await prisma.taskCategory.delete({ where: { id: parseInt(id) } });
+    return Response.json({ success: true });
+  } catch (error) {
+    console.error("[DELETE /api/categories/[id]]", error);
+    return Response.json({ error: "Failed to delete category" }, { status: 500 });
+  }
+}

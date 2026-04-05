@@ -2,6 +2,7 @@
 
 import { useState, useRef, useEffect } from "react";
 import MapEditor from "./components/MapEditor";
+import type { Venue } from "./components/MapEditor";
 
 type Building = {
   id: number;
@@ -11,6 +12,7 @@ type Building = {
   cropY?: number | null;
   cropW?: number | null;
   cropH?: number | null;
+  extraVenues: string | null;
   rooms: Room[];
 };
 
@@ -35,12 +37,22 @@ export default function SpaceTab({ buildings: buildingsProp, onRefresh }: SpaceT
   const [showBuildingModal, setShowBuildingModal] = useState(false);
   const [showRoomModal, setShowRoomModal] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [newVenue, setNewVenue] = useState("");
+  const [newVenueType, setNewVenueType] = useState<"实景棚" | "无影棚">("实景棚");
+  const [cropMode, setCropMode] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Sync from parent when prop changes (e.g. initial load or tab switch)
   useEffect(() => {
     setLocalBuildings(buildingsProp);
   }, [buildingsProp]);
+
+  // Auto-select the first building when list loads and nothing is selected
+  useEffect(() => {
+    if (selectedBuildingId === null && localBuildings.length > 0) {
+      setSelectedBuildingId(localBuildings[0].id);
+    }
+  }, [localBuildings, selectedBuildingId]);
 
   const selectedBuilding = localBuildings.find((b) => b.id === selectedBuildingId) || null;
 
@@ -114,6 +126,30 @@ export default function SpaceTab({ buildings: buildingsProp, onRefresh }: SpaceT
     });
   }
 
+  function getExtraVenues(building: Building): Venue[] {
+    if (!building.extraVenues) return [];
+    try {
+      const parsed = JSON.parse(building.extraVenues);
+      // Backward compat: old format was string[], new format is {name,x,y}[]
+      if (Array.isArray(parsed) && parsed.length > 0 && typeof parsed[0] === "string") {
+        return (parsed as string[]).map((name) => ({ name, x: 50, y: 50 }));
+      }
+      return parsed as Venue[];
+    } catch { return []; }
+  }
+
+  async function updateExtraVenues(buildingId: number, venues: Venue[]) {
+    const extraVenues = JSON.stringify(venues);
+    setLocalBuildings((prev) =>
+      prev.map((b) => (b.id === buildingId ? { ...b, extraVenues } : b))
+    );
+    await fetch(`/api/buildings/${buildingId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ extraVenues }),
+    });
+  }
+
   async function uploadFloorPlan(buildingId: number, file: File) {
     setUploading(true);
     try {
@@ -155,7 +191,7 @@ export default function SpaceTab({ buildings: buildingsProp, onRefresh }: SpaceT
   }
 
   return (
-    <div className="flex gap-3 h-[calc(100vh-140px)]">
+    <div className="flex gap-3">
       {/* Left Panel: Building List */}
       <div className="w-60 shrink-0 flex flex-col gap-2">
         <div className="flex items-center justify-between">
@@ -208,22 +244,103 @@ export default function SpaceTab({ buildings: buildingsProp, onRefresh }: SpaceT
       </div>
 
       {/* Right Panel: Building Detail */}
-      <div className="flex-1 overflow-y-auto task-scroll">
+      <div className="flex-1 overflow-hidden">
         {!selectedBuilding ? (
           <div className="flex items-center justify-center h-full text-[--text-muted] text-sm">
             请从左侧选择一栋楼座
           </div>
         ) : (
           <div className="space-y-3">
-            {/* Building Header */}
-            <div className="card p-4">
-              <div className="flex items-center justify-between mb-3">
-                <h2 className="text-base font-bold text-[--text-primary]">{selectedBuilding.name}</h2>
-                <div className="flex items-center gap-2">
-                  {selectedBuilding.floorPlanUrl && (
+            {/* Building Header — just name */}
+            <div className="flex items-center gap-2">
+              <h2 className="text-base font-bold text-[--text-primary]">{selectedBuilding.name}</h2>
+              {!cropMode && selectedBuilding.cropX != null && (
+                <span className="text-[10px] text-green-600 font-medium">已设置主体范围</span>
+              )}
+            </div>
+
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/*"
+              className="hidden"
+              onChange={handleFloorPlanSelect}
+            />
+
+            {/* Floor Plan Upload — only when no image yet */}
+            {!selectedBuilding.floorPlanUrl && (
+              <div
+                className={`border-2 border-dashed rounded-2xl p-4 text-center cursor-pointer transition-colors ${
+                  uploading ? "border-purple-300 bg-purple-50" : "border-gray-200 hover:border-purple-300"
+                }`}
+                onClick={() => fileInputRef.current?.click()}
+                onDragOver={(e) => e.preventDefault()}
+                onDrop={handleFloorPlanDrop}
+              >
+                {uploading ? (
+                  <p className="text-sm text-purple-600 font-medium">上传中...</p>
+                ) : (
+                  <>
+                    <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#9333ea" strokeWidth="1.5" className="mx-auto mb-2">
+                      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                      <polyline points="17 8 12 3 7 8" />
+                      <line x1="12" y1="3" x2="12" y2="15" />
+                    </svg>
+                    <p className="text-xs text-[--text-secondary]">拖拽或点击上传平面图</p>
+                  </>
+                )}
+              </div>
+            )}
+
+            {/* Map + Right Sidebar */}
+            {selectedBuilding.floorPlanUrl && (
+              <div className="flex gap-3 items-start">
+                {/* Map Editor — takes remaining space */}
+                <div className="flex-1 min-w-0">
+                  <MapEditor
+                    building={selectedBuilding}
+                    rooms={selectedBuilding.rooms}
+                    venues={getExtraVenues(selectedBuilding)}
+                    cropMode={cropMode}
+                    onRoomUpdate={(roomId, x, y, fenceRadius) =>
+                      updateRoomCoords(selectedBuilding.id, roomId, x, y, fenceRadius)
+                    }
+                    onVenueUpdate={(venueName, x, y) => {
+                      const venues = getExtraVenues(selectedBuilding).map((v) =>
+                        v.name === venueName ? { ...v, x, y } : v
+                      );
+                      updateExtraVenues(selectedBuilding.id, venues);
+                    }}
+                    onCropUpdate={(crop) => updateBuildingCrop(selectedBuilding.id, crop)}
+                    onCropModeChange={setCropMode}
+                  />
+                </div>
+
+                {/* Right Sidebar — all actions */}
+                <div className="w-48 shrink-0 space-y-2">
+                  {/* 1. 框选主体范围 */}
+                  <div className="card p-3">
+                    <button
+                      onClick={() => setCropMode(!cropMode)}
+                      className={`w-full flex items-center gap-1.5 px-2.5 py-2 rounded-lg text-xs font-medium transition-colors ${
+                        cropMode
+                          ? "bg-orange-100 text-orange-700 ring-2 ring-orange-400"
+                          : "bg-gray-50 text-gray-600 hover:bg-gray-100"
+                      }`}
+                    >
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                        <path d="M6 2v14a2 2 0 0 0 2 2h14" />
+                        <path d="M18 22V8a2 2 0 0 0-2-2H2" />
+                      </svg>
+                      {cropMode ? "正在框选…" : "框选主体范围"}
+                    </button>
+                  </div>
+
+                  {/* 2. 更换平面图 */}
+                  <div className="card p-3">
                     <button
                       onClick={() => fileInputRef.current?.click()}
-                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-purple-50 text-purple-600 text-xs font-medium hover:bg-purple-100 transition-colors"
+                      className="w-full flex items-center gap-1.5 px-2.5 py-2 rounded-lg bg-purple-50 text-purple-600 text-xs font-medium hover:bg-purple-100 transition-colors"
                     >
                       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                         <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
@@ -232,81 +349,108 @@ export default function SpaceTab({ buildings: buildingsProp, onRefresh }: SpaceT
                       </svg>
                       {uploading ? "上传中..." : "更换平面图"}
                     </button>
-                  )}
+                  </div>
+
+                  {/* 3. 添加房间 */}
+                  <div className="card p-3">
+                    <button
+                      onClick={() => setShowRoomModal(true)}
+                      className="w-full flex items-center gap-1.5 px-2.5 py-2 rounded-lg bg-green-50 text-green-600 text-xs font-medium hover:bg-green-100 transition-colors"
+                    >
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                        <line x1="12" y1="5" x2="12" y2="19" />
+                        <line x1="5" y1="12" x2="19" y2="12" />
+                      </svg>
+                      添加房间
+                    </button>
+                  </div>
+
+                  {/* 4. 添加额外场地 */}
+                  <div className="card p-3">
+                    <div className="flex gap-1.5 mb-2">
+                      <input
+                        value={newVenue}
+                        onChange={(e) => setNewVenue(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter" && newVenue.trim()) {
+                            const venues = getExtraVenues(selectedBuilding);
+                            if (!venues.some((v) => v.name === newVenue.trim())) {
+                              updateExtraVenues(selectedBuilding.id, [...venues, { name: newVenue.trim(), x: 50, y: 50, type: newVenueType }]);
+                            }
+                            setNewVenue("");
+                          }
+                        }}
+                        className="flex-1 min-w-0 px-2 py-1.5 rounded-lg bg-[--bg-base] border border-gray-200 text-[11px] outline-none focus:border-blue-400 transition-colors"
+                        placeholder="场地名称"
+                      />
+                      <select
+                        value={newVenueType}
+                        onChange={(e) => setNewVenueType(e.target.value as "实景棚" | "无影棚")}
+                        className="px-1.5 py-1.5 rounded-lg bg-[--bg-base] border border-gray-200 text-[11px] outline-none focus:border-blue-400 transition-colors"
+                      >
+                        <option value="实景棚">实景棚</option>
+                        <option value="无影棚">无影棚</option>
+                      </select>
+                      <button
+                        onClick={() => {
+                          if (!newVenue.trim()) return;
+                          const venues = getExtraVenues(selectedBuilding);
+                          if (!venues.some((v) => v.name === newVenue.trim())) {
+                            updateExtraVenues(selectedBuilding.id, [...venues, { name: newVenue.trim(), x: 50, y: 50, type: newVenueType }]);
+                          }
+                          setNewVenue("");
+                        }}
+                        className="px-2 py-1.5 rounded-lg bg-blue-500 text-white text-xs font-semibold hover:bg-blue-600 transition-colors shrink-0"
+                      >
+                        +
+                      </button>
+                    </div>
+                    {getExtraVenues(selectedBuilding).length > 0 && (
+                      <div className="space-y-1 max-h-32 overflow-y-auto task-scroll">
+                        {getExtraVenues(selectedBuilding).map((venue) => (
+                          <div
+                            key={venue.name}
+                            className={`flex items-center justify-between px-2 py-1 rounded-lg group ${venue.type === "无影棚" ? "bg-gray-50" : "bg-blue-50"}`}
+                          >
+                            <div className="flex items-center gap-1.5 min-w-0">
+                              <div className={`w-2 h-2 rounded-sm shrink-0 ${venue.type === "无影棚" ? "bg-gray-400" : "bg-blue-500"}`} style={{ transform: "rotate(45deg)" }} />
+                              <span className={`text-[11px] font-medium truncate ${venue.type === "无影棚" ? "text-gray-600" : "text-blue-700"}`}>{venue.name}</span>
+                              <span className="text-[9px] text-gray-400">{venue.type || "实景棚"}</span>
+                            </div>
+                            <button
+                              onClick={() => {
+                                const venues = getExtraVenues(selectedBuilding).filter((v) => v.name !== venue.name);
+                                updateExtraVenues(selectedBuilding.id, venues);
+                              }}
+                              className="text-blue-300 hover:text-red-500 transition-colors text-sm leading-none ml-1 shrink-0 opacity-0 group-hover:opacity-100"
+                            >
+                              ×
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
                 </div>
               </div>
+            )}
 
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept="image/*"
-                className="hidden"
-                onChange={handleFloorPlanSelect}
-              />
-
-              {/* Floor Plan Upload — only when no image yet */}
-              {!selectedBuilding.floorPlanUrl && (
-                <div
-                  className={`border-2 border-dashed rounded-2xl p-4 text-center cursor-pointer transition-colors mb-3 ${
-                    uploading ? "border-purple-300 bg-purple-50" : "border-gray-200 hover:border-purple-300"
-                  }`}
-                  onClick={() => fileInputRef.current?.click()}
-                  onDragOver={(e) => e.preventDefault()}
-                  onDrop={handleFloorPlanDrop}
-                >
-                  {uploading ? (
-                    <p className="text-sm text-purple-600 font-medium">上传中...</p>
-                  ) : (
-                    <>
-                      <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#9333ea" strokeWidth="1.5" className="mx-auto mb-2">
-                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-                        <polyline points="17 8 12 3 7 8" />
-                        <line x1="12" y1="3" x2="12" y2="15" />
-                      </svg>
-                      <p className="text-xs text-[--text-secondary]">拖拽或点击上传平面图</p>
-                    </>
-                  )}
-                </div>
-              )}
-
-              {/* Map Editor */}
-              <MapEditor
-                building={selectedBuilding}
-                rooms={selectedBuilding.rooms}
-                onRoomUpdate={(roomId, x, y, fenceRadius) =>
-                  updateRoomCoords(selectedBuilding.id, roomId, x, y, fenceRadius)
-                }
-                onCropUpdate={(crop) => updateBuildingCrop(selectedBuilding.id, crop)}
-              />
-            </div>
-
-            {/* Room List */}
-            <div className="card p-4">
-              <div className="flex items-center justify-between mb-3">
-                <h3 className="text-xs font-semibold text-[--text-primary]">
+            {/* Room List — below the map */}
+            {selectedBuilding.rooms.length > 0 && (
+              <div className="card p-4">
+                <h3 className="text-xs font-semibold text-[--text-primary] mb-2">
                   房间列表 ({selectedBuilding.rooms.length})
                 </h3>
-                <button
-                  onClick={() => setShowRoomModal(true)}
-                  className="px-3 py-1.5 rounded-xl bg-gradient-to-r from-green-500 to-green-600 text-white text-xs font-semibold shadow-sm shadow-green-200 hover:shadow-green-300 transition-all active:scale-[0.98]"
-                >
-                  + 添加房间
-                </button>
-              </div>
-
-              <div className="space-y-1">
-                <div className="grid grid-cols-6 gap-2 px-2 text-[10px] text-[--text-muted] font-medium uppercase tracking-wider">
-                  <span>房间号</span>
-                  <span>楼层</span>
-                  <span>围栏半径</span>
-                  <span>X 坐标</span>
-                  <span>Y 坐标</span>
-                  <span>操作</span>
-                </div>
-                {selectedBuilding.rooms.length === 0 ? (
-                  <div className="text-center py-4 text-[--text-muted] text-xs">暂无房间</div>
-                ) : (
-                  selectedBuilding.rooms.map((room) => (
+                <div className="space-y-1">
+                  <div className="grid grid-cols-6 gap-2 px-2 text-[10px] text-[--text-muted] font-medium uppercase tracking-wider">
+                    <span>房间号</span>
+                    <span>楼层</span>
+                    <span>围栏半径</span>
+                    <span>X 坐标</span>
+                    <span>Y 坐标</span>
+                    <span>操作</span>
+                  </div>
+                  {selectedBuilding.rooms.map((room) => (
                     <div
                       key={room.id}
                       className="grid grid-cols-6 gap-2 px-2 py-2 rounded-xl bg-[--bg-base] hover:bg-gray-100 transition-colors items-center"
@@ -327,10 +471,10 @@ export default function SpaceTab({ buildings: buildingsProp, onRefresh }: SpaceT
                         删除
                       </button>
                     </div>
-                  ))
-                )}
+                  ))}
+                </div>
               </div>
-            </div>
+            )}
           </div>
         )}
       </div>

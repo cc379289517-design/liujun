@@ -181,7 +181,7 @@ export async function POST(request: NextRequest) {
       if (category.priorityLevel === 1) {
         const busyAssistants = await prisma.profile.findMany({
           where: {
-            role: "assistant",
+            role: { in: ["assistant", "assistant_leader"] },
             status: { in: ["executing", "busy"] },
             isOnline: true,
             buildingId,

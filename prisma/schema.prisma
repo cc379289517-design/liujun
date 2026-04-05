@@ -18,6 +18,7 @@ model Building {
   cropY         Float?   @map("crop_y")
   cropW         Float?   @map("crop_w")
   cropH         Float?   @map("crop_h")
+  extraVenues   String?  @map("extra_venues") // JSON array: ["化妆间","休息区"]
   rooms         Room[]
   profiles      Profile[]
   createdAt     DateTime @default(now()) @map("created_at")
@@ -48,7 +49,8 @@ model Room {
 enum Role {
   photographer
   assistant
-  leader
+  assistant_leader
+  admin
 }
 
 // ============================================

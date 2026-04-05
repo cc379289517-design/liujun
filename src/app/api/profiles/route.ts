@@ -1,6 +1,6 @@
 import { NextRequest } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { Role } from "@/generated/prisma/client";
+import { Role } from "@/generated/prisma/enums";
 
 /**
  * GET /api/profiles - 查询用户列表
@@ -21,7 +21,7 @@ export async function GET(request: NextRequest) {
     const profiles = await prisma.profile.findMany({
       where,
       include: {
-        building: { select: { id: true, name: true } },
+        building: { select: { id: true, name: true, extraVenues: true } },
       },
       orderBy: [{ role: "asc" }, { name: "asc" }],
     });

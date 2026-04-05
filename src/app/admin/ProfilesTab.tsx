@@ -6,18 +6,20 @@ import * as XLSX from "xlsx";
 
 type Building = { id: number; name: string; floorPlanUrl: string | null; rooms: Room[] };
 type Room = { id: number; buildingId: number; roomNumber: string; floor: number; xPosition: number; yPosition: number; fenceRadius: number };
-type Profile = { id: string; employeeId: string | null; name: string; avatar: string | null; role: "photographer" | "assistant" | "leader"; buildingId: number; currentRoom: string | null; status: string; onlineStatus: string; isOnline: boolean; department: string | null; group: string | null; building: { id: number; name: string } };
+type Profile = { id: string; employeeId: string | null; name: string; avatar: string | null; role: "photographer" | "assistant" | "assistant_leader" | "admin"; buildingId: number; currentRoom: string | null; status: string; onlineStatus: string; isOnline: boolean; department: string | null; group: string | null; building: { id: number; name: string } };
 
 const ROLE_MAP: Record<string, { label: string; color: string; bg: string }> = {
   photographer: { label: "摄影师", color: "text-orange-600", bg: "bg-orange-50" },
   assistant: { label: "助理", color: "text-green-600", bg: "bg-green-50" },
-  leader: { label: "组长", color: "text-blue-600", bg: "bg-blue-50" },
+  assistant_leader: { label: "助理组长", color: "text-blue-600", bg: "bg-blue-50" },
+  admin: { label: "管理", color: "text-purple-600", bg: "bg-purple-50" },
 };
 
 const ROLE_CN_MAP: Record<string, string> = {
   "摄影师": "photographer",
   "助理": "assistant",
-  "组长": "leader",
+  "助理组长": "assistant_leader",
+  "管理": "admin",
 };
 
 const ONLINE_STATUS_MAP: Record<string, { label: string; color: string; bg: string; next: string }> = {
@@ -40,6 +42,7 @@ export default function ProfilesTab({
   const [filterBuilding, setFilterBuilding] = useState("");
   const [filterDepartment, setFilterDepartment] = useState("");
   const [filterGroup, setFilterGroup] = useState("");
+  const [searchQuery, setSearchQuery] = useState("");
   const [showProfileModal, setShowProfileModal] = useState(false);
   const [editingProfile, setEditingProfile] = useState<Profile | null>(null);
   const [showImportModal, setShowImportModal] = useState(false);
@@ -54,20 +57,56 @@ export default function ProfilesTab({
   const profiles = localProfiles;
 
   const departments = [...new Set(profiles.map((p) => p.department).filter(Boolean))] as string[];
-  const groups = [...new Set(profiles.map((p) => p.group).filter(Boolean))] as string[];
+
+  // Sort groups by department order: 摄影一部 → 摄影二部 → 全域优化组 → others
+  const DEPT_ORDER = ["摄影一部", "摄影二部", "全域优化组"];
+  const groupsByDept: { dept: string; group: string }[] = [];
+  const seenGroups = new Set<string>();
+  for (const dept of DEPT_ORDER) {
+    profiles
+      .filter((p) => p.department === dept && p.group)
+      .forEach((p) => {
+        if (!seenGroups.has(p.group!)) {
+          seenGroups.add(p.group!);
+          groupsByDept.push({ dept, group: p.group! });
+        }
+      });
+  }
+  // Append groups from other departments not in DEPT_ORDER
+  profiles
+    .filter((p) => p.group && (!p.department || !DEPT_ORDER.includes(p.department)))
+    .forEach((p) => {
+      if (!seenGroups.has(p.group!)) {
+        seenGroups.add(p.group!);
+        groupsByDept.push({ dept: p.department || "", group: p.group! });
+      }
+    });
+
+  // Filter groupsByDept based on selected department
+  const visibleGroups = filterDepartment
+    ? groupsByDept.filter((g) => g.dept === filterDepartment)
+    : groupsByDept;
 
   const filteredProfiles = profiles.filter((p) => {
     if (filterRole && p.role !== filterRole) return false;
     if (filterBuilding && p.buildingId !== parseInt(filterBuilding)) return false;
     if (filterDepartment && p.department !== filterDepartment) return false;
     if (filterGroup && p.group !== filterGroup) return false;
+    if (searchQuery) {
+      const q = searchQuery.toLowerCase();
+      const match = p.name.toLowerCase().includes(q)
+        || (p.employeeId && p.employeeId.toLowerCase().includes(q))
+        || (p.department && p.department.toLowerCase().includes(q))
+        || (p.group && p.group.toLowerCase().includes(q));
+      if (!match) return false;
+    }
     return true;
   });
 
   const stats = {
     photographers: profiles.filter((p) => p.role === "photographer").length,
-    assistants: profiles.filter((p) => p.role === "assistant").length,
-    leaders: profiles.filter((p) => p.role === "leader").length,
+    assistants: profiles.filter((p) => p.role === "assistant" || p.role === "assistant_leader").length,
+    admins: profiles.filter((p) => p.role === "admin").length,
     total: profiles.length,
   };
 
@@ -93,21 +132,24 @@ export default function ProfilesTab({
   }
 
   return (
-    <>
+    <div className="space-y-3">
       {/* Stats */}
       <div className="grid grid-cols-4 gap-4">
         {[
-          { label: "摄影师数", value: stats.photographers, bg: "bg-orange-50", color: "text-orange-600", icon: "📷" },
-          { label: "助理数", value: stats.assistants, bg: "bg-green-50", color: "text-green-600", icon: "🤝" },
-          { label: "组长数", value: stats.leaders, bg: "bg-blue-50", color: "text-blue-600", icon: "👔" },
-          { label: "总人数", value: stats.total, bg: "bg-purple-50", color: "text-purple-600", icon: "👥" },
+          { label: "摄影师数", value: stats.photographers, color: "text-orange-600", role: "photographer" },
+          { label: "助理数", value: stats.assistants, color: "text-green-600", role: "assistant" },
+          { label: "管理数", value: stats.admins, color: "text-purple-600", role: "admin" },
+          { label: "总人数", value: stats.total, color: "text-purple-600", role: "" },
         ].map((s) => (
-          <div key={s.label} className="card p-5">
-            <div className="flex items-center justify-between mb-3">
-              <span className="text-xs text-[--text-muted] font-medium">{s.label}</span>
-              <span className={`w-9 h-9 rounded-xl ${s.bg} flex items-center justify-center text-lg`}>{s.icon}</span>
-            </div>
-            <p className={`text-3xl font-bold ${s.color}`}>{s.value}</p>
+          <div
+            key={s.label}
+            onClick={() => setFilterRole(filterRole === s.role ? "" : s.role)}
+            className={`card px-5 py-2.5 flex items-center justify-between cursor-pointer transition-all ${
+              filterRole === s.role ? "ring-2 ring-purple-400 shadow-md" : "hover:shadow-md"
+            }`}
+          >
+            <span className={`text-xl font-bold ${s.color}`}>{s.label}</span>
+            <span className={`text-xl font-bold ${s.color}`}>{s.value}</span>
           </div>
         ))}
       </div>
@@ -123,7 +165,8 @@ export default function ProfilesTab({
             <option value="">全部角色</option>
             <option value="photographer">摄影师</option>
             <option value="assistant">助理</option>
-            <option value="leader">组长</option>
+            <option value="assistant_leader">助理组长</option>
+            <option value="admin">管理</option>
           </select>
           <select
             value={filterBuilding}
@@ -137,7 +180,7 @@ export default function ProfilesTab({
           </select>
           <select
             value={filterDepartment}
-            onChange={(e) => setFilterDepartment(e.target.value)}
+            onChange={(e) => { setFilterDepartment(e.target.value); setFilterGroup(""); }}
             className="px-3 py-2 rounded-xl bg-[--bg-card] border border-gray-200 text-sm text-[--text-secondary] outline-none"
           >
             <option value="">全部部门</option>
@@ -151,12 +194,33 @@ export default function ProfilesTab({
             className="px-3 py-2 rounded-xl bg-[--bg-card] border border-gray-200 text-sm text-[--text-secondary] outline-none"
           >
             <option value="">全部小组</option>
-            {groups.map((g) => (
-              <option key={g} value={g}>{g}</option>
-            ))}
+            {(() => {
+              const items: React.ReactNode[] = [];
+              let lastDept = "";
+              for (const { dept, group } of visibleGroups) {
+                if (dept && dept !== lastDept) {
+                  items.push(<optgroup key={`dept-${dept}`} label={dept} />);
+                  lastDept = dept;
+                }
+                items.push(<option key={group} value={group}>{group}</option>);
+              }
+              return items;
+            })()}
           </select>
         </div>
-        <div className="flex gap-2">
+        <div className="flex gap-2 items-center">
+          <div className="relative">
+            <svg className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-400" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <circle cx="11" cy="11" r="8" />
+              <line x1="21" y1="21" x2="16.65" y2="16.65" />
+            </svg>
+            <input
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              className="pl-8 pr-3 py-2 rounded-xl bg-[--bg-card] border border-gray-200 text-sm text-[--text-secondary] outline-none focus:border-purple-400 transition-colors w-48"
+              placeholder="搜索姓名/工号/组..."
+            />
+          </div>
           <button
             onClick={() => setShowImportModal(true)}
             className="px-4 py-2 rounded-xl bg-gradient-to-r from-green-500 to-green-600 text-white text-sm font-semibold shadow-sm shadow-green-200 hover:shadow-green-300 transition-all active:scale-[0.98]"
@@ -174,9 +238,9 @@ export default function ProfilesTab({
 
       {/* Table */}
       <div className="card p-5">
-        <div className="space-y-2">
-          <div className="grid grid-cols-9 gap-3 px-3 text-[10px] text-[--text-muted] font-medium uppercase tracking-wider">
-            <span>姓名</span><span>工号</span><span>角色</span><span>部门</span><span>小组</span><span>所属楼座</span><span>当前房间</span><span>在线状态</span><span>操作</span>
+        <div className="space-y-1.5">
+          <div className="grid grid-cols-9 gap-3 px-3 py-2.5 rounded-xl bg-gray-100 text-xs text-[--text-secondary] font-semibold tracking-wide">
+            <span className="text-center">姓名</span><span className="text-center">工号</span><span className="text-center">角色</span><span className="text-center">部门</span><span className="text-center">小组</span><span className="text-center">所属楼座</span><span className="text-center">所属房间</span><span className="text-center">在线状态</span><span className="text-center">操作</span>
           </div>
           {filteredProfiles.length === 0 ? (
             <div className="text-center py-8 text-[--text-muted] text-sm">暂无数据</div>
@@ -185,21 +249,23 @@ export default function ProfilesTab({
               const r = ROLE_MAP[p.role];
               const os = ONLINE_STATUS_MAP[p.onlineStatus || "offline"] || ONLINE_STATUS_MAP.offline;
               return (
-                <div key={p.id} className="grid grid-cols-9 gap-3 px-3 py-3 rounded-xl bg-[--bg-base] hover:bg-gray-100 transition-colors items-center">
-                  <span className="text-sm font-medium text-[--text-primary]">{p.name}</span>
-                  <span className="text-xs text-[--text-muted] font-mono">{p.employeeId || "—"}</span>
-                  <span className={`text-[10px] font-bold px-2 py-0.5 rounded-md w-fit ${r.bg} ${r.color}`}>{r.label}</span>
-                  <span className="text-xs text-[--text-secondary]">{p.department || "—"}</span>
-                  <span className="text-xs text-[--text-secondary]">{p.group || "—"}</span>
-                  <span className="text-xs text-[--text-secondary]">{p.building.name}</span>
-                  <span className="text-xs text-[--text-secondary]">{p.currentRoom || "—"}</span>
-                  <button
-                    onClick={() => toggleOnlineStatus(p)}
-                    className={`text-[10px] font-bold px-2 py-0.5 rounded-md w-fit cursor-pointer ${os.bg} ${os.color} hover:opacity-80 transition-opacity`}
-                  >
-                    {os.label}
-                  </button>
-                  <div className="flex gap-1.5">
+                <div key={p.id} className="grid grid-cols-9 gap-3 px-3 py-2.5 rounded-xl bg-[--bg-base] hover:bg-gray-50 transition-colors items-center">
+                  <span className="text-sm font-medium text-[--text-primary] text-center">{p.name}</span>
+                  <span className="text-xs text-[--text-muted] font-mono text-center">{p.employeeId || "—"}</span>
+                  <span className="flex justify-center"><span className={`text-[10px] font-bold px-2 py-0.5 rounded-md ${r.bg} ${r.color}`}>{r.label}</span></span>
+                  <span className="text-xs text-[--text-secondary] text-center">{p.department || "—"}</span>
+                  <span className="text-xs text-[--text-secondary] text-center">{p.group || "—"}</span>
+                  <span className="text-xs text-[--text-secondary] text-center">{p.building.name}</span>
+                  <span className="text-xs text-[--text-secondary] text-center">{p.currentRoom || "—"}</span>
+                  <span className="flex justify-center">
+                    <button
+                      onClick={() => toggleOnlineStatus(p)}
+                      className={`text-[10px] font-bold px-2 py-0.5 rounded-md cursor-pointer ${os.bg} ${os.color} hover:opacity-80 transition-opacity`}
+                    >
+                      {os.label}
+                    </button>
+                  </span>
+                  <div className="flex gap-1.5 justify-center">
                     <button
                       onClick={() => { setEditingProfile(p); setShowProfileModal(true); }}
                       className="text-[10px] px-2 py-1 rounded-lg bg-blue-50 text-blue-600 font-medium hover:bg-blue-100 transition-colors"
@@ -244,7 +310,7 @@ export default function ProfilesTab({
         />,
         document.body
       )}
-    </>
+    </div>
   );
 }
 
@@ -339,12 +405,13 @@ function ProfileModal({
             <label className="text-xs font-medium text-[--text-secondary] mb-1 block">角色 *</label>
             <select
               value={form.role}
-              onChange={(e) => setForm({ ...form, role: e.target.value as "photographer" | "assistant" | "leader" })}
+              onChange={(e) => setForm({ ...form, role: e.target.value as "photographer" | "assistant" | "assistant_leader" | "admin" })}
               className="w-full px-3 py-2.5 rounded-xl bg-[--bg-base] border border-gray-200 text-sm outline-none focus:border-purple-400 transition-colors"
             >
               <option value="photographer">摄影师</option>
               <option value="assistant">助理</option>
-              <option value="leader">组长</option>
+              <option value="assistant_leader">助理组长</option>
+              <option value="admin">管理</option>
             </select>
           </div>
           <div>
@@ -378,7 +445,7 @@ function ProfileModal({
             />
           </div>
           <div>
-            <label className="text-xs font-medium text-[--text-secondary] mb-1 block">当前房间</label>
+            <label className="text-xs font-medium text-[--text-secondary] mb-1 block">所属房间</label>
             <input
               value={form.currentRoom}
               onChange={(e) => setForm({ ...form, currentRoom: e.target.value })}

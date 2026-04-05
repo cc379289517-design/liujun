@@ -25,18 +25,31 @@ type Room = {
   fenceRadius: number;
 };
 
+export type Venue = {
+  name: string;
+  x: number;
+  y: number;
+  type?: "实景棚" | "无影棚";
+};
+
 interface MapEditorProps {
   building: Building;
   rooms: Room[];
+  venues?: Venue[];
+  cropMode?: boolean;
   onRoomUpdate: (roomId: number, xPosition: number, yPosition: number, fenceRadius: number) => void;
+  onVenueUpdate?: (venueName: string, x: number, y: number) => void;
   onCropUpdate?: (crop: CropData | null) => void;
+  onCropModeChange?: (mode: boolean) => void;
+  onCropSave?: () => void;
+  onCropClear?: () => void;
 }
 
 const MIN_ZOOM = 1;
 const MAX_ZOOM = 5;
 const ZOOM_STEP = 0.15;
 
-export default function MapEditor({ building, rooms, onRoomUpdate, onCropUpdate }: MapEditorProps) {
+export default function MapEditor({ building, rooms, venues = [], cropMode: cropModeProp, onRoomUpdate, onVenueUpdate, onCropUpdate, onCropModeChange, onCropSave, onCropClear }: MapEditorProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const innerRef = useRef<HTMLDivElement>(null);
 
@@ -51,6 +64,17 @@ export default function MapEditor({ building, rooms, onRoomUpdate, onCropUpdate 
   const [dragPos, setDragPos] = useState<{ x: number; y: number } | null>(null);
   const [hoveredRoom, setHoveredRoom] = useState<number | null>(null);
 
+  // Venue dragging state
+  const [venueDragging, setVenueDragging] = useState<{
+    name: string;
+    startX: number;
+    startY: number;
+    origX: number;
+    origY: number;
+  } | null>(null);
+  const [venueDragPos, setVenueDragPos] = useState<{ x: number; y: number } | null>(null);
+  const [hoveredVenue, setHoveredVenue] = useState<string | null>(null);
+
   // Pan & zoom state
   const [zoom, setZoom] = useState(MIN_ZOOM);
   const [pan, setPan] = useState({ x: 0, y: 0 });
@@ -61,8 +85,10 @@ export default function MapEditor({ building, rooms, onRoomUpdate, onCropUpdate 
     origPanY: number;
   } | null>(null);
 
-  // Crop mode state
-  const [cropMode, setCropMode] = useState(false);
+  // Crop mode state — controlled by parent if prop provided
+  const [cropModeInternal, setCropModeInternal] = useState(false);
+  const cropMode = cropModeProp !== undefined ? cropModeProp : cropModeInternal;
+  const setCropMode = onCropModeChange || setCropModeInternal;
   const [cropRect, setCropRect] = useState<{ x: number; y: number; w: number; h: number } | null>(
     building.cropX != null && building.cropY != null && building.cropW != null && building.cropH != null
       ? { x: building.cropX, y: building.cropY, w: building.cropW, h: building.cropH }
@@ -195,10 +221,62 @@ export default function MapEditor({ building, rooms, onRoomUpdate, onCropUpdate 
     };
   }, [dragging, dragPos, rooms, onRoomUpdate]);
 
+  // --- Venue drag handlers ---
+  const handleVenueMouseDown = useCallback(
+    (e: React.MouseEvent, venue: Venue) => {
+      if (cropMode) return;
+      e.preventDefault();
+      e.stopPropagation();
+      setVenueDragging({
+        name: venue.name,
+        startX: e.clientX,
+        startY: e.clientY,
+        origX: venue.x,
+        origY: venue.y,
+      });
+      setVenueDragPos({ x: venue.x, y: venue.y });
+    },
+    [cropMode]
+  );
+
+  useEffect(() => {
+    if (!venueDragging) return;
+
+    const handleMove = (e: MouseEvent) => {
+      const inner = innerRef.current;
+      if (!inner) return;
+      const rect = inner.getBoundingClientRect();
+      const deltaXPct = ((e.clientX - venueDragging.startX) / rect.width) * 100;
+      const deltaYPct = ((e.clientY - venueDragging.startY) / rect.height) * 100;
+      const newX = Math.max(0, Math.min(100, venueDragging.origX + deltaXPct));
+      const newY = Math.max(0, Math.min(100, venueDragging.origY + deltaYPct));
+      setVenueDragPos({ x: newX, y: newY });
+    };
+
+    const handleUp = () => {
+      if (venueDragPos && onVenueUpdate) {
+        onVenueUpdate(
+          venueDragging.name,
+          Math.round(venueDragPos.x * 100) / 100,
+          Math.round(venueDragPos.y * 100) / 100
+        );
+      }
+      setVenueDragging(null);
+      setVenueDragPos(null);
+    };
+
+    window.addEventListener("mousemove", handleMove);
+    window.addEventListener("mouseup", handleUp);
+    return () => {
+      window.removeEventListener("mousemove", handleMove);
+      window.removeEventListener("mouseup", handleUp);
+    };
+  }, [venueDragging, venueDragPos, onVenueUpdate]);
+
   // --- Pan handlers ---
   const handlePanMouseDown = useCallback(
     (e: React.MouseEvent) => {
-      if (dragging || cropMode) return;
+      if (dragging || venueDragging || cropMode) return;
       e.preventDefault();
       setPanning({
         startX: e.clientX,
@@ -207,7 +285,7 @@ export default function MapEditor({ building, rooms, onRoomUpdate, onCropUpdate 
         origPanY: pan.y,
       });
     },
-    [dragging, pan, cropMode]
+    [dragging, venueDragging, pan, cropMode]
   );
 
   useEffect(() => {
@@ -363,13 +441,15 @@ export default function MapEditor({ building, rooms, onRoomUpdate, onCropUpdate 
       });
     }
     setCropMode(false);
-  }, [cropRect, onCropUpdate]);
+    onCropSave?.();
+  }, [cropRect, onCropUpdate, setCropMode, onCropSave]);
 
   const handleCropClear = useCallback(() => {
     setCropRect(null);
     if (onCropUpdate) onCropUpdate(null);
     setCropMode(false);
-  }, [onCropUpdate]);
+    onCropClear?.();
+  }, [onCropUpdate, setCropMode, onCropClear]);
 
   if (!building.floorPlanUrl) {
     return (
@@ -406,42 +486,21 @@ export default function MapEditor({ building, rooms, onRoomUpdate, onCropUpdate 
 
   return (
     <div className="relative">
-      {/* Crop mode toggle button */}
-      {onCropUpdate && (
+      {/* Crop save/clear inline when in crop mode */}
+      {cropMode && cropRect && cropRect.w > 1 && cropRect.h > 1 && (
         <div className="flex items-center gap-2 mb-2">
           <button
-            onClick={() => setCropMode(!cropMode)}
-            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-medium transition-colors ${
-              cropMode
-                ? "bg-orange-100 text-orange-700 ring-2 ring-orange-400"
-                : "bg-gray-100 text-gray-600 hover:bg-gray-200"
-            }`}
+            onClick={handleCropSave}
+            className="px-3 py-1.5 rounded-xl bg-green-500 text-white text-xs font-semibold hover:bg-green-600 transition-colors"
           >
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <path d="M6 2v14a2 2 0 0 0 2 2h14" />
-              <path d="M18 22V8a2 2 0 0 0-2-2H2" />
-            </svg>
-            主体范围
+            保存范围
           </button>
-          {cropMode && cropRect && cropRect.w > 1 && cropRect.h > 1 && (
-            <>
-              <button
-                onClick={handleCropSave}
-                className="px-3 py-1.5 rounded-xl bg-green-500 text-white text-xs font-semibold hover:bg-green-600 transition-colors"
-              >
-                保存范围
-              </button>
-              <button
-                onClick={handleCropClear}
-                className="px-3 py-1.5 rounded-xl bg-red-50 text-red-600 text-xs font-medium hover:bg-red-100 transition-colors"
-              >
-                清除
-              </button>
-            </>
-          )}
-          {!cropMode && cropRect && cropRect.w > 1 && (
-            <span className="text-[10px] text-green-600 font-medium">已设置主体范围</span>
-          )}
+          <button
+            onClick={handleCropClear}
+            className="px-3 py-1.5 rounded-xl bg-red-50 text-red-600 text-xs font-medium hover:bg-red-100 transition-colors"
+          >
+            清除
+          </button>
         </div>
       )}
 
@@ -544,16 +603,17 @@ export default function MapEditor({ building, rooms, onRoomUpdate, onCropUpdate 
             />
           )}
 
-          {/* Existing crop indicator when NOT in crop mode */}
-          {!cropMode && cropRect && cropRect.w > 1 && (
+          {/* Persistent crop indicator when NOT in crop mode — gray dashed border */}
+          {!cropMode && cropRect && cropRect.w > 1 && cropRect.h > 1 && (
             <div
-              className="absolute border-2 border-dashed border-gray-400/60 pointer-events-none"
+              className="absolute pointer-events-none"
               style={{
                 left: `${cropRect.x}%`,
                 top: `${cropRect.y}%`,
                 width: `${cropRect.w}%`,
                 height: `${cropRect.h}%`,
-                zIndex: 5,
+                border: "2px dashed #9ca3af",
+                zIndex: 15,
               }}
             />
           )}
@@ -606,6 +666,57 @@ export default function MapEditor({ building, rooms, onRoomUpdate, onCropUpdate 
               </div>
             );
           })}
+
+          {/* Venue markers — blue diamond */}
+          {venues.map((venue) => {
+            const isDraggingVenue = venueDragging?.name === venue.name;
+            const vx = isDraggingVenue && venueDragPos ? venueDragPos.x : venue.x;
+            const vy = isDraggingVenue && venueDragPos ? venueDragPos.y : venue.y;
+            const isVenueHovered = hoveredVenue === venue.name;
+
+            return (
+              <div
+                key={venue.name}
+                className="absolute flex flex-col items-center"
+                style={{
+                  left: `${vx}%`,
+                  top: `${vy}%`,
+                  transform: "translate(-50%, -50%)",
+                  zIndex: isDraggingVenue ? 50 : isVenueHovered ? 40 : 10,
+                  cursor: cropMode ? "default" : isDraggingVenue ? "grabbing" : "grab",
+                }}
+                onMouseDown={(e) => handleVenueMouseDown(e, venue)}
+                onMouseEnter={() => setHoveredVenue(venue.name)}
+                onMouseLeave={() => setHoveredVenue(null)}
+              >
+                <div
+                  className="border-2 border-white transition-all duration-150"
+                  style={{
+                    width: isDraggingVenue ? 14 : isVenueHovered ? 12 : 10,
+                    height: isDraggingVenue ? 14 : isVenueHovered ? 12 : 10,
+                    backgroundColor: "#3b82f6",
+                    transform: "rotate(45deg)",
+                    borderRadius: 2,
+                    boxShadow: isDraggingVenue
+                      ? "0 0 0 4px rgba(59,130,246,0.3), 0 2px 8px rgba(0,0,0,0.2)"
+                      : isVenueHovered
+                      ? "0 0 0 3px rgba(59,130,246,0.2), 0 2px 6px rgba(0,0,0,0.15)"
+                      : "0 1px 3px rgba(0,0,0,0.2)",
+                  }}
+                />
+                <span
+                  className="mt-1 px-1.5 py-0.5 rounded text-white font-medium whitespace-nowrap"
+                  style={{
+                    fontSize: "10px",
+                    backgroundColor: "rgba(59,130,246,0.75)",
+                    lineHeight: 1.2,
+                  }}
+                >
+                  {venue.name}
+                </span>
+              </div>
+            );
+          })}
         </div>
 
         {/* Vertical zoom control — right side overlay */}
@@ -640,7 +751,7 @@ export default function MapEditor({ building, rooms, onRoomUpdate, onCropUpdate 
           </button>
 
           {/* Vertical slider */}
-          <div className="relative h-28 w-7 flex items-center justify-center">
+          <div className="relative h-28 w-7 flex items-center justify-center overflow-hidden">
             <input
               type="range"
               min={0}
@@ -660,13 +771,14 @@ export default function MapEditor({ building, rooms, onRoomUpdate, onCropUpdate 
                 setZoom(newZoom);
                 setPan(clampPan(newPanX, newPanY, newZoom));
               }}
-              className="absolute h-24 accent-purple-500 cursor-pointer"
+              className="accent-purple-500 cursor-pointer"
               style={{
                 writingMode: "vertical-lr",
                 direction: "rtl",
                 width: "24px",
-                appearance: "auto",
-              }}
+                height: "96px",
+                appearance: "slider-vertical" as string,
+              } as React.CSSProperties}
               title={`${zoomPercent}%`}
             />
           </div>
