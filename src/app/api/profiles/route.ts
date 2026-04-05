@@ -14,7 +14,14 @@ export async function GET(request: NextRequest) {
     const status = searchParams.get("status");
 
     const where: Record<string, unknown> = {};
-    if (role) where.role = role;
+    if (role) {
+      // When querying assistants, include assistant_leader as well
+      if (role === "assistant") {
+        where.role = { in: ["assistant", "assistant_leader"] };
+      } else {
+        where.role = role;
+      }
+    }
     if (buildingId) where.buildingId = parseInt(buildingId);
     if (status) where.status = status;
 

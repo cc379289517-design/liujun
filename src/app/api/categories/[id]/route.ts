@@ -40,7 +40,14 @@ export async function PATCH(request: NextRequest, { params }: RouteContext) {
 export async function DELETE(_request: NextRequest, { params }: RouteContext) {
   try {
     const { id } = await params;
-    await prisma.taskCategory.delete({ where: { id: parseInt(id) } });
+    const catId = parseInt(id);
+    // Check if any tasks reference this category
+    const taskCount = await prisma.bookingTask.count({ where: { categoryId: catId } });
+    if (taskCount > 0) {
+      // Delete related tasks first, then delete category
+      await prisma.bookingTask.deleteMany({ where: { categoryId: catId } });
+    }
+    await prisma.taskCategory.delete({ where: { id: catId } });
     return Response.json({ success: true });
   } catch (error) {
     console.error("[DELETE /api/categories/[id]]", error);

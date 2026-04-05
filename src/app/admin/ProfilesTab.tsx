@@ -88,7 +88,17 @@ export default function ProfilesTab({
     : groupsByDept;
 
   const filteredProfiles = profiles.filter((p) => {
-    if (filterRole && p.role !== filterRole) return false;
+    if (filterRole) {
+      if (filterRole === "assistant") {
+        // 助理筛选包含助理组长
+        if (p.role !== "assistant" && p.role !== "assistant_leader") return false;
+      } else if (filterRole === "admin") {
+        // 管理筛选包含助理组长
+        if (p.role !== "admin" && p.role !== "assistant_leader") return false;
+      } else {
+        if (p.role !== filterRole) return false;
+      }
+    }
     if (filterBuilding && p.buildingId !== parseInt(filterBuilding)) return false;
     if (filterDepartment && p.department !== filterDepartment) return false;
     if (filterGroup && p.group !== filterGroup) return false;
@@ -106,7 +116,7 @@ export default function ProfilesTab({
   const stats = {
     photographers: profiles.filter((p) => p.role === "photographer").length,
     assistants: profiles.filter((p) => p.role === "assistant" || p.role === "assistant_leader").length,
-    admins: profiles.filter((p) => p.role === "admin").length,
+    admins: profiles.filter((p) => p.role === "admin" || p.role === "assistant_leader").length,
     total: profiles.length,
   };
 
@@ -284,9 +294,11 @@ export default function ProfilesTab({
             })
           )}
         </div>
+        {/* Filtered count */}
+        <div className="px-3 py-2 text-right">
+          <span className="text-sm font-bold text-red-500">合计：{filteredProfiles.length} 人</span>
+        </div>
       </div>
-
-      {/* Modals */}
       {showProfileModal && createPortal(
         <ProfileModal
           profile={editingProfile}
