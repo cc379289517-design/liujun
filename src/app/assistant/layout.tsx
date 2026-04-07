@@ -16,12 +16,6 @@ export default function AssistantLayout({
             <p className="text-xs text-[--text-muted]">1号楼 · 小红</p>
           </div>
         </div>
-        <div className="flex items-center gap-2">
-          <div className="px-3 py-1 rounded-full bg-green-50 flex items-center gap-1.5">
-            <span className="w-2 h-2 rounded-full bg-green-500 pulse-dot" />
-            <span className="text-green-600 text-xs font-medium">在线</span>
-          </div>
-        </div>
       </header>
 
       <main className="flex-1 px-5 pb-24">{children}</main>

@@ -1358,9 +1358,6 @@ export default function PhotographerPage() {
                   <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z" /><circle cx="12" cy="10" r="3" />
                 </svg>
                 <span>{profile?.building?.name || "—"} {profile?.currentRoom ? (profile.currentRoom === originalRoomRef.current ? `${profile.currentRoom}室` : profile.currentRoom) : ""}</span>
-                {isAssistantRole(profile?.role) && currentRawTask && profile?.currentRoom === currentRawTask.roomNumber && profile?.currentRoom !== originalRoomRef.current && (
-                  <span className="text-[10px] text-blue-500 ml-1">任务中</span>
-                )}
               </button>
               {/* 透明桥接区域 + 向右弹出额外场地 */}
               {(() => {
