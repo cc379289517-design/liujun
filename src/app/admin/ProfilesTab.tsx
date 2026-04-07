@@ -22,10 +22,17 @@ const ROLE_CN_MAP: Record<string, string> = {
   "管理": "admin",
 };
 
-const ONLINE_STATUS_MAP: Record<string, { label: string; color: string; bg: string; next: string }> = {
-  online: { label: "在线", color: "text-green-600", bg: "bg-green-50", next: "offline" },
-  offline: { label: "离线", color: "text-gray-500", bg: "bg-gray-100", next: "on_break" },
-  on_break: { label: "休息中", color: "text-orange-600", bg: "bg-orange-50", next: "online" },
+const ONLINE_STATUS_MAP: Record<string, { label: string; color: string; bg: string }> = {
+  online: { label: "在线", color: "text-green-600", bg: "bg-green-50" },
+  offline: { label: "下线", color: "text-gray-500", bg: "bg-gray-100" },
+  on_break: { label: "休假", color: "text-gray-400", bg: "bg-gray-50" },
+};
+
+const TASK_STATUS_LABEL: Record<string, string> = {
+  assigned: "待就位",
+  busy: "在忙",
+  executing: "进行中",
+  finishing: "快结束",
 };
 
 export default function ProfilesTab({
@@ -126,19 +133,31 @@ export default function ProfilesTab({
     onRefresh();
   }
 
-  async function toggleOnlineStatus(p: Profile) {
-    const current = p.onlineStatus || "offline";
-    const info = ONLINE_STATUS_MAP[current] || ONLINE_STATUS_MAP.offline;
-    const nextStatus = info.next;
+  async function changeOnlineStatus(p: Profile, targetStatus: string) {
+    if (p.onlineStatus === targetStatus) return;
+    // 任务中不允许切换在线状态
+    if (p.status !== "idle" && p.status in TASK_STATUS_LABEL) {
+      alert(`该助理当前处于「${TASK_STATUS_LABEL[p.status]}」状态，无法切换在线状态`);
+      return;
+    }
+    const prevStatus = p.onlineStatus;
     // Optimistic local update
     setLocalProfiles((prev) =>
-      prev.map((pr) => pr.id === p.id ? { ...pr, onlineStatus: nextStatus } : pr)
+      prev.map((pr) => pr.id === p.id ? { ...pr, onlineStatus: targetStatus } : pr)
     );
-    await fetch(`/api/profiles/${p.id}`, {
+    const res = await fetch(`/api/profiles/${p.id}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ onlineStatus: nextStatus }),
+      body: JSON.stringify({ onlineStatus: targetStatus }),
     });
+    if (!res.ok) {
+      // Revert on failure
+      const data = await res.json().catch(() => ({}));
+      setLocalProfiles((prev) =>
+        prev.map((pr) => pr.id === p.id ? { ...pr, onlineStatus: prevStatus } : pr)
+      );
+      alert(data.error || "切换状态失败");
+    }
   }
 
   return (
@@ -257,7 +276,9 @@ export default function ProfilesTab({
           ) : (
             filteredProfiles.map((p) => {
               const r = ROLE_MAP[p.role];
+              const isAssistantRole = p.role === "assistant" || p.role === "assistant_leader";
               const os = ONLINE_STATUS_MAP[p.onlineStatus || "offline"] || ONLINE_STATUS_MAP.offline;
+              const inTask = p.status !== "idle" && p.status in TASK_STATUS_LABEL;
               return (
                 <div key={p.id} className="grid grid-cols-9 gap-3 px-3 py-2.5 rounded-xl bg-[--bg-base] hover:bg-gray-50 transition-colors items-center">
                   <span className="text-sm font-medium text-[--text-primary] text-center">{p.name}</span>
@@ -268,12 +289,32 @@ export default function ProfilesTab({
                   <span className="text-xs text-[--text-secondary] text-center">{p.building.name}</span>
                   <span className="text-xs text-[--text-secondary] text-center">{p.currentRoom || "—"}</span>
                   <span className="flex justify-center">
-                    <button
-                      onClick={() => toggleOnlineStatus(p)}
-                      className={`text-[10px] font-bold px-2 py-0.5 rounded-md cursor-pointer ${os.bg} ${os.color} hover:opacity-80 transition-opacity`}
-                    >
-                      {os.label}
-                    </button>
+                    {isAssistantRole ? (
+                      <div className="relative group">
+                        <span
+                          className={`text-[10px] font-bold px-2 py-0.5 rounded-md cursor-default inline-block ${os.bg} ${os.color} ${inTask ? "opacity-60" : ""}`}
+                          title={inTask ? `任务${TASK_STATUS_LABEL[p.status]}中，无法切换` : ""}
+                        >
+                          {os.label}
+                        </span>
+                        {/* Hover dropdown for status switching */}
+                        <div className="absolute left-1/2 -translate-x-1/2 top-full mt-1 hidden group-hover:flex flex-col bg-white rounded-lg shadow-lg border border-gray-200 py-1 z-20 min-w-[64px]">
+                          {Object.entries(ONLINE_STATUS_MAP)
+                            .filter(([key]) => key !== (p.onlineStatus || "offline"))
+                            .map(([key, val]) => (
+                              <button
+                                key={key}
+                                onClick={() => changeOnlineStatus(p, key)}
+                                className={`text-[10px] font-bold px-3 py-1 whitespace-nowrap text-left hover:bg-gray-50 transition-colors ${val.color} ${inTask ? "opacity-40 cursor-not-allowed" : "cursor-pointer"}`}
+                              >
+                                {val.label}
+                              </button>
+                            ))}
+                        </div>
+                      </div>
+                    ) : (
+                      <span className="text-xs text-[--text-muted] font-medium">/</span>
+                    )}
                   </span>
                   <div className="flex gap-1.5 justify-center">
                     <button
