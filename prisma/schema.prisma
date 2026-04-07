@@ -125,6 +125,8 @@ model TaskCategory {
   estDuration   Int      @default(10) @map("est_duration") // 预估时长(分钟)
   hexColor      String   @default("#f97316") @map("hex_color") // 状态环颜色
   sortRank      Int      @default(0) @map("sort_rank") // 排序权重
+  canBeInterrupted  Boolean @default(true) @map("can_be_interrupted") // 该类型任务是否可被P1打断
+  maxInterruptMinutes Int? @map("max_interrupt_minutes") // 允许插单的最大离场时间(分钟)，null使用全局默认
   tasks         BookingTask[]
   createdAt     DateTime @default(now()) @map("created_at")
 

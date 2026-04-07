@@ -10,7 +10,7 @@ export async function PATCH(request: NextRequest, { params }: RouteContext) {
   try {
     const { id } = await params;
     const body = await request.json();
-    const { name, description, priorityLevel, minDuration, maxDuration, estDuration, hexColor, sortRank } = body;
+    const { name, description, priorityLevel, minDuration, maxDuration, estDuration, hexColor, sortRank, canBeInterrupted, maxInterruptMinutes } = body;
 
     const data: Record<string, unknown> = {};
     if (name !== undefined) data.name = name;
@@ -21,6 +21,8 @@ export async function PATCH(request: NextRequest, { params }: RouteContext) {
     if (estDuration !== undefined) data.estDuration = estDuration !== null ? parseInt(String(estDuration)) : null;
     if (hexColor !== undefined) data.hexColor = hexColor;
     if (sortRank !== undefined) data.sortRank = parseInt(String(sortRank));
+    if (canBeInterrupted !== undefined) data.canBeInterrupted = canBeInterrupted;
+    if (maxInterruptMinutes !== undefined) data.maxInterruptMinutes = maxInterruptMinutes !== null ? parseInt(String(maxInterruptMinutes)) : null;
 
     const updated = await prisma.taskCategory.update({
       where: { id: parseInt(id) },

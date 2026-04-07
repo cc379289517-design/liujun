@@ -1,5 +1,5 @@
 import { prisma } from "./prisma";
-import { TaskStatus, ProfileStatus } from "@/generated/prisma/client";
+import { TaskStatus, ProfileStatus, OnlineStatus } from "@/generated/prisma/client";
 import { PRIORITY, SCHEDULER_CONFIG } from "@/types";
 
 /**
@@ -13,7 +13,6 @@ async function getConfig() {
     return {
       ESCALATION_THRESHOLD_MINUTES: parseInt(map.upgrade_threshold) || SCHEDULER_CONFIG.ESCALATION_THRESHOLD_MINUTES,
       COMPLETION_WARNING_MINUTES: parseInt(map.ending_alert_min) || SCHEDULER_CONFIG.COMPLETION_WARNING_MINUTES,
-      AUTO_COMPLETE_IDLE_MINUTES: parseInt(map.auto_finish_min) || SCHEDULER_CONFIG.AUTO_COMPLETE_IDLE_MINUTES,
       INTERRUPT_MAX_MINUTES: parseInt(map.interruption_max) || SCHEDULER_CONFIG.INTERRUPT_MAX_MINUTES,
     };
   } catch {
@@ -42,7 +41,7 @@ export async function assignTask(taskId: string, buildingId?: number): Promise<s
     where: {
       role: { in: ["assistant", "assistant_leader"] },
       status: ProfileStatus.idle,
-      isOnline: true,
+      onlineStatus: OnlineStatus.online,
       subStatus: null,
       buildingId: effectiveBuildingId,
     },
@@ -73,7 +72,7 @@ export async function assignTask(taskId: string, buildingId?: number): Promise<s
  */
 export async function autoClaimWaitingTask(assistantId: string): Promise<string | null> {
   const assistant = await prisma.profile.findUnique({ where: { id: assistantId } });
-  if (!assistant || assistant.status !== ProfileStatus.idle || !assistant.isOnline || assistant.subStatus) return null;
+  if (!assistant || assistant.status !== ProfileStatus.idle || assistant.onlineStatus !== OnlineStatus.online || assistant.subStatus) return null;
 
   // 确认该助理确实没有活跃任务
   const existingTask = await prisma.bookingTask.findFirst({
@@ -129,7 +128,7 @@ export async function sweepWaitingTasks(): Promise<number> {
       where: {
         role: { in: ["assistant", "assistant_leader"] },
         status: ProfileStatus.idle,
-        isOnline: true,
+        onlineStatus: OnlineStatus.online,
         subStatus: null,
       },
     });
@@ -203,30 +202,35 @@ export async function sweepWaitingTasks(): Promise<number> {
 
 /**
  * 判断是否可以插单
- * P1 任务可以插断正在执行 P4 的未锁定助理
+ * P1 任务可以插断优先级低于自己的未锁定任务（P2-P5）
+ * 同时检查任务类型级别的 canBeInterrupted 设置
  */
 export async function canInterrupt(
   assistantId: string,
   newPriority: number
 ): Promise<boolean> {
-  if (newPriority !== PRIORITY.P1_URGENT) return false;
+  if (newPriority !== PRIORITY.P1) return false;
 
   const currentTask = await prisma.bookingTask.findFirst({
     where: {
       assistantId,
       status: TaskStatus.executing,
     },
+    include: { category: true },
   });
 
   if (!currentTask) return false;
 
-  // 只有 P4 任务且未锁定才能被插单
-  return currentTask.priority === PRIORITY.P4_LOW && !currentTask.isLocked;
+  // 检查任务类型是否允许被打断
+  if (!currentTask.category.canBeInterrupted) return false;
+
+  // P1 可以插断所有比自己优先级低的未锁定任务（P2-P5）
+  return currentTask.priority > PRIORITY.P1 && !currentTask.isLocked;
 }
 
 /**
  * 执行插单操作
- * 暂停当前 P4 任务，分配新 P1 任务给该助理
+ * 暂停当前任务，分配新 P1 任务给该助理
  */
 export async function interruptAssistant(
   assistantId: string,
@@ -281,7 +285,7 @@ export async function escalatePriorities(): Promise<number> {
   const tasksToEscalate = await prisma.bookingTask.findMany({
     where: {
       status: TaskStatus.waiting,
-      priority: { gte: PRIORITY.P2_HIGH }, // P2, P3, P4
+      priority: { gte: PRIORITY.P2 }, // P2-P5
       createdAt: { lte: threshold },
       OR: [
         { escalatedAt: null },
@@ -292,7 +296,7 @@ export async function escalatePriorities(): Promise<number> {
 
   let escalatedCount = 0;
   for (const task of tasksToEscalate) {
-    if (task.priority > PRIORITY.P1_URGENT) {
+    if (task.priority > PRIORITY.P1) {
       await prisma.bookingTask.update({
         where: { id: task.id },
         data: {
@@ -418,11 +422,11 @@ export async function cleanupStaleTasks(): Promise<number> {
 
   const startOfToday = new Date(today.getFullYear(), today.getMonth(), today.getDate());
 
-  // 查找昨天及更早的未完成任务（waiting / paused）
+  // 查找昨天及更早的未完成任务（waiting / paused / executing）
   const staleTasks = await prisma.bookingTask.findMany({
     where: {
       createdAt: { lt: startOfToday },
-      status: { in: [TaskStatus.waiting, TaskStatus.paused] },
+      status: { in: [TaskStatus.waiting, TaskStatus.paused, TaskStatus.executing] },
     },
     select: { id: true, assistantId: true },
   });

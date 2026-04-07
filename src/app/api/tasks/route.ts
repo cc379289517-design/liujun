@@ -54,6 +54,9 @@ export async function GET(request: NextRequest) {
     // 同步助理 profile.status 与实际任务一致
     await syncProfileStatus();
 
+    // 每次查询时扫描：将空闲助理与等待中的任务自动匹配
+    await sweepWaitingTasks();
+
     const tasks = await prisma.bookingTask.findMany({
       where,
       include: TASK_INCLUDE,
@@ -176,22 +179,39 @@ export async function POST(request: NextRequest) {
     // 自动派单（非指定助理模式）
     if (!isSpecified) {
       const buildingId = task.photographer.buildingId;
+      const taskPriority = task.priority;
 
       // P1 紧急任务：尝试插单（仅同楼座）
-      if (category.priorityLevel === 1) {
+      if (taskPriority === 1) {
         const busyAssistants = await prisma.profile.findMany({
           where: {
             role: { in: ["assistant", "assistant_leader"] },
             status: { in: ["executing", "busy"] },
-            isOnline: true,
+            onlineStatus: "online",
             buildingId,
           },
         });
 
-        for (const assistant of busyAssistants) {
-          const ok = await canInterrupt(assistant.id, 1);
+        // 查找每个忙碌助理当前执行的任务优先级，优先插断低优先级
+        const assistantCurrentTasks = await prisma.bookingTask.findMany({
+          where: {
+            assistantId: { in: busyAssistants.map((a) => a.id) },
+            status: TaskStatus.executing,
+          },
+          include: { category: { select: { canBeInterrupted: true } } },
+        });
+
+        // 按当前任务优先级从低到高排序（P4→P3→P2），优先插最低的
+        // 同时过滤掉类型不允许被打断的任务
+        const sortedCandidates = assistantCurrentTasks
+          .filter((t) => t.priority > 1 && !t.isLocked && t.category.canBeInterrupted)
+          .sort((a, b) => b.priority - a.priority);
+
+        for (const candidate of sortedCandidates) {
+          if (!candidate.assistantId) continue;
+          const ok = await canInterrupt(candidate.assistantId, 1);
           if (ok) {
-            await interruptAssistant(assistant.id, task.id);
+            await interruptAssistant(candidate.assistantId, task.id);
             const updated = await prisma.bookingTask.findUnique({
               where: { id: task.id },
               include: TASK_INCLUDE,

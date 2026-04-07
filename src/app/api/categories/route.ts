@@ -23,7 +23,7 @@ export async function GET() {
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const { name, description, priorityLevel, minDuration, maxDuration, hexColor, sortRank, estDuration } = body;
+    const { name, description, priorityLevel, minDuration, maxDuration, hexColor, sortRank, estDuration, canBeInterrupted, maxInterruptMinutes } = body;
 
     if (!name || !priorityLevel) {
       return Response.json(
@@ -42,6 +42,8 @@ export async function POST(request: NextRequest) {
         estDuration: estDuration ? parseInt(estDuration) : undefined,
         hexColor: hexColor || null,
         sortRank: sortRank !== undefined ? parseInt(sortRank) : 0,
+        canBeInterrupted: canBeInterrupted !== undefined ? canBeInterrupted : true,
+        maxInterruptMinutes: maxInterruptMinutes != null ? parseInt(maxInterruptMinutes) : null,
       },
     });
 

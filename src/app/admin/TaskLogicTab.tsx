@@ -12,6 +12,8 @@ type Category = {
   estDuration: number;
   hexColor: string;
   sortRank: number;
+  canBeInterrupted: boolean;
+  maxInterruptMinutes: number | null;
 };
 
 type SystemConfigMap = Record<string, { value: string; label: string | null }>;
@@ -83,8 +85,6 @@ function durationLabel(min: number, max: number): string {
 
 const PARAM_DEFS = [
   { key: "ending_alert_min", min: 1, max: 10, step: 1, label: "快结束提醒(分钟)" },
-  { key: "auto_finish_min", min: 1, max: 15, step: 1, label: "自动释放延迟(分钟)" },
-  { key: "interruption_max", min: 10, max: 60, step: 5, label: "插单最大离场时间(分钟)" },
 ] as const;
 
 type EditForm = {
@@ -92,6 +92,8 @@ type EditForm = {
   minDuration: number;
   maxDuration: number;
   priorityLevel: number;
+  canBeInterrupted: boolean;
+  maxInterruptMinutes: number | null;
 };
 
 export default function TaskLogicTab({ categories, config, onRefresh }: Props) {
@@ -108,11 +110,11 @@ export default function TaskLogicTab({ categories, config, onRefresh }: Props) {
   const debounceTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
 
   const [editingId, setEditingId] = useState<number | null>(null);
-  const [editForm, setEditForm] = useState<EditForm>({ name: "", minDuration: 0, maxDuration: 0, priorityLevel: 3 });
+  const [editForm, setEditForm] = useState<EditForm>({ name: "", minDuration: 0, maxDuration: 0, priorityLevel: 3, canBeInterrupted: true, maxInterruptMinutes: null });
   const [saving, setSaving] = useState(false);
 
   const [addingPriority, setAddingPriority] = useState<number | null>(null);
-  const [addForm, setAddForm] = useState<Omit<EditForm, "priorityLevel">>({ name: CAT_NAME_OPTIONS[0], minDuration: 0, maxDuration: 0 });
+  const [addForm, setAddForm] = useState<Omit<EditForm, "priorityLevel">>({ name: CAT_NAME_OPTIONS[0], minDuration: 0, maxDuration: 0, canBeInterrupted: true, maxInterruptMinutes: null });
 
   const sorted = [...categories].sort((a, b) => a.priorityLevel - b.priorityLevel || a.sortRank - b.sortRank);
 
@@ -143,7 +145,7 @@ export default function TaskLogicTab({ categories, config, onRefresh }: Props) {
 
   const startEdit = (cat: Category) => {
     setEditingId(cat.id);
-    setEditForm({ name: cat.name, minDuration: cat.minDuration, maxDuration: cat.maxDuration, priorityLevel: cat.priorityLevel });
+    setEditForm({ name: cat.name, minDuration: cat.minDuration, maxDuration: cat.maxDuration, priorityLevel: cat.priorityLevel, canBeInterrupted: cat.canBeInterrupted, maxInterruptMinutes: cat.maxInterruptMinutes });
   };
 
   const saveEdit = async () => {
@@ -156,7 +158,11 @@ export default function TaskLogicTab({ categories, config, onRefresh }: Props) {
       await fetch(`/api/categories/${editingId}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ...editForm, estDuration: est }),
+        body: JSON.stringify({
+          ...editForm,
+          estDuration: est,
+          maxInterruptMinutes: editForm.canBeInterrupted ? editForm.maxInterruptMinutes : null,
+        }),
       });
       setEditingId(null);
       onRefresh();
@@ -189,10 +195,12 @@ export default function TaskLogicTab({ categories, config, onRefresh }: Props) {
           estDuration: est,
           hexColor: "#3b82f6",
           sortRank: 0,
+          canBeInterrupted: addForm.canBeInterrupted,
+          maxInterruptMinutes: addForm.canBeInterrupted ? addForm.maxInterruptMinutes : null,
         }),
       });
       setAddingPriority(null);
-      setAddForm({ name: CAT_NAME_OPTIONS[0], minDuration: 0, maxDuration: 0 });
+      setAddForm({ name: CAT_NAME_OPTIONS[0], minDuration: 0, maxDuration: 0, canBeInterrupted: true, maxInterruptMinutes: null });
       onRefresh();
     } catch {} finally { setSaving(false); }
   };
@@ -223,6 +231,39 @@ export default function TaskLogicTab({ categories, config, onRefresh }: Props) {
           className="w-full px-2 py-1 rounded border border-gray-300 text-xs outline-none focus:border-purple-400 text-center"
           placeholder="不限"
         />
+      </div>
+    </div>
+  );
+
+  const renderInterruptFields = (
+    form: { canBeInterrupted: boolean; maxInterruptMinutes: number | null },
+    setForm: (f: typeof form) => void
+  ) => (
+    <div className="space-y-1.5">
+      <div className="flex items-center gap-2">
+        <label className="text-[10px] text-gray-400 shrink-0">可被插单</label>
+        <button
+          type="button"
+          onClick={() => setForm({ ...form, canBeInterrupted: !form.canBeInterrupted })}
+          className={`relative w-8 h-4 rounded-full transition-colors ${form.canBeInterrupted ? "bg-purple-500" : "bg-gray-300"}`}
+        >
+          <span className={`absolute top-0.5 w-3 h-3 rounded-full bg-white shadow transition-transform ${form.canBeInterrupted ? "left-[18px]" : "left-0.5"}`} />
+        </button>
+        {form.canBeInterrupted && (
+          <div className="flex items-center gap-1">
+            <label className="text-[10px] text-gray-400 shrink-0">最大离场</label>
+            <input
+              type="number"
+              min={1}
+              max={120}
+              value={form.maxInterruptMinutes ?? ""}
+              onChange={(e) => setForm({ ...form, maxInterruptMinutes: e.target.value ? Number(e.target.value) : null })}
+              className="w-14 px-1.5 py-0.5 rounded border border-gray-300 text-[10px] outline-none focus:border-purple-400 text-center"
+              placeholder="默认"
+            />
+            <span className="text-[10px] text-gray-400">分钟</span>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -290,7 +331,7 @@ export default function TaskLogicTab({ categories, config, onRefresh }: Props) {
                   <div className="flex items-center justify-between mb-1.5">
                     <h4 className={`text-[11px] font-bold ${PRIORITY_HEADING[p]}`}>{PRIORITY_LABELS[p]}</h4>
                     <button
-                      onClick={() => { setAddingPriority(p); setAddForm({ name: CAT_NAME_OPTIONS[0], minDuration: 0, maxDuration: 0 }); }}
+                      onClick={() => { setAddingPriority(p); setAddForm({ name: CAT_NAME_OPTIONS[0], minDuration: 0, maxDuration: 0, canBeInterrupted: true, maxInterruptMinutes: null }); }}
                       className="text-[10px] text-purple-500 hover:text-purple-700 font-medium"
                     >
                       + 添加
@@ -317,6 +358,7 @@ export default function TaskLogicTab({ categories, config, onRefresh }: Props) {
                             </select>
                           </div>
                           {renderDurationFields(editForm, (f) => setEditForm({ ...editForm, ...f }))}
+                          {renderInterruptFields(editForm, (f) => setEditForm({ ...editForm, ...f }))}
                           <div className="flex gap-1.5 justify-end">
                             <button onClick={() => setEditingId(null)} className="text-[10px] px-2.5 py-1 rounded bg-gray-100 text-gray-600 hover:bg-gray-200">取消</button>
                             <button onClick={saveEdit} disabled={saving} className="text-[10px] px-2.5 py-1 rounded bg-purple-500 text-white hover:bg-purple-600 disabled:opacity-50">保存</button>
@@ -329,6 +371,11 @@ export default function TaskLogicTab({ categories, config, onRefresh }: Props) {
                         >
                           <span className="text-xs font-medium flex-1 min-w-0 truncate">{cat.name}</span>
                           <span className="text-[11px] shrink-0">{durationLabel(cat.minDuration, cat.maxDuration)}</span>
+                          {!cat.canBeInterrupted ? (
+                            <span className="text-[9px] ml-1.5 px-1.5 py-0.5 rounded bg-gray-200 text-gray-500 shrink-0" title="不可被插单">🔒</span>
+                          ) : cat.maxInterruptMinutes ? (
+                            <span className="text-[9px] ml-1.5 px-1.5 py-0.5 rounded bg-purple-100 text-purple-500 shrink-0" title={`最大离场 ${cat.maxInterruptMinutes} 分钟`}>⏱{cat.maxInterruptMinutes}m</span>
+                          ) : null}
                           <div className="flex gap-1.5 ml-2 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity">
                             <button onClick={() => startEdit(cat)} className="text-[10px] text-purple-500 hover:text-purple-700">编辑</button>
                             <button onClick={() => deleteCategory(cat.id)} className="text-[10px] text-red-400 hover:text-red-600">删除</button>
@@ -350,6 +397,7 @@ export default function TaskLogicTab({ categories, config, onRefresh }: Props) {
                           {CAT_NAME_OPTIONS.map((n) => <option key={n} value={n}>{n}</option>)}
                         </select>
                         {renderDurationFields(addForm, (f) => setAddForm({ ...addForm, ...f }))}
+                        {renderInterruptFields(addForm, (f) => setAddForm({ ...addForm, ...f }))}
                         <div className="flex gap-1.5 justify-end">
                           <button onClick={() => setAddingPriority(null)} className="text-[10px] px-2.5 py-1 rounded bg-gray-100 text-gray-600 hover:bg-gray-200">取消</button>
                           <button onClick={() => saveAdd(p)} disabled={saving} className="text-[10px] px-2.5 py-1 rounded bg-purple-500 text-white hover:bg-purple-600 disabled:opacity-50">添加</button>

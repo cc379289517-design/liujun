@@ -128,7 +128,6 @@ async function main() {
   // ============================================
   const configs = [
     { key: "ending_alert_min", value: "2", label: "快结束提醒(分钟)" },
-    { key: "auto_finish_min", value: "5", label: "自动释放延迟(分钟)" },
     { key: "interruption_max", value: "30", label: "插单最大离场时间(分钟)" },
     { key: "upgrade_threshold", value: "30", label: "自动提权阈值(分钟)" },
   ];

@@ -12,7 +12,7 @@ type TabKey = "profiles" | "spaces" | "tasks" | "approvals" | "stats";
 type Room = { id: number; buildingId: number; roomNumber: string; floor: number; xPosition: number; yPosition: number; fenceRadius: number };
 type Building = { id: number; name: string; floorPlanUrl: string | null; cropX?: number | null; cropY?: number | null; cropW?: number | null; cropH?: number | null; extraVenues: string | null; rooms: Room[] };
 type Profile = { id: string; employeeId: string | null; name: string; avatar: string | null; role: "photographer" | "assistant" | "assistant_leader" | "admin"; buildingId: number; currentRoom: string | null; status: string; onlineStatus: string; isOnline: boolean; department: string | null; group: string | null; building: { id: number; name: string } };
-type Category = { id: number; name: string; description: string | null; priorityLevel: number; minDuration: number; maxDuration: number; estDuration: number; hexColor: string; sortRank: number };
+type Category = { id: number; name: string; description: string | null; priorityLevel: number; minDuration: number; maxDuration: number; estDuration: number; hexColor: string; sortRank: number; canBeInterrupted: boolean; maxInterruptMinutes: number | null };
 type SystemConfigMap = Record<string, { value: string; label: string | null }>;
 
 const TABS: { key: TabKey; label: string; color: string; bg: string; activeBg: string }[] = [
