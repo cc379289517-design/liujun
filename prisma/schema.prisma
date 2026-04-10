@@ -82,6 +82,7 @@ model Profile {
   employeeId    String?       @unique @map("employee_id")
   name          String
   avatar        String?
+  password      String        @default("123456")
   role          Role
   department    String?
   group         String?       @map("group_name")
@@ -167,6 +168,7 @@ model BookingTask {
   updatedAt       DateTime    @updatedAt @map("updated_at")
   startedAt       DateTime?   @map("started_at")
   completedAt     DateTime?   @map("completed_at")
+  pausedAt        DateTime?   @map("paused_at")  // 被插单暂停的时间点
   escalatedAt     DateTime?   @map("escalated_at") // 最后一次提权时间
 
   // 插单相关

@@ -26,8 +26,10 @@ type TaskFromAPI = {
   createdAt: string;
   startedAt: string | null;
   completedAt: string | null;
+  pausedAt: string | null;
   estEndTime: string | null;
   isLocked: boolean;
+  parentTaskId: string | null;
   photographer: { id: string; name: string; currentRoom: string | null };
   assistant: { id: string; name: string; currentRoom: string | null } | null;
   category: { id: number; name: string; priorityLevel: number };
@@ -48,6 +50,7 @@ type DisplayTask = {
   assistantName: string | null;
   photographerName: string | null;
   createdAt: string;
+  estEndTime: string | null;
 };
 
 const STATUS_STYLE: Record<string, { statusLabel: string; statusCls: string; tagCls: string; hasProgress: boolean }> = {
@@ -62,6 +65,30 @@ const STATUS_STYLE: Record<string, { statusLabel: string; statusCls: string; tag
 const STATUS_ORDER: Record<string, number> = { "待就位": 0, "等待中": 1, "进行中": 2, "已完成": 3, "已取消": 4, "已暂停": 5 };
 function sortTasksByStatus(tasks: DisplayTask[]): DisplayTask[] {
   return [...tasks].sort((a, b) => (STATUS_ORDER[a.statusLabel] ?? 99) - (STATUS_ORDER[b.statusLabel] ?? 99));
+}
+
+function resolveAssistantTasks(taskData: TaskFromAPI[]): { current: TaskFromAPI | null; paused: TaskFromAPI | null; pending: TaskFromAPI | null } {
+  const executing = taskData.find((t) => t.status === "executing") || null;
+  const paused = taskData.find((t) => t.status === "paused") || null;
+  // waiting + parentTaskId = 插单待处理（pending）；waiting + no parentTaskId = 普通待就位
+  const waitingWithParent = taskData.find((t) => t.status === "waiting" && t.assistantId && t.parentTaskId) || null;
+  const waitingNormal = taskData.find((t) => t.status === "waiting" && t.assistantId && !t.parentTaskId) || null;
+
+  if (executing && waitingWithParent) {
+    // 旧任务执行中，新插单任务待处理
+    return { current: executing, paused: null, pending: waitingWithParent };
+  }
+  if (paused && waitingWithParent) {
+    // 旧任务已暂停，新插单任务待就位
+    return { current: waitingWithParent, paused, pending: null };
+  }
+  if (paused && executing) {
+    // 旧任务已暂停，新插单任务执行中
+    return { current: executing, paused, pending: null };
+  }
+  // 普通单任务
+  const current = executing || waitingNormal || waitingWithParent || null;
+  return { current, paused, pending: null };
 }
 
 function apiTaskToDisplay(t: TaskFromAPI): DisplayTask {
@@ -102,6 +129,7 @@ function apiTaskToDisplay(t: TaskFromAPI): DisplayTask {
     assistantName: t.assistant?.name || null,
     photographerName: t.photographer?.name || null,
     createdAt: t.createdAt,
+    estEndTime: t.estEndTime,
     ...style,
   };
 }
@@ -452,12 +480,17 @@ export default function PhotographerPage() {
   const [statsHoveredDay, setStatsHoveredDay] = useState<number | null>(null);
   const [weeklyTasks, setWeeklyTasks] = useState<TaskFromAPI[]>([]);
   const [categories, setCategories] = useState<BuiltCategory[]>([]);
+  const [endingAlertMin, setEndingAlertMin] = useState(2);
   const [showIdentityModal, setShowIdentityModal] = useState(false);
   const [identityBuildingFilter, setIdentityBuildingFilter] = useState<number | null>(null);
   const [identityBuildingOrder, setIdentityBuildingOrder] = useState<number[]>([]);
   const [allProfiles, setAllProfiles] = useState<{ id: string; name: string; role: string; employeeId: string | null; department: string | null; group: string | null; avatar: string | null; buildingId: number; onlineStatus: string; building: { id: number; name: string } }[]>([]);
   // 助理当前任务（原始 API 数据）
   const [currentRawTask, setCurrentRawTask] = useState<TaskFromAPI | null>(null);
+  const [pausedRawTask, setPausedRawTask] = useState<TaskFromAPI | null>(null);
+  const [pendingRawTask, setPendingRawTask] = useState<TaskFromAPI | null>(null);
+  // 登录账号角色（区别于切换后的 profile.role）
+  const [loginRole, setLoginRole] = useState<string | null>(null);
 
   // Map pan & zoom state
   const mapContainerRef = useRef<HTMLDivElement>(null);
@@ -638,40 +671,132 @@ export default function PhotographerPage() {
     ]).then(([profilesData, tasksData]) => {
       const profiles = Array.isArray(profilesData) ? profilesData : [];
       const allTasks = Array.isArray(tasksData) ? tasksData : [];
-      // 按助理分组：收集该助理身上的所有活跃任务
-      const assistantTaskInfo = new Map<string, { descs: string[]; elapsedTexts: string[]; room: string; status: string }>();
+
+      // 每个助理收集：executing任务、paused任务、waiting插单任务（parentTaskId存在）
+      type TaskInfo = {
+        executingTask: typeof allTasks[0] | null;
+        pausedTask: typeof allTasks[0] | null;
+        waitingInterruptTask: typeof allTasks[0] | null; // 未暂停时的待处理插单
+        resumingTask: typeof allTasks[0] | null; // 插单完成后恢复待就位
+      };
+      const infoMap = new Map<string, TaskInfo>();
+
       for (const t of allTasks) {
-        if (t.assistantId && t.category && (t.status === "executing" || t.status === "waiting" || t.status === "paused")) {
-          const desc = `${t.roomNumber}室 · ${t.category.name} · ${PRIORITY_DUR[t.priority] || ""}`;
-          let elapsedText = "";
-          if (t.status === "executing" && t.startedAt) {
-            const elapsed = Math.floor((Date.now() - new Date(t.startedAt).getTime()) / 60000);
-            elapsedText = `已进行${fmtMin(elapsed)}`;
-          }
-          const effectiveStatus = t.status === "executing" ? "executing" : t.status === "waiting" ? "assigned" : "busy";
-          const existing = assistantTaskInfo.get(t.assistantId);
-          if (existing) {
-            existing.descs.push(desc);
-            existing.elapsedTexts.push(elapsedText);
-            if (effectiveStatus === "executing" || (effectiveStatus === "assigned" && existing.status === "busy")) {
-              existing.status = effectiveStatus;
-              existing.room = t.roomNumber;
-            }
-          } else {
-            assistantTaskInfo.set(t.assistantId, { descs: [desc], elapsedTexts: [elapsedText], room: t.roomNumber, status: effectiveStatus });
-          }
+        if (!t.assistantId || !t.category) continue;
+        if (!["executing", "paused", "waiting"].includes(t.status)) continue;
+        if (!infoMap.has(t.assistantId)) {
+          infoMap.set(t.assistantId, { executingTask: null, pausedTask: null, waitingInterruptTask: null, resumingTask: null });
+        }
+        const info = infoMap.get(t.assistantId)!;
+        if (t.status === "executing") info.executingTask = t;
+        else if (t.status === "paused") info.pausedTask = t;
+        else if (t.status === "waiting" && t.parentTaskId) {
+          // 区分：插单完成后恢复（之前是paused，现在变回waiting）vs 旧任务还在executing时的pending
+          if (!info.executingTask) info.resumingTask = t; // 先放resuming，executing来了再调整
+          else info.waitingInterruptTask = t; // 旧任务还在executing，新任务waiting = pending
         }
       }
+      // 二次修正：同时有executing和waiting(parentTaskId)的，waiting是pending
+      for (const [, info] of infoMap) {
+        if (info.executingTask && info.resumingTask) {
+          info.waitingInterruptTask = info.resumingTask;
+          info.resumingTask = null;
+        }
+      }
+
       setAssistants(profiles.map((p: DockAssistant) => {
-        const info = assistantTaskInfo.get(p.id);
+        const info = infoMap.get(p.id);
+        if (!info) {
+          return { ...p, status: "idle", currentTask: null, currentRoom: p.currentRoom, pausedRoom: null, pausedElapsedMin: 0, pausedTaskDesc: null, pausedTaskDetail: null, newTaskDesc: null, resumingFromPause: false, pendingRoom: null };
+        }
+
+        const { executingTask, pausedTask, waitingInterruptTask, resumingTask } = info;
+
+        // 计算主任务状态和位置
+        let finalStatus = "idle";
+        let currentRoom = p.currentRoom;
+        let pendingRoom: string | null = null;
+        let pausedRoom: string | null = null;
+        let pausedTaskDesc: string | null = null;
+        let pausedTaskDetail: string | null = null;
+        let pausedElapsedMin = 0;
+        let newTaskDesc: string | null = null;
+        let resumingFromPause = false;
+
+        const buildDesc = (t: typeof allTasks[0]) => `${t.roomNumber}室 · ${t.category.name} · ${PRIORITY_DUR[t.priority] || ""}`;
+
+        if (executingTask && waitingInterruptTask) {
+          // 旧任务进行中 + 新插单待处理：主标记在旧任务（橙色进行中），蓝脉冲标记在新任务
+          finalStatus = "executing";
+          currentRoom = executingTask.roomNumber;
+          pendingRoom = waitingInterruptTask.roomNumber;
+          const elapsed = executingTask.startedAt ? Math.floor((Date.now() - new Date(executingTask.startedAt).getTime()) / 60000) : 0;
+          newTaskDesc = buildDesc(waitingInterruptTask);
+        } else if (pausedTask && waitingInterruptTask) {
+          // 旧任务已暂停 + 新插单待就位：灰色标记在旧任务，蓝脉冲在新任务
+          finalStatus = "assigned";
+          currentRoom = pausedTask.roomNumber;
+          pausedRoom = pausedTask.roomNumber;
+          const pe = (pausedTask.pausedAt && pausedTask.startedAt)
+            ? Math.floor((new Date(pausedTask.pausedAt).getTime() - new Date(pausedTask.startedAt).getTime()) / 60000)
+            : 0;
+          pausedElapsedMin = pe;
+          pausedTaskDesc = `${pausedTask.category.name} · 已进行${fmtMin(pe)}`;
+          pausedTaskDetail = buildDesc(pausedTask);
+          pendingRoom = waitingInterruptTask.roomNumber;
+          newTaskDesc = buildDesc(waitingInterruptTask);
+        } else if (pausedTask && executingTask) {
+          // 旧任务已暂停 + 新任务进行中：灰色标记在旧任务，橙色标记在新任务
+          finalStatus = "executing";
+          currentRoom = executingTask.roomNumber;
+          pausedRoom = pausedTask.roomNumber;
+          const pe = (pausedTask.pausedAt && pausedTask.startedAt)
+            ? Math.floor((new Date(pausedTask.pausedAt).getTime() - new Date(pausedTask.startedAt).getTime()) / 60000)
+            : 0;
+          pausedElapsedMin = pe;
+          pausedTaskDesc = `${pausedTask.category.name} · 已进行${fmtMin(pe)}`;
+          pausedTaskDetail = buildDesc(pausedTask);
+          const execElapsed = executingTask.startedAt ? Math.floor((Date.now() - new Date(executingTask.startedAt).getTime()) / 60000) : 0;
+          newTaskDesc = `已前往${executingTask.roomNumber}室。进行${executingTask.category.name} · 进行中 · 已进行${fmtMin(execElapsed)}`;
+        } else if (resumingTask) {
+          // 插单完成，原任务恢复待就位
+          finalStatus = "assigned";
+          currentRoom = resumingTask.roomNumber;
+          resumingFromPause = true;
+        } else if (executingTask) {
+          finalStatus = "executing";
+          currentRoom = executingTask.roomNumber;
+          const elapsed = executingTask.startedAt ? Math.floor((Date.now() - new Date(executingTask.startedAt).getTime()) / 60000) : 0;
+        } else if (pausedTask) {
+          finalStatus = "busy";
+          currentRoom = pausedTask.roomNumber;
+        } else {
+          // 仅有 waiting 任务（普通待就位）
+          const waitTask = allTasks.find((t: typeof allTasks[0]) => t.assistantId === p.id && t.status === "waiting");
+          if (waitTask) { finalStatus = "assigned"; currentRoom = waitTask.roomNumber; }
+        }
+
+        // 构建 currentTask 字符串（用于 Dock tooltip）
+        const descTask = executingTask || pausedTask;
+        let currentTask: string | null = null;
+        if (descTask) {
+          const elapsed = descTask.status === "executing" && descTask.startedAt
+            ? Math.floor((Date.now() - new Date(descTask.startedAt).getTime()) / 60000) : 0;
+          currentTask = elapsed > 0 ? `已进行${fmtMin(elapsed)}\n${buildDesc(descTask)}` : buildDesc(descTask);
+        }
+
         return {
           ...p,
-          status: info?.status || "idle",
-          currentTask: info?.descs.map((d, i) => {
-            const et = info.elapsedTexts[i];
-            return et ? `${et}\n${d}` : d;
-          }).join("\n---\n") || null,
-          currentRoom: info?.room || p.currentRoom || null,
+          status: finalStatus,
+          currentTask,
+          currentRoom,
+          pausedRoom,
+          pausedElapsedMin,
+          pausedTaskDesc,
+          pausedTaskDetail,
+          newTaskDesc,
+          resumingFromPause,
+          pendingRoom,
         };
       }));
     }).catch(console.error);
@@ -695,9 +820,10 @@ export default function PhotographerPage() {
           if (Array.isArray(taskData)) {
             setTasks(sortTasksByStatus(taskData.map(apiTaskToDisplay)));
             if (isAssistantRole(profile.role)) {
-              const active = (taskData as TaskFromAPI[]).find((t) => t.status === "executing")
-                || (taskData as TaskFromAPI[]).find((t) => t.status === "waiting" && t.assistantId);
-              setCurrentRawTask(active || null);
+              const { current: active, paused, pending } = resolveAssistantTasks(taskData as TaskFromAPI[]);
+              setCurrentRawTask(active);
+              setPausedRawTask(paused);
+              setPendingRawTask(pending);
               // 同步位置：有活跃任务则跟随任务位置
               if (active && active.roomNumber !== profile.currentRoom) {
                 setProfile((p) => p ? { ...p, currentRoom: active.roomNumber } : p);
@@ -861,6 +987,11 @@ export default function PhotographerPage() {
   }, [themeMode]);
 
   useEffect(() => {
+    // 读取登录账号角色
+    try {
+      const loginUser = JSON.parse(localStorage.getItem("user") || "null");
+      if (loginUser?.role) setLoginRole(loginUser.role);
+    } catch {}
     // Fetch profiles, then pick current identity from localStorage or default
     fetch("/api/profiles")
       .then((r) => r.json())
@@ -869,7 +1000,13 @@ export default function PhotographerPage() {
           setAllProfiles(data);
           const savedId = typeof window !== "undefined" ? localStorage.getItem("currentProfileId") : null;
           const match = savedId ? data.find((p: { id: string }) => p.id === savedId) : null;
-          const selected = match || data.find((p: { name: string; role: string }) => p.name === "郑丹" && p.role === "photographer") || data[0];
+          // fallback: 登录账号 → 第一个用户
+          let loginMatch = null;
+          try {
+            const loginUser = JSON.parse(localStorage.getItem("user") || "null");
+            if (loginUser?.id) loginMatch = data.find((p: { id: string }) => p.id === loginUser.id);
+          } catch {}
+          const selected = match || loginMatch || data[0];
           if (selected) {
             setProfile(selected);
             originalRoomRef.current = selected.currentRoom;
@@ -882,9 +1019,10 @@ export default function PhotographerPage() {
                 if (Array.isArray(taskData)) {
                   setTasks(sortTasksByStatus(taskData.map(apiTaskToDisplay)));
                   if (isAssistantRole(selected.role)) {
-                    const active = (taskData as TaskFromAPI[]).find((t) => t.status === "executing")
-                      || (taskData as TaskFromAPI[]).find((t) => t.status === "waiting" && t.assistantId);
-                    setCurrentRawTask(active || null);
+                    const { current: active, paused, pending } = resolveAssistantTasks(taskData as TaskFromAPI[]);
+                    setCurrentRawTask(active);
+                    setPausedRawTask(paused);
+                    setPendingRawTask(pending);
                   }
                 }
               })
@@ -908,6 +1046,15 @@ export default function PhotographerPage() {
       .then((data) => {
         if (Array.isArray(data)) {
           setCategories(buildCategories(data));
+        }
+      })
+      .catch(console.error);
+
+    fetch("/api/config")
+      .then((r) => r.json())
+      .then((cfg) => {
+        if (cfg?.ending_alert_min?.value) {
+          setEndingAlertMin(Number(cfg.ending_alert_min.value) || 2);
         }
       })
       .catch(console.error);
@@ -1006,7 +1153,31 @@ export default function PhotographerPage() {
     }
   }, [buildings, refreshAssistants]);
 
-  // 助理：切换���务状态
+  // 助理：手动暂停当前任务（插单场景）
+  const handlePauseCurrentTask = useCallback(async () => {
+    if (!currentRawTask || !profile) return;
+    try {
+      await fetch(`/api/tasks/${currentRawTask.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "pause" }),
+      });
+      const taskRes = await fetch(`/api/tasks?assistantId=${profile.id}&todayOnly=true`);
+      const taskData = await taskRes.json();
+      if (Array.isArray(taskData)) {
+        setTasks(sortTasksByStatus(taskData.map(apiTaskToDisplay)));
+        const { current: active, paused, pending } = resolveAssistantTasks(taskData as TaskFromAPI[]);
+        setCurrentRawTask(active);
+        setPausedRawTask(paused);
+        setPendingRawTask(pending);
+      }
+      refreshAssistants();
+    } catch (e) {
+      console.error("Failed to pause task", e);
+    }
+  }, [currentRawTask, profile, refreshAssistants]);
+
+  // 助理：切换任务状态
   const handleAssistantStatusChange = useCallback(async (action: "start" | "complete") => {
     if (!currentRawTask) return;
     try {
@@ -1033,10 +1204,10 @@ export default function PhotographerPage() {
           const taskData = await taskRes.json();
           if (Array.isArray(taskData)) {
             setTasks(sortTasksByStatus(taskData.map(apiTaskToDisplay)));
-            const next = (taskData as TaskFromAPI[]).find((t) => t.status === "executing")
-              || (taskData as TaskFromAPI[]).find((t) => t.status === "waiting" && t.assistantId);
-            setCurrentRawTask(next || null);
-            // 同步位置：有下一个任务则跟随任务位置，否则回到原始房间
+            const { current: next, paused, pending } = resolveAssistantTasks(taskData as TaskFromAPI[]);
+            setCurrentRawTask(next);
+            setPausedRawTask(paused);
+            setPendingRawTask(pending);
             const nextRoom = next ? next.roomNumber : originalRoomRef.current;
             if (nextRoom) {
               setProfile((p) => p ? { ...p, currentRoom: nextRoom } : p);
@@ -1056,9 +1227,9 @@ export default function PhotographerPage() {
           const taskData = await taskRes.json();
           if (Array.isArray(taskData)) {
             setTasks(sortTasksByStatus(taskData.map(apiTaskToDisplay)));
-            const active = (taskData as TaskFromAPI[]).find((t) => t.status === "executing")
-              || (taskData as TaskFromAPI[]).find((t) => t.status === "waiting" && t.assistantId);
-            setCurrentRawTask(active || null);
+            const { current: active, paused, pending } = resolveAssistantTasks(taskData as TaskFromAPI[]);
+            setCurrentRawTask(active);
+            setPausedRawTask(paused);
           }
           refreshAssistants();
         }
@@ -1119,6 +1290,7 @@ export default function PhotographerPage() {
             assistantName: null,
             photographerName: profile?.name || null,
             createdAt: new Date().toISOString(),
+            estEndTime: null,
           },
           ...prev,
         ]));
@@ -1179,7 +1351,7 @@ export default function PhotographerPage() {
             />
             {/* 助理地图标记 */}
             {(() => {
-              const visible = assistants.filter((a) => a.currentRoom && (a.status === "assigned" || a.status === "executing"));
+              const visible = assistants.filter((a) => a.currentRoom && (a.status === "assigned" || a.status === "executing" || a.resumingFromPause));
               // 解析额外场地坐标
               const venueCoords = new Map<string, { x: number; y: number }>();
               if (activeBuilding?.extraVenues) {
@@ -1201,19 +1373,94 @@ export default function PhotographerPage() {
                 roomIdx.set(a.id, roomCount.get(r) || 0);
                 roomCount.set(r, (roomCount.get(r) || 0) + 1);
               }
-              return visible.map((a) => {
+              return visible.flatMap((a) => {
               const room = activeBuilding.rooms.find((r) => r.roomNumber === a.currentRoom);
               const venuePos = !room ? venueCoords.get(a.currentRoom!) : undefined;
               const posX = room?.xPosition ?? venuePos?.x;
               const posY = room?.yPosition ?? venuePos?.y;
-              if (posX === undefined || posY === undefined) return null;
+              if (posX === undefined || posY === undefined) return [];
               const isAssigned = a.status === "assigned";
               const isHovered = hoveredMapAssistant === a.id;
               const idx = roomIdx.get(a.id) || 0;
               const total = roomCount.get(a.currentRoom!) || 1;
-              // 同房间多人时水平偏移：以中心为基准左右展开，间距 22px
               const offset = total > 1 ? (idx - (total - 1) / 2) * 22 : 0;
-              return (
+
+              // 额外：插单进行中时，旧房间显示灰色头像
+              const pausedMarker = a.pausedRoom ? (() => {
+                const pRoom = activeBuilding.rooms.find((r) => r.roomNumber === a.pausedRoom);
+                const pVenuePos = !pRoom ? venueCoords.get(a.pausedRoom!) : undefined;
+                const pX = pRoom?.xPosition ?? pVenuePos?.x;
+                const pY = pRoom?.yPosition ?? pVenuePos?.y;
+                if (pX === undefined || pY === undefined) return null;
+                return (
+                  <div
+                    key={`${a.id}-paused`}
+                    className="absolute"
+                    style={{ left: `${pX}%`, top: `${pY}%`, transform: "translate(-50%, -50%)", zIndex: 8 }}
+                    onMouseEnter={(e) => { e.stopPropagation(); setHoveredMapAssistant(`${a.id}-paused`); }}
+                    onMouseLeave={() => setHoveredMapAssistant(null)}
+                    onMouseDown={(e) => e.stopPropagation()}
+                  >
+                    <div className="relative w-[26px] h-[26px]">
+                      <div className="w-full h-full rounded-full overflow-hidden border-[2px] border-gray-400 shadow-sm" style={{ filter: "grayscale(1)" }}>
+                        {a.avatar ? (
+                          <img src={a.avatar} alt={a.name} className="w-full h-full object-cover" />
+                        ) : (
+                          <div className="w-full h-full bg-gradient-to-br from-gray-200 to-gray-400 flex items-center justify-center text-white text-[8px] font-bold">{a.name[0]}</div>
+                        )}
+                      </div>
+                      <div className="absolute -bottom-0.5 -right-0.5 w-2 h-2 rounded-full bg-gray-400 border border-white" />
+                    </div>
+                    {hoveredMapAssistant === `${a.id}-paused` && (
+                      <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 pointer-events-none whitespace-nowrap z-50">
+                        <div className="px-3 py-2 rounded-xl bg-white/95 backdrop-blur-xl shadow-lg border border-gray-100 text-center">
+                          {a.pausedTaskDesc && (
+                            <p className="text-xs font-semibold text-[--text-primary]">{a.name} · 暂停中 · 已进行{fmtMin(a.pausedElapsedMin)}</p>
+                          )}
+                          {a.pausedTaskDetail && (
+                            <p className="text-[10px] text-[--text-muted] mt-0.5">{a.pausedTaskDetail}</p>
+                          )}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })() : null;
+
+              // 待处理插单的蓝脉冲标记（旧任务还在 executing，新任务在 waiting）
+              const pendingMarker = a.pendingRoom ? (() => {
+                const pr = activeBuilding.rooms.find((r) => r.roomNumber === a.pendingRoom);
+                const pvp = !pr ? venueCoords.get(a.pendingRoom!) : undefined;
+                const px = pr?.xPosition ?? pvp?.x;
+                const py = pr?.yPosition ?? pvp?.y;
+                if (px === undefined || py === undefined) return null;
+                return (
+                  <div
+                    key={`${a.id}-pending`}
+                    className="absolute"
+                    style={{ left: `${px}%`, top: `${py}%`, transform: "translate(-50%, -50%)", zIndex: 9 }}
+                    onMouseEnter={(e) => { e.stopPropagation(); setHoveredMapAssistant(`${a.id}-pending`); }}
+                    onMouseLeave={() => setHoveredMapAssistant(null)}
+                    onMouseDown={(e) => e.stopPropagation()}
+                  >
+                    <div className="relative w-5 h-5 flex items-center justify-center">
+                      <div className="absolute inset-0 rounded-full bg-blue-500/30 animate-ping" />
+                      <div className="absolute inset-0.5 rounded-full bg-blue-500/20 animate-pulse" />
+                      <div className="w-2 h-2 rounded-full bg-blue-500 relative z-10" />
+                    </div>
+                    {hoveredMapAssistant === `${a.id}-pending` && (
+                      <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 pointer-events-none whitespace-nowrap z-50">
+                        <div className="px-3 py-2 rounded-xl bg-white/95 backdrop-blur-xl shadow-lg border border-gray-100 text-center">
+                          <p className="text-xs font-semibold text-blue-600">{a.name} · 紧急插单待处理</p>
+                          {a.newTaskDesc && <p className="text-[10px] text-[--text-muted] mt-0.5">{a.newTaskDesc}</p>}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })() : null;
+
+              const mainMarker = (
                 <div
                   key={a.id}
                   className="absolute"
@@ -1228,12 +1475,26 @@ export default function PhotographerPage() {
                   onMouseLeave={() => setHoveredMapAssistant(null)}
                   onMouseDown={(e) => e.stopPropagation()}
                 >
-                  {isAssigned ? (
-                    /* 蓝色脉冲点 — 待就位 */
+                  {isAssigned && !a.resumingFromPause ? (
+                    /* 蓝色脉冲点 — 待就位（新任务） */
                     <div className="relative w-5 h-5 flex items-center justify-center">
                       <div className="absolute inset-0 rounded-full bg-blue-500/30 animate-ping" />
                       <div className="absolute inset-0.5 rounded-full bg-blue-500/20 animate-pulse" />
                       <div className="w-2 h-2 rounded-full bg-blue-500 relative z-10" />
+                    </div>
+                  ) : a.resumingFromPause ? (
+                    /* 灰色头像 + 蓝色脉冲外圈 — 插单完成后恢复原任务待就位 */
+                    <div className="relative w-[26px] h-[26px]">
+                      <div className="absolute -inset-2 rounded-full bg-blue-500/20 animate-ping" />
+                      <div className="absolute -inset-1 rounded-full bg-blue-500/10 animate-pulse" />
+                      <div className="w-full h-full rounded-full overflow-hidden border-[2px] border-blue-400 shadow-sm relative" style={{ filter: "grayscale(1)" }}>
+                        {a.avatar ? (
+                          <img src={a.avatar} alt={a.name} className="w-full h-full object-cover" />
+                        ) : (
+                          <div className="w-full h-full bg-gradient-to-br from-gray-200 to-gray-400 flex items-center justify-center text-white text-[8px] font-bold">{a.name[0]}</div>
+                        )}
+                      </div>
+                      <div className="absolute -bottom-0.5 -right-0.5 w-2 h-2 rounded-full bg-blue-400 border border-white relative z-10" />
                     </div>
                   ) : (
                     /* 头像 + 状态环 — 进行中 */
@@ -1276,13 +1537,26 @@ export default function PhotographerPage() {
                                 <p className="text-[10px] text-[--text-muted] mt-0.5">{detail}</p>
                               </div>
                             );
-                          });
+                          }).concat(
+                            a.pausedTaskDetail ? (() => {
+                              const parts = a.pausedTaskDetail.split(" · ");
+                              const locationAndType = parts.slice(0, 2).join(" · ");
+                              const timeRange = parts[2] || "";
+                              return [
+                                <div key="paused-info" className="mt-2 pt-2 border-t border-gray-100">
+                                  <p className={`text-xs font-semibold ${statusColor}`}>{locationAndType}（暂停中）</p>
+                                  <p className="text-[10px] text-[--text-muted] mt-0.5">{timeRange}{timeRange ? " · " : ""}已进行{fmtMin(a.pausedElapsedMin)}</p>
+                                </div>
+                              ];
+                            })() : []
+                          );
                         })()}
                       </div>
                     </div>
                   )}
                 </div>
               );
+              return [pausedMarker, pendingMarker, mainMarker].filter(Boolean);
               });
             })()}
           </div>
@@ -1424,7 +1698,7 @@ export default function PhotographerPage() {
                 <span className="shrink-0">🌤</span>
                 <span className="truncate">深圳 · 26°C 多云</span>
               </div>
-              <span className="shrink-0 font-mono text-[12px] font-semibold tabular-nums text-[--text-secondary]">
+              <span className="shrink-0 font-mono text-[12px] font-semibold tabular-nums text-[--text-secondary]" suppressHydrationWarning>
                 {now.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false })}
               </span>
             </div>
@@ -1434,10 +1708,12 @@ export default function PhotographerPage() {
           {isAssistantRole(profile?.role) ? (
             <div className={`rounded-2xl px-4 py-3.5 flex-1 min-h-0 flex flex-col ${glass}`}>
               <h3 className="text-[12px] font-bold text-[--text-primary] tracking-wide mb-2.5">当前任务状态</h3>
-              <div className="flex-1 min-h-0 flex flex-col items-center justify-center">
+              <div className="flex-1 min-h-0 flex flex-col items-center justify-center gap-2">
                 {(() => {
+                  const PRIORITY_DUR: Record<number, string> = { 1: "1-5分钟", 2: "5-20分钟", 3: "30分钟以内", 4: "30-60分钟", 5: "1小时以上" };
+
                   // 无任务 → 空闲
-                  if (!currentRawTask) {
+                  if (!currentRawTask && !pausedRawTask) {
                     return (
                       <div className="w-full flex-1 rounded-xl bg-green-400/20 flex flex-col items-center justify-center gap-3">
                         <div className="w-16 h-16 rounded-full bg-green-500/20 flex items-center justify-center">
@@ -1448,73 +1724,160 @@ export default function PhotographerPage() {
                       </div>
                     );
                   }
-                  // 已分配但未开始 → 待就位
-                  if (currentRawTask.status === "waiting") {
-                    const PRIORITY_DUR: Record<number, string> = { 1: "1-5分钟", 2: "5-20分钟", 3: "30分钟以内", 4: "30-60分钟", 5: "1小时以上" };
+
+                  // 渲染暂停中的旧任务区块（灰色，不可点击）
+                  const renderPausedBlock = (task: TaskFromAPI, flex: number) => {
+                    const leftMs = currentRawTask?.startedAt
+                      ? now.getTime() - new Date(currentRawTask.startedAt).getTime() : 0;
+                    const leftMin = Math.floor(leftMs / 60000);
+                    const leftSec = Math.floor((leftMs % 60000) / 1000);
+                    const leftText = leftMin < 60 ? `${leftMin}分${leftSec.toString().padStart(2, "0")}秒` : `${(leftMin / 60).toFixed(1)}小时`;
                     return (
-                      <button
-                        onClick={() => handleAssistantStatusChange("start")}
-                        className="w-full flex-1 rounded-xl bg-blue-400/20 hover:bg-blue-400/30 flex flex-col items-center justify-center gap-3 cursor-pointer transition-colors active:scale-[0.98]"
-                      >
-                        <div className="w-16 h-16 rounded-full bg-blue-500/20 flex items-center justify-center">
-                          <div className="w-8 h-8 rounded-full bg-blue-500" />
+                      <div key={task.id} className="w-full rounded-xl bg-gray-400/15 flex flex-col items-center justify-center gap-1.5 py-3" style={{ flex }}>
+                        <div className="w-8 h-8 rounded-full bg-gray-400/20 flex items-center justify-center">
+                          <div className="w-4 h-4 rounded-full bg-gray-400" />
                         </div>
-                        <span className="text-[25px] font-extrabold text-blue-600">点击开始任务</span>
-                        <div className="text-[13px] text-blue-600/70 text-center space-y-1">
-                          <p className="flex items-center justify-center gap-1">
-                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z" /><circle cx="12" cy="10" r="3" /></svg>
-                            {currentRawTask.roomNumber}室 · {currentRawTask.photographer.name}
-                          </p>
-                          <p>{currentRawTask.category.name} · {PRIORITY_DUR[currentRawTask.priority] || ""} · 待就位</p>
+                        <span className="text-[13px] font-extrabold text-gray-500">{task.category.name}（暂停中）</span>
+                        <div className="text-[10px] text-gray-400 text-center space-y-0.5">
+                          <p>{task.roomNumber}室 · {task.photographer.name}</p>
+                          <p>已离开 {leftText}</p>
                         </div>
-                      </button>
+                      </div>
                     );
-                  }
-                  // 进行中 → 根据 isLocked 判断颜色
-                  if (currentRawTask.status === "executing") {
-                    const isLocked = currentRawTask.isLocked;
-                    const bgCls = isLocked ? "bg-red-400/20 hover:bg-red-400/30" : "bg-orange-400/20 hover:bg-orange-400/30";
-                    const dotBg = isLocked ? "bg-red-500/20" : "bg-orange-500/20";
-                    const dotColor = isLocked ? "bg-red-500" : "bg-orange-500";
-                    const textColor = isLocked ? "text-red-600" : "text-orange-600";
-                    const subColor = isLocked ? "text-red-600/70" : "text-orange-600/70";
-                    const barFrom = isLocked ? "from-red-400" : "from-orange-400";
-                    const barTo = isLocked ? "to-red-500" : "to-orange-500";
-                    const label = isLocked ? "进行中（不可中断）" : "进行中";
-                    const elapsedMs = currentRawTask.startedAt
-                      ? now.getTime() - new Date(currentRawTask.startedAt).getTime()
-                      : 0;
+                  };
+
+                  // 渲染执行中任务区块（点击暂停，有插单任务时）
+                  const renderExecutingWithPause = (task: TaskFromAPI, flex: number) => {
+                    const elapsedMs = task.startedAt ? now.getTime() - new Date(task.startedAt).getTime() : 0;
                     const elapsedMin = Math.floor(elapsedMs / 60000);
                     const elapsedSec = Math.floor((elapsedMs % 60000) / 1000);
                     return (
                       <button
-                        onClick={() => handleAssistantStatusChange("complete")}
-                        className={`w-full flex-1 rounded-xl ${bgCls} flex flex-col items-center justify-center gap-3 cursor-pointer transition-colors active:scale-[0.98] relative overflow-hidden`}
+                        key={task.id}
+                        onClick={handlePauseCurrentTask}
+                        className="w-full rounded-xl bg-orange-400/20 hover:bg-orange-400/30 flex flex-col items-center justify-center gap-2 py-3 cursor-pointer transition-colors active:scale-[0.98] relative overflow-hidden"
+                        style={{ flex }}
                       >
-                        <div className={`w-16 h-16 rounded-full ${dotBg} flex items-center justify-center`}>
-                          <div className={`w-8 h-8 rounded-full ${dotColor} animate-pulse`} />
+                        <div className="w-8 h-8 rounded-full bg-orange-500/20 flex items-center justify-center">
+                          <div className="w-4 h-4 rounded-full bg-orange-500 animate-pulse" />
                         </div>
-                        <span className={`text-[25px] font-extrabold ${textColor}`}>点击完成任务</span>
-                        <div className={`text-[13px] ${subColor} text-center space-y-1`}>
-                          <p className="flex items-center justify-center gap-1">
-                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z" /><circle cx="12" cy="10" r="3" /></svg>
-                            {currentRawTask.roomNumber}室 · {currentRawTask.photographer.name}
-                          </p>
-                          <p>{currentRawTask.category.name} · 进行中{elapsedMin < 60 ? `${elapsedMin}分${elapsedSec.toString().padStart(2, "0")}秒` : `${elapsedMin / 60 % 1 === 0 ? elapsedMin / 60 : (elapsedMin / 60).toFixed(1)}小时`}</p>
+                        <span className="text-[13px] font-extrabold text-orange-600">{task.category.name}（点击暂停）</span>
+                        <div className="text-[10px] text-orange-600/70 text-center space-y-0.5">
+                          <p>{task.roomNumber}室 · {task.photographer.name}</p>
+                          <p>{elapsedMin < 60 ? `${elapsedMin}分${elapsedSec.toString().padStart(2, "0")}秒` : `${(elapsedMin / 60).toFixed(1)}小时`}</p>
                         </div>
-                        {/* 底部循环颜色条动效 */}
                         <div className="absolute bottom-0 left-0 right-0 h-1 overflow-hidden">
-                          <div className={`h-full w-[200%] bg-gradient-to-r ${barFrom} ${barTo} ${barFrom} animate-[shimmer_2s_linear_infinite]`} />
+                          <div className="h-full w-[200%] bg-gradient-to-r from-orange-400 to-orange-500 from-orange-400 animate-[shimmer_2s_linear_infinite]" />
                         </div>
                       </button>
                     );
-                  }
-                  // 其他状态 fallback
-                  return (
-                    <div className="w-full flex-1 rounded-xl bg-gray-400/10 flex flex-col items-center justify-center gap-2">
-                      <span className="text-[28px] font-extrabold text-gray-400">{currentRawTask.status}</span>
+                  };
+
+                  // 渲染待就位任务区块（只显示信息，无按钮）
+                  const renderPendingBlock = (task: TaskFromAPI, flex: number) => (
+                    <div key={task.id} className="w-full rounded-xl bg-blue-400/10 flex flex-col items-center justify-center gap-1.5 py-3" style={{ flex }}>
+                      <div className="w-8 h-8 rounded-full bg-blue-500/20 flex items-center justify-center">
+                        <div className="w-4 h-4 rounded-full bg-blue-400" />
+                      </div>
+                      <span className="text-[13px] font-extrabold text-blue-600">紧急任务待处理</span>
+                      <div className="text-[10px] text-blue-600/70 text-center space-y-0.5">
+                        <p>{task.roomNumber}室 · {task.photographer.name}</p>
+                        <p>{task.category.name} · {PRIORITY_DUR[task.priority] || ""}</p>
+                      </div>
                     </div>
                   );
+
+                  // 渲染单个任务区块（正常流程）
+                  const renderTaskBlock = (task: TaskFromAPI, flex: number) => {
+                    if (task.status === "paused") return renderPausedBlock(task, flex);
+                    if (task.status === "waiting") {
+                      return (
+                        <button
+                          key={task.id}
+                          onClick={() => handleAssistantStatusChange("start")}
+                          className="w-full rounded-xl bg-blue-400/20 hover:bg-blue-400/30 flex flex-col items-center justify-center gap-2 py-4 cursor-pointer transition-colors active:scale-[0.98]"
+                          style={{ flex }}
+                        >
+                          <div className="w-10 h-10 rounded-full bg-blue-500/20 flex items-center justify-center">
+                            <div className="w-5 h-5 rounded-full bg-blue-500" />
+                          </div>
+                          <span className="text-[16px] font-extrabold text-blue-600">点击开始任务</span>
+                          <div className="text-[11px] text-blue-600/70 text-center space-y-0.5">
+                            <p>{task.roomNumber}室 · {task.photographer.name}</p>
+                            <p>{task.category.name} · {PRIORITY_DUR[task.priority] || ""} · 待就位</p>
+                          </div>
+                        </button>
+                      );
+                    }
+                    if (task.status === "executing") {
+                      const isLocked = task.isLocked;
+                      const bgCls = isLocked ? "bg-red-400/20 hover:bg-red-400/30" : "bg-orange-400/20 hover:bg-orange-400/30";
+                      const dotBg = isLocked ? "bg-red-500/20" : "bg-orange-500/20";
+                      const dotColor = isLocked ? "bg-red-500" : "bg-orange-500";
+                      const textColor = isLocked ? "text-red-600" : "text-orange-600";
+                      const subColor = isLocked ? "text-red-600/70" : "text-orange-600/70";
+                      const barFrom = isLocked ? "from-red-400" : "from-orange-400";
+                      const barTo = isLocked ? "to-red-500" : "to-orange-500";
+                      const elapsedMs = task.startedAt ? now.getTime() - new Date(task.startedAt).getTime() : 0;
+                      const elapsedMin = Math.floor(elapsedMs / 60000);
+                      const elapsedSec = Math.floor((elapsedMs % 60000) / 1000);
+                      return (
+                        <button
+                          key={task.id}
+                          onClick={() => handleAssistantStatusChange("complete")}
+                          className={`w-full rounded-xl ${bgCls} flex flex-col items-center justify-center gap-2 py-4 cursor-pointer transition-colors active:scale-[0.98] relative overflow-hidden`}
+                          style={{ flex }}
+                        >
+                          <div className={`w-10 h-10 rounded-full ${dotBg} flex items-center justify-center`}>
+                            <div className={`w-5 h-5 rounded-full ${dotColor} animate-pulse`} />
+                          </div>
+                          <span className={`text-[16px] font-extrabold ${textColor}`}>点击完成任务</span>
+                          <div className={`text-[11px] ${subColor} text-center space-y-0.5`}>
+                            <p>{task.roomNumber}室 · {task.photographer.name}</p>
+                            <p>{task.category.name} · {elapsedMin < 60 ? `${elapsedMin}分${elapsedSec.toString().padStart(2, "0")}秒` : `${(elapsedMin / 60).toFixed(1)}小时`}</p>
+                          </div>
+                          <div className="absolute bottom-0 left-0 right-0 h-1 overflow-hidden">
+                            <div className={`h-full w-[200%] bg-gradient-to-r ${barFrom} ${barTo} ${barFrom} animate-[shimmer_2s_linear_infinite]`} />
+                          </div>
+                        </button>
+                      );
+                    }
+                    return null;
+                  };
+
+                  // 场景1：执行中 + 待处理插单 → 50/50（上方点击暂停，下方显示插单信息）
+                  if (currentRawTask?.status === "executing" && pendingRawTask) {
+                    return (
+                      <>
+                        {renderExecutingWithPause(currentRawTask, 1)}
+                        {renderPendingBlock(pendingRawTask, 1)}
+                      </>
+                    );
+                  }
+
+                  // 场景2：已暂停 + 待就位插单 → 1/3 + 2/3
+                  if (pausedRawTask && currentRawTask?.status === "waiting") {
+                    return (
+                      <>
+                        {renderPausedBlock(pausedRawTask, 1)}
+                        {renderTaskBlock(currentRawTask, 2)}
+                      </>
+                    );
+                  }
+
+                  // 场景3：已暂停 + 执行中 → 1/3 + 2/3
+                  if (pausedRawTask && currentRawTask) {
+                    return (
+                      <>
+                        {renderPausedBlock(pausedRawTask, 1)}
+                        {renderTaskBlock(currentRawTask, 2)}
+                      </>
+                    );
+                  }
+
+                  // 正常单任务
+                  const task = currentRawTask || pausedRawTask!;
+                  return renderTaskBlock(task, 1);
                 })()}
               </div>
             </div>
@@ -1596,6 +1959,9 @@ export default function PhotographerPage() {
                   const isRemoving = removingTaskId === task.id;
                   const isCancellable = task.statusLabel === "等待中" || task.statusLabel === "待就位";
                   const showCancel = isCancellable && hoveredTagId === task.id && !isRemoving;
+                  const isEndingSoon = task.statusLabel === "进行中" && task.estEndTime
+                    ? (() => { const diff = (new Date(task.estEndTime).getTime() - Date.now()) / 60000; return diff > 0 && diff <= endingAlertMin; })()
+                    : false;
                   return (
                     <div
                       key={task.id}
@@ -1621,6 +1987,9 @@ export default function PhotographerPage() {
                         <span className="text-[12px] font-medium text-[--text-primary]">
                           {task.name}
                           <span className="text-[10px] text-[--text-muted] font-normal ml-1.5">{task.timePeriod}</span>
+                          {isEndingSoon && (
+                            <span className="ml-1.5 text-[9px] font-bold px-1.5 py-0.5 rounded bg-red-100 text-red-500 animate-pulse">快结束</span>
+                          )}
                         </span>
                         <span
                           className={`text-[8px] font-bold px-1.5 py-0.5 rounded transition-all duration-150 ${
@@ -1682,8 +2051,31 @@ export default function PhotographerPage() {
           </div>
         </div>
 
-        {/* 右上：身份切换 + 后台管理 */}
+        {/* 右上按钮区域 */}
         <div className="absolute top-3 right-3 z-20 flex items-center gap-2">
+          {/* 返回登录：所有角色可见 */}
+          <a
+            href="/"
+            onClick={() => { localStorage.removeItem("user"); localStorage.removeItem("currentProfileId"); }}
+            className={`rounded-xl px-3 py-2 flex items-center gap-2 cursor-pointer hover:bg-white/70 transition-colors ${glass}`}
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--text-secondary)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" /><polyline points="16 17 21 12 16 7" /><line x1="21" y1="12" x2="9" y2="12" />
+            </svg>
+            <span className="text-xs font-medium text-[--text-secondary]">返回登录</span>
+          </a>
+          {/* 数据统计：仅摄影师/助理可见 */}
+          {(loginRole === "photographer" || loginRole === "assistant") && (
+          <a href="/stats" className={`rounded-xl px-3 py-2 flex items-center gap-2 cursor-pointer hover:bg-white/70 transition-colors ${glass}`}>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--text-secondary)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <line x1="18" y1="20" x2="18" y2="10" /><line x1="12" y1="20" x2="12" y2="4" /><line x1="6" y1="20" x2="6" y2="14" />
+            </svg>
+            <span className="text-xs font-medium text-[--text-secondary]">数据统计</span>
+          </a>
+          )}
+          {/* 切换身份 + 后台管理：仅管理账号可见 */}
+          {(loginRole === "admin" || loginRole === "assistant_leader") && (
+          <>
           <button
             onClick={() => setShowIdentityModal(true)}
             className={`rounded-xl px-3 py-2 flex items-center gap-2 cursor-pointer hover:bg-white/70 transition-colors ${glass}`}
@@ -1700,6 +2092,8 @@ export default function PhotographerPage() {
             </svg>
             <span className="text-xs font-medium text-[--text-secondary]">后台管理</span>
           </a>
+          </>
+          )}
         </div>
 
         {/* 底部：图例 — 居中于任务面板右侧与助理列表左侧之间 */}

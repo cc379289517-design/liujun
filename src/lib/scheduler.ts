@@ -230,43 +230,24 @@ export async function canInterrupt(
 
 /**
  * 执行插单操作
- * 暂停当前任务，分配新 P1 任务给该助理
+ * 仅将新 P1 任务分配给助理（记录 parentTaskId），不立即暂停当前任务。
+ * 助理需手动在工作台点击暂停，再确认就位后开始新任务。
  */
 export async function interruptAssistant(
   assistantId: string,
   newTaskId: string
 ): Promise<boolean> {
   const currentTask = await prisma.bookingTask.findFirst({
-    where: {
-      assistantId,
-      status: TaskStatus.executing,
-    },
+    where: { assistantId, status: TaskStatus.executing },
   });
 
   if (!currentTask) return false;
 
-  await prisma.$transaction([
-    // 暂停当前任务
-    prisma.bookingTask.update({
-      where: { id: currentTask.id },
-      data: { status: TaskStatus.paused },
-    }),
-    // 分配新任务，记录父任务
-    prisma.bookingTask.update({
-      where: { id: newTaskId },
-      data: {
-        assistantId,
-        parentTaskId: currentTask.id,
-        status: TaskStatus.executing,
-        startedAt: new Date(),
-      },
-    }),
-    // 更新助理状态
-    prisma.profile.update({
-      where: { id: assistantId },
-      data: { status: ProfileStatus.executing },
-    }),
-  ]);
+  // 只分配新任务 + 记录父任务，不改变旧任务状态，不改变助理状态
+  await prisma.bookingTask.update({
+    where: { id: newTaskId },
+    data: { assistantId, parentTaskId: currentTask.id },
+  });
 
   return true;
 }
@@ -357,23 +338,21 @@ export async function completeTask(taskId: string): Promise<void> {
         where: { id: taskId },
         data: { status: TaskStatus.completed, completedAt: new Date() },
       }),
+      // 恢复父任务为 waiting（需重新就位），清除 pausedAt
       prisma.bookingTask.update({
         where: { id: task.parentTaskId },
-        data: { status: TaskStatus.executing },
+        data: { status: TaskStatus.waiting, pausedAt: null },
       }),
       prisma.profile.update({
         where: { id: assistantId },
-        data: { status: ProfileStatus.executing },
+        data: { status: ProfileStatus.assigned },
       }),
     ]);
     return;
   }
 
   const pausedTask = await prisma.bookingTask.findFirst({
-    where: {
-      assistantId,
-      status: TaskStatus.paused,
-    },
+    where: { assistantId, status: TaskStatus.paused },
     orderBy: { priority: "asc" },
   });
 
@@ -383,13 +362,14 @@ export async function completeTask(taskId: string): Promise<void> {
         where: { id: taskId },
         data: { status: TaskStatus.completed, completedAt: new Date() },
       }),
+      // 恢复暂停任务为 waiting（需重新就位），清除 pausedAt
       prisma.bookingTask.update({
         where: { id: pausedTask.id },
-        data: { status: TaskStatus.executing },
+        data: { status: TaskStatus.waiting, pausedAt: null },
       }),
       prisma.profile.update({
         where: { id: assistantId },
-        data: { status: ProfileStatus.executing },
+        data: { status: ProfileStatus.assigned },
       }),
     ]);
   } else {

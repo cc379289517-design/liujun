@@ -107,15 +107,28 @@ export async function PATCH(request: NextRequest, { params }: RouteContext) {
       }
 
       case "pause": {
+        // 检查该助理是否有等待中的插单任务（有则改为 assigned，否则 busy）
+        let profileStatus: ProfileStatus = ProfileStatus.busy;
+        if (task.assistantId) {
+          const waitingInterrupt = await prisma.bookingTask.findFirst({
+            where: {
+              assistantId: task.assistantId,
+              status: TaskStatus.waiting,
+              parentTaskId: { not: null },
+            },
+          });
+          if (waitingInterrupt) profileStatus = ProfileStatus.assigned;
+        }
+
         const updated = await prisma.bookingTask.update({
           where: { id },
-          data: { status: TaskStatus.paused },
+          data: { status: TaskStatus.paused, pausedAt: new Date() },
         });
 
         if (task.assistantId) {
           await prisma.profile.update({
             where: { id: task.assistantId },
-            data: { status: ProfileStatus.busy },
+            data: { status: profileStatus },
           });
         }
 

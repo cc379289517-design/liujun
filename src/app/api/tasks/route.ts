@@ -1,7 +1,7 @@
 import { NextRequest } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { TaskStatus } from "@/generated/prisma/client";
-import { assignTask, canInterrupt, interruptAssistant, sweepWaitingTasks, cleanupStaleTasks, syncProfileStatus } from "@/lib/scheduler";
+import { assignTask, canInterrupt, interruptAssistant, sweepWaitingTasks, cleanupStaleTasks, syncProfileStatus, escalatePriorities } from "@/lib/scheduler";
 
 const TASK_INCLUDE = {
   photographer: { select: { id: true, name: true, currentRoom: true, buildingId: true } },
@@ -53,6 +53,9 @@ export async function GET(request: NextRequest) {
 
     // 同步助理 profile.status 与实际任务一致
     await syncProfileStatus();
+
+    // 动态提权：等待超时的任务自动升级优先级
+    await escalatePriorities();
 
     // 每次查询时扫描：将空闲助理与等待中的任务自动匹配
     await sweepWaitingTasks();
@@ -142,6 +145,7 @@ export async function POST(request: NextRequest) {
 
     const category = await prisma.taskCategory.findUnique({
       where: { id: categoryId },
+      select: { priorityLevel: true, estDuration: true },
     });
 
     if (!category) {
@@ -198,13 +202,18 @@ export async function POST(request: NextRequest) {
             assistantId: { in: busyAssistants.map((a) => a.id) },
             status: TaskStatus.executing,
           },
-          include: { category: { select: { canBeInterrupted: true } } },
+          include: { category: { select: { canBeInterrupted: true, maxInterruptMinutes: true } } },
         });
 
         // 按当前任务优先级从低到高排序（P4→P3→P2），优先插最低的
         // 同时过滤掉类型不允许被打断的任务
         const sortedCandidates = assistantCurrentTasks
-          .filter((t) => t.priority > 1 && !t.isLocked && t.category.canBeInterrupted)
+          .filter((t) => {
+            if (t.priority <= 1 || t.isLocked || !t.category.canBeInterrupted) return false;
+            // 若该任务类型设定了最大离场时间，P1 任务的预估时长不能超过它
+            if (t.category.maxInterruptMinutes != null && category.estDuration > t.category.maxInterruptMinutes) return false;
+            return true;
+          })
           .sort((a, b) => b.priority - a.priority);
 
         for (const candidate of sortedCandidates) {

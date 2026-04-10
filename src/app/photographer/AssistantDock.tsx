@@ -7,10 +7,17 @@ export interface DockAssistant {
   name: string;
   status: string;
   onlineStatus: string;
-  currentRoom: string | null;
+  currentRoom: string | null;   // 当前活跃任务的房间（主标记位置）
   avatar: string | null;
   group: string | null;
-  currentTask: string | null; // e.g. "手工DIY协助 · 418室"
+  currentTask: string | null;
+  pausedRoom: string | null;    // 被暂停任务的房间（灰色标记位置）
+  pausedTaskDesc: string | null;
+  pausedTaskDetail: string | null;
+  pausedElapsedMin: number;
+  newTaskDesc: string | null;
+  resumingFromPause: boolean;
+  pendingRoom: string | null;   // 待执行插单任务的房间（蓝脉冲标记位置，旧任务未暂停时）
 }
 
 const STATUS_ORDER: Record<string, number> = { idle: 0, assigned: 1, finishing: 2, busy: 3, executing: 4 };

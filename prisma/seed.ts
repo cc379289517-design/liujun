@@ -78,51 +78,7 @@ async function main() {
   console.log(`✅ Created ${categories.length} task categories`);
 
   // ============================================
-  // 4. 创建测试用户
-  // ============================================
-  await prisma.bookingTask.deleteMany();
-  await prisma.profile.deleteMany();
-
-  const photographers = [
-    { name: "张摄影", employeeId: "P001", buildingId: 1, currentRoom: "101" },
-    { name: "李摄影", employeeId: "P002", buildingId: 1, currentRoom: "102" },
-    { name: "王摄影", employeeId: "P003", buildingId: 2, currentRoom: "201" },
-    { name: "赵摄影", employeeId: "P004", buildingId: 2, currentRoom: "203" },
-    { name: "刘摄影", employeeId: "P005", buildingId: 3, currentRoom: "301" },
-    { name: "陈摄影", employeeId: "P006", buildingId: 3, currentRoom: "305" },
-    { name: "杨摄影", employeeId: "P007", buildingId: 4, currentRoom: "401" },
-    { name: "黄摄影", employeeId: "P008", buildingId: 5, currentRoom: "501" },
-  ];
-
-  const assistants = [
-    { name: "小红", employeeId: "A001", buildingId: 1, currentRoom: "101" },
-    { name: "小明", employeeId: "A002", buildingId: 1, currentRoom: "103" },
-    { name: "小华", employeeId: "A003", buildingId: 2, currentRoom: "202" },
-    { name: "小丽", employeeId: "A004", buildingId: 2, currentRoom: "204" },
-    { name: "小强", employeeId: "A005", buildingId: 3, currentRoom: "302" },
-    { name: "小芳", employeeId: "A006", buildingId: 3, currentRoom: "306" },
-    { name: "小军", employeeId: "A007", buildingId: 4, currentRoom: "402" },
-    { name: "小燕", employeeId: "A008", buildingId: 5, currentRoom: "503" },
-  ];
-
-  const leaders = [
-    { name: "周组长", employeeId: "L001", buildingId: 1, currentRoom: "106" },
-    { name: "吴组长", employeeId: "L002", buildingId: 3, currentRoom: "307" },
-  ];
-
-  for (const p of photographers) {
-    await prisma.profile.create({ data: { ...p, role: "photographer" } });
-  }
-  for (const a of assistants) {
-    await prisma.profile.create({ data: { ...a, role: "assistant" } });
-  }
-  for (const l of leaders) {
-    await prisma.profile.create({ data: { ...l, role: "leader" } });
-  }
-  console.log(`✅ Created ${photographers.length} photographers, ${assistants.length} assistants, ${leaders.length} leaders`);
-
-  // ============================================
-  // 5. 系统配置
+  // 4. 系统配置
   // ============================================
   const configs = [
     { key: "ending_alert_min", value: "2", label: "快结束提醒(分钟)" },
