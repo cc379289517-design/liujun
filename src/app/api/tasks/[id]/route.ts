@@ -1,9 +1,19 @@
 import { NextRequest } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { completeTask, autoClaimWaitingTask, assignTask, sweepWaitingTasks } from "@/lib/scheduler";
+import { completeTask, assignTask, sweepWaitingTasks } from "@/lib/scheduler";
 import { TaskStatus, ProfileStatus } from "@/generated/prisma/client";
+import { Prisma } from "@/generated/prisma/client";
+import { flushExecutingSegment } from "@/lib/taskEffectiveTime";
 
 type RouteContext = { params: Promise<{ id: string }> };
+
+/** 避免 DB/迁移产生的非法日期经 Prisma 写回时报错 */
+function coerceValidDate(value: Date | string | null | undefined): Date | null {
+  if (value == null) return null;
+  const d = value instanceof Date ? value : new Date(value);
+  const t = d.getTime();
+  return Number.isFinite(t) ? d : null;
+}
 
 /**
  * GET /api/tasks/[id] - 获取单个任务详情
@@ -87,21 +97,34 @@ export async function PATCH(request: NextRequest, { params }: RouteContext) {
           ? new Date(Date.now() + estMinutes * 60 * 1000)
           : task.estEndTime;
 
-        const updated = await prisma.bookingTask.update({
-          where: { id },
-          data: {
-            status: TaskStatus.executing,
-            startedAt: new Date(),
-            estEndTime,
-          },
-        });
+        // 暂停后恢复执行：保留首次合法开始时间；有效工时从新片段累计
+        const startedAt = coerceValidDate(task.startedAt) ?? new Date();
+        const segmentStart = new Date();
 
-        if (task.assistantId) {
-          await prisma.profile.update({
-            where: { id: task.assistantId },
-            data: { status: ProfileStatus.executing },
+        // 事务：任务与助理状态一致更新（仅更新任务而 profile.update 失败时曾导致 500 且状态分裂）
+        const updated = await prisma.$transaction(async (tx) => {
+          const row = await tx.bookingTask.update({
+            where: { id },
+            data: {
+              status: TaskStatus.executing,
+              startedAt,
+              workSegmentStartedAt: segmentStart,
+              estEndTime,
+              // 重新开跑时清除暂停锚点，避免脏数据
+              pausedAt: null,
+            },
           });
-        }
+          if (task.assistantId) {
+            const { count } = await tx.profile.updateMany({
+              where: { id: task.assistantId },
+              data: { status: ProfileStatus.executing },
+            });
+            if (count === 0) {
+              throw new Error(`助理不存在或已删除: ${task.assistantId}`);
+            }
+          }
+          return row;
+        });
 
         return Response.json(updated);
       }
@@ -120,9 +143,21 @@ export async function PATCH(request: NextRequest, { params }: RouteContext) {
           if (waitingInterrupt) profileStatus = ProfileStatus.assigned;
         }
 
+        const flushed = flushExecutingSegment({
+          effectiveWorkSeconds: task.effectiveWorkSeconds,
+          workSegmentStartedAt: task.workSegmentStartedAt,
+          startedAt: task.startedAt,
+          status: task.status,
+        });
+
         const updated = await prisma.bookingTask.update({
           where: { id },
-          data: { status: TaskStatus.paused, pausedAt: new Date() },
+          data: {
+            status: TaskStatus.paused,
+            pausedAt: new Date(),
+            effectiveWorkSeconds: flushed.effectiveWorkSeconds,
+            workSegmentStartedAt: null,
+          },
         });
 
         if (task.assistantId) {
@@ -169,8 +204,30 @@ export async function PATCH(request: NextRequest, { params }: RouteContext) {
         }
 
         if (newStatus === "executing") {
-          setStatusData.startedAt = new Date();
+          setStatusData.startedAt = task.startedAt ?? new Date();
+          setStatusData.workSegmentStartedAt = new Date();
+        } else if (newStatus === "paused") {
+          if (task.status === TaskStatus.executing) {
+            const flushed = flushExecutingSegment({
+              effectiveWorkSeconds: task.effectiveWorkSeconds,
+              workSegmentStartedAt: task.workSegmentStartedAt,
+              startedAt: task.startedAt,
+              status: task.status,
+            });
+            setStatusData.effectiveWorkSeconds = flushed.effectiveWorkSeconds;
+            setStatusData.workSegmentStartedAt = null;
+          }
         } else if (newStatus === "waiting") {
+          if (task.status === TaskStatus.executing) {
+            const flushed = flushExecutingSegment({
+              effectiveWorkSeconds: task.effectiveWorkSeconds,
+              workSegmentStartedAt: task.workSegmentStartedAt,
+              startedAt: task.startedAt,
+              status: task.status,
+            });
+            setStatusData.effectiveWorkSeconds = flushed.effectiveWorkSeconds;
+            setStatusData.workSegmentStartedAt = null;
+          }
           setStatusData.startedAt = null;
         }
 
@@ -231,6 +288,18 @@ export async function PATCH(request: NextRequest, { params }: RouteContext) {
     }
   } catch (error) {
     console.error("[PATCH /api/tasks/[id]]", error);
-    return Response.json({ error: "Failed to update task" }, { status: 500 });
+    const isDev = process.env.NODE_ENV === "development";
+    let details: string | undefined;
+    if (isDev) {
+      if (error instanceof Prisma.PrismaClientKnownRequestError) {
+        details = `${error.code}: ${error.message}`;
+      } else if (error instanceof Error) {
+        details = error.message;
+      }
+    }
+    return Response.json(
+      { error: "Failed to update task", ...(details ? { details } : {}) },
+      { status: 500 }
+    );
   }
 }

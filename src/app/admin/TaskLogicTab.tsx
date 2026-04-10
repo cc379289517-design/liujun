@@ -1,6 +1,9 @@
 "use client";
 
-import { useState, useRef } from "react";
+import { useState, useRef, useEffect } from "react";
+
+const P1_DISPATCH_CFG_KEY = "p1_interrupt_dispatch_mode";
+type P1DispatchUi = "priority_tier_rr" | "flat_round_robin";
 
 function ConfirmDialog({ message, onConfirm, onCancel }: { message: string; onConfirm: () => void; onCancel: () => void }) {
   return (
@@ -304,6 +307,28 @@ export default function TaskLogicTab({ categories: initCategories, config, onRef
   const [viewByCategory, setViewByCategory] = useState(false);
   const priorities = [1, 2, 3, 4, 5];
 
+  const [p1DispatchMode, setP1DispatchMode] = useState<P1DispatchUi>(() =>
+    config[P1_DISPATCH_CFG_KEY]?.value === "flat_round_robin" ? "flat_round_robin" : "priority_tier_rr"
+  );
+
+  useEffect(() => {
+    setP1DispatchMode(
+      config[P1_DISPATCH_CFG_KEY]?.value === "flat_round_robin" ? "flat_round_robin" : "priority_tier_rr"
+    );
+  }, [config[P1_DISPATCH_CFG_KEY]?.value]);
+
+  const saveP1DispatchMode = async (mode: P1DispatchUi) => {
+    setP1DispatchMode(mode);
+    try {
+      await fetch("/api/config", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ [P1_DISPATCH_CFG_KEY]: mode }),
+      });
+      onRefresh();
+    } catch {}
+  };
+
   return (
     <>
       {confirmDeleteId !== null && (
@@ -497,6 +522,51 @@ export default function TaskLogicTab({ categories: initCategories, config, onRef
                 className="flex-1 accent-purple-500"
               />
               <span className="text-sm font-medium text-[--text-primary] w-14 text-right">{upgradeThreshold} 分钟</span>
+            </div>
+          </div>
+
+          <div className="card p-4 space-y-3">
+            <div>
+              <h4 className="text-xs font-semibold text-[--text-primary]">P1 紧急插单派发策略</h4>
+              <p className="text-[10px] text-[--text-muted] mt-1 leading-relaxed">
+                无空闲助理时，向同楼座「正在执行且可被打断」的助理插单。保存后立即对新建 P1 任务生效。
+              </p>
+            </div>
+            <div className="space-y-2">
+              <label className="flex items-start gap-2 cursor-pointer group">
+                <input
+                  type="radio"
+                  name="p1-dispatch"
+                  className="mt-0.5 accent-purple-500"
+                  checked={p1DispatchMode === "priority_tier_rr"}
+                  onChange={() => saveP1DispatchMode("priority_tier_rr")}
+                />
+                <span>
+                  <span className="text-xs font-medium text-[--text-primary] group-hover:text-purple-700">
+                    优先更「不急」的助理（推荐）
+                  </span>
+                  <span className="block text-[10px] text-[--text-muted] mt-0.5 leading-relaxed">
+                    按当前执行任务优先级 P5→P4→P3… 依次尝试；同一优先级档位内再按人轮询，避免总插给同一人。
+                  </span>
+                </span>
+              </label>
+              <label className="flex items-start gap-2 cursor-pointer group">
+                <input
+                  type="radio"
+                  name="p1-dispatch"
+                  className="mt-0.5 accent-purple-500"
+                  checked={p1DispatchMode === "flat_round_robin"}
+                  onChange={() => saveP1DispatchMode("flat_round_robin")}
+                />
+                <span>
+                  <span className="text-xs font-medium text-[--text-primary] group-hover:text-purple-700">
+                    全体轮询（不按任务优先级）
+                  </span>
+                  <span className="block text-[10px] text-[--text-muted] mt-0.5 leading-relaxed">
+                    凡满足可插断条件的助理均进入同一轮询队列，不再先看 P5/P4…，仅按轮询顺序公平派发。
+                  </span>
+                </span>
+              </label>
             </div>
           </div>
 

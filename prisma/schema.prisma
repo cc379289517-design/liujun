@@ -171,6 +171,10 @@ model BookingTask {
   pausedAt        DateTime?   @map("paused_at")  // 被插单暂停的时间点
   escalatedAt     DateTime?   @map("escalated_at") // 最后一次提权时间
 
+  // 有效执行时长：仅统计 executing 片段；暂停/待就位/插单间隔不计入
+  effectiveWorkSeconds Int       @default(0) @map("effective_work_seconds")
+  workSegmentStartedAt DateTime?   @map("work_segment_started_at") // 当前 executing 片段起点
+
   // 插单相关
   parentTaskId    String?     @map("parent_task_id") // 被插单的原任务
   parentTask      BookingTask? @relation("TaskInterrupt", fields: [parentTaskId], references: [id])

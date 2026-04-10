@@ -1,6 +1,7 @@
 import { prisma } from "./prisma";
 import { TaskStatus, ProfileStatus, OnlineStatus } from "@/generated/prisma/client";
 import { PRIORITY, SCHEDULER_CONFIG } from "@/types";
+import { flushExecutingSegment } from "@/lib/taskEffectiveTime";
 
 /**
  * 从数据库获取动态配置，回退到硬编码默认值
@@ -36,7 +37,7 @@ export async function assignTask(taskId: string, buildingId?: number): Promise<s
     effectiveBuildingId = task.photographer.buildingId;
   }
 
-  // 查找同楼座的空闲助理
+  // 查找同楼座的空闲助理（按姓名稳定排序，避免派单结果飘忽）
   const availableAssistants = await prisma.profile.findMany({
     where: {
       role: { in: ["assistant", "assistant_leader"] },
@@ -45,6 +46,7 @@ export async function assignTask(taskId: string, buildingId?: number): Promise<s
       subStatus: null,
       buildingId: effectiveBuildingId,
     },
+    orderBy: [{ name: "asc" }, { id: "asc" }],
   });
 
   if (availableAssistants.length === 0) return null;
@@ -131,6 +133,7 @@ export async function sweepWaitingTasks(): Promise<number> {
         onlineStatus: OnlineStatus.online,
         subStatus: null,
       },
+      orderBy: [{ name: "asc" }, { id: "asc" }],
     });
 
     if (idleAssistants.length === 0) return 0;
@@ -252,6 +255,100 @@ export async function interruptAssistant(
   return true;
 }
 
+const P1_INTERRUPT_RR_KEY = (buildingId: number) => `p1_interrupt_rr_b${buildingId}`;
+
+async function getLastP1InterruptAssistant(buildingId: number): Promise<string | null> {
+  const row = await prisma.systemConfig.findUnique({
+    where: { key: P1_INTERRUPT_RR_KEY(buildingId) },
+  });
+  return row?.value ?? null;
+}
+
+/**
+ * 记录本次 P1 插单选中的助理，供同楼座下一轮在同档位内轮询。
+ */
+export async function recordP1InterruptRoundRobin(buildingId: number, assistantId: string): Promise<void> {
+  await prisma.systemConfig.upsert({
+    where: { key: P1_INTERRUPT_RR_KEY(buildingId) },
+    create: {
+      key: P1_INTERRUPT_RR_KEY(buildingId),
+      value: assistantId,
+      label: "P1紧急插单同楼座轮询指针",
+    },
+    update: { value: assistantId },
+  });
+}
+
+/**
+ * 同档位（当前执行任务 priority 相同）内按助理 id 稳定排序后轮询，避免总派给同一人。
+ * @param sortedByPriorityDesc 已按「当前任务 priority」降序排好（P5→P2，优先插低优先级任务）
+ */
+export function orderP1InterruptCandidates<T extends { assistantId: string | null; priority: number }>(
+  sortedByPriorityDesc: T[],
+  lastAssistantId: string | null
+): T[] {
+  if (sortedByPriorityDesc.length === 0) return [];
+  const topP = sortedByPriorityDesc[0].priority;
+  const tier = sortedByPriorityDesc.filter((t) => t.priority === topP);
+  const tail = sortedByPriorityDesc.filter((t) => t.priority < topP);
+
+  const withId = tier.filter((t): t is T & { assistantId: string } => t.assistantId != null);
+  if (withId.length <= 1) return [...withId, ...tail];
+
+  const sorted = [...withId].sort((a, b) => a.assistantId.localeCompare(b.assistantId));
+  if (!lastAssistantId) return [...sorted, ...tail];
+
+  const idx = sorted.findIndex((t) => t.assistantId === lastAssistantId);
+  if (idx < 0) return [...sorted, ...tail];
+  const start = (idx + 1) % sorted.length;
+  const rotated = [...sorted.slice(start), ...sorted.slice(0, start)];
+  return [...rotated, ...tail];
+}
+
+/** 后台「逻辑设置」：P1 插单在可插断助理之间的排序策略 */
+export type P1InterruptDispatchMode = "priority_tier_rr" | "flat_round_robin";
+
+const P1_DISPATCH_MODE_KEY = "p1_interrupt_dispatch_mode";
+
+export async function getP1InterruptDispatchMode(): Promise<P1InterruptDispatchMode> {
+  const row = await prisma.systemConfig.findUnique({ where: { key: P1_DISPATCH_MODE_KEY } });
+  return row?.value === "flat_round_robin" ? "flat_round_robin" : "priority_tier_rr";
+}
+
+/**
+ * 全体可插断助理按 assistantId 排序后整表轮询，不按当前执行任务优先级分层。
+ */
+export function orderP1InterruptFlatRoundRobin<T extends { assistantId: string | null }>(
+  candidates: T[],
+  lastAssistantId: string | null
+): T[] {
+  const withId = candidates.filter((t): t is T & { assistantId: string } => t.assistantId != null);
+  if (withId.length <= 1) return withId;
+  const sorted = [...withId].sort((a, b) => a.assistantId.localeCompare(b.assistantId));
+  if (!lastAssistantId) return sorted;
+  const idx = sorted.findIndex((t) => t.assistantId === lastAssistantId);
+  if (idx < 0) return sorted;
+  const start = (idx + 1) % sorted.length;
+  return [...sorted.slice(start), ...sorted.slice(0, start)];
+}
+
+/**
+ * 根据全局配置生成 P1 插单尝试顺序（POST /api/tasks 使用）。
+ * - priority_tier_rr：先按当前任务 priority 从高到低（P5→P2），同档内轮询
+ * - flat_round_robin：可插断者全体轮询，忽略任务优先级
+ */
+export async function buildP1InterruptCandidateOrderFromFiltered<
+  T extends { assistantId: string | null; priority: number },
+>(buildingId: number, filteredCandidates: T[]): Promise<T[]> {
+  const mode = await getP1InterruptDispatchMode();
+  const lastId = await getLastP1InterruptAssistant(buildingId);
+  if (mode === "flat_round_robin") {
+    return orderP1InterruptFlatRoundRobin(filteredCandidates, lastId);
+  }
+  const sortedByPriorityDesc = [...filteredCandidates].sort((a, b) => b.priority - a.priority);
+  return orderP1InterruptCandidates(sortedByPriorityDesc, lastId);
+}
+
 /**
  * 动态提权
  * P2/P3/P4 任务等待超过30分钟，优先级自动向上提一级
@@ -332,11 +429,26 @@ export async function completeTask(taskId: string): Promise<void> {
 
   const assistantId = task.assistantId;
 
+  const completeData = (() => {
+    const flushed = flushExecutingSegment({
+      effectiveWorkSeconds: task.effectiveWorkSeconds,
+      workSegmentStartedAt: task.workSegmentStartedAt,
+      startedAt: task.startedAt,
+      status: task.status,
+    });
+    return {
+      status: TaskStatus.completed,
+      completedAt: new Date(),
+      effectiveWorkSeconds: flushed.effectiveWorkSeconds,
+      workSegmentStartedAt: null,
+    };
+  })();
+
   if (task.parentTaskId) {
     await prisma.$transaction([
       prisma.bookingTask.update({
         where: { id: taskId },
-        data: { status: TaskStatus.completed, completedAt: new Date() },
+        data: completeData,
       }),
       // 恢复父任务为 waiting（需重新就位），清除 pausedAt
       prisma.bookingTask.update({
@@ -360,7 +472,7 @@ export async function completeTask(taskId: string): Promise<void> {
     await prisma.$transaction([
       prisma.bookingTask.update({
         where: { id: taskId },
-        data: { status: TaskStatus.completed, completedAt: new Date() },
+        data: completeData,
       }),
       // 恢复暂停任务为 waiting（需重新就位），清除 pausedAt
       prisma.bookingTask.update({
@@ -376,7 +488,7 @@ export async function completeTask(taskId: string): Promise<void> {
     await prisma.$transaction([
       prisma.bookingTask.update({
         where: { id: taskId },
-        data: { status: TaskStatus.completed, completedAt: new Date() },
+        data: completeData,
       }),
       prisma.profile.update({
         where: { id: assistantId },

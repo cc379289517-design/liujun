@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback, useMemo } from "react";
+import { effectiveWorkMinutesFromApi } from "@/lib/taskEffectiveTime";
 
 type TaskFromAPI = {
   id: string;
@@ -15,6 +16,8 @@ type TaskFromAPI = {
   startedAt: string | null;
   completedAt: string | null;
   estEndTime: string | null;
+  effectiveWorkSeconds?: number | null;
+  workSegmentStartedAt?: string | null;
   photographer: { id: string; name: string; currentRoom: string | null };
   assistant: { id: string; name: string; currentRoom: string | null } | null;
   category: { id: number; name: string; priorityLevel: number };
@@ -64,6 +67,7 @@ const PRIORITY_DUR: Record<number, string> = {
 export default function StatsTab() {
   const [tasks, setTasks] = useState<TaskFromAPI[]>([]);
   const [loading, setLoading] = useState(true);
+  const [nowMs, setNowMs] = useState(() => Date.now());
   const [filterStatus, setFilterStatus] = useState("");
   const [filterPriority, setFilterPriority] = useState("");
   const [filterCategory, setFilterCategory] = useState("");
@@ -86,6 +90,11 @@ export default function StatsTab() {
   }, []);
 
   useEffect(() => { fetchTasks(); }, [fetchTasks]);
+
+  useEffect(() => {
+    const id = setInterval(() => setNowMs(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, []);
 
   const handleStatusChange = useCallback(async (taskId: string, newStatus: string) => {
     setUpdatingId(taskId);
@@ -170,9 +179,12 @@ export default function StatsTab() {
     const paused = tasks.filter((t) => t.status === "paused").length;
 
     // 平均完成时长
-    const completedTasks = tasks.filter((t) => t.status === "completed" && t.startedAt && t.completedAt);
+    const completedTasks = tasks.filter((t) => t.status === "completed");
     const avgDuration = completedTasks.length > 0
-      ? Math.round(completedTasks.reduce((sum, t) => sum + (new Date(t.completedAt!).getTime() - new Date(t.startedAt!).getTime()) / 60000, 0) / completedTasks.length)
+      ? Math.round(
+          completedTasks.reduce((sum, t) => sum + effectiveWorkMinutesFromApi(t, nowMs), 0) /
+            completedTasks.length
+        )
       : 0;
 
     // 按类型统计（归类到5大预约类型）
@@ -217,7 +229,7 @@ export default function StatsTab() {
     const assistantRanking = Object.values(byAssistant).sort((a, b) => b.total - a.total);
 
     return { total, completed, executing, waiting, paused, avgDuration, categoryBreakdown, byPriority, photographerRanking, assistantRanking };
-  }, [tasks]);
+  }, [tasks, nowMs]);
 
   const categories = useMemo(() => [...new Set(tasks.map((t) => t.category.name))], [tasks]);
 
@@ -228,15 +240,12 @@ export default function StatsTab() {
   };
 
   const getDuration = (t: TaskFromAPI) => {
-    let mins = 0;
-    if (t.status === "completed" && t.startedAt && t.completedAt) {
-      mins = (new Date(t.completedAt).getTime() - new Date(t.startedAt).getTime()) / 60000;
-    } else if (t.status === "executing" && t.startedAt) {
-      mins = (Date.now() - new Date(t.startedAt).getTime()) / 60000;
-    } else {
+    if (t.status !== "completed" && t.status !== "executing" && t.status !== "paused") {
       return "—";
     }
-    const prefix = t.status === "executing" ? "已" : "";
+    const mins = effectiveWorkMinutesFromApi(t, nowMs);
+    if (mins <= 0 && t.status === "completed") return "—";
+    const prefix = t.status === "executing" || t.status === "paused" ? "已" : "";
     if (mins >= 60) {
       return `${prefix}${(mins / 60).toFixed(1)}小时`;
     }

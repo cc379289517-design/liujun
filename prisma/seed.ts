@@ -84,6 +84,11 @@ async function main() {
     { key: "ending_alert_min", value: "2", label: "快结束提醒(分钟)" },
     { key: "interruption_max", value: "30", label: "插单最大离场时间(分钟)" },
     { key: "upgrade_threshold", value: "30", label: "自动提权阈值(分钟)" },
+    {
+      key: "p1_interrupt_dispatch_mode",
+      value: "priority_tier_rr",
+      label: "P1插单派发策略(priority_tier_rr|flat_round_robin)",
+    },
   ];
 
   for (const cfg of configs) {

@@ -1,12 +1,22 @@
 import { NextRequest } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { TaskStatus } from "@/generated/prisma/client";
-import { assignTask, canInterrupt, interruptAssistant, sweepWaitingTasks, cleanupStaleTasks, syncProfileStatus, escalatePriorities } from "@/lib/scheduler";
+import {
+  assignTask,
+  buildP1InterruptCandidateOrderFromFiltered,
+  canInterrupt,
+  interruptAssistant,
+  recordP1InterruptRoundRobin,
+  sweepWaitingTasks,
+  cleanupStaleTasks,
+  syncProfileStatus,
+  escalatePriorities,
+} from "@/lib/scheduler";
 
 const TASK_INCLUDE = {
   photographer: { select: { id: true, name: true, currentRoom: true, buildingId: true } },
   assistant: { select: { id: true, name: true, currentRoom: true } },
-  category: { select: { id: true, name: true, priorityLevel: true } },
+  category: { select: { id: true, name: true, priorityLevel: true, estDuration: true } },
 } as const;
 
 /**
@@ -185,8 +195,18 @@ export async function POST(request: NextRequest) {
       const buildingId = task.photographer.buildingId;
       const taskPriority = task.priority;
 
-      // P1 紧急任务：尝试插单（仅同楼座）
+      // P1 紧急任务：同楼座有空闲助理时优先派给空闲，避免无故插断正在执行的助理
       if (taskPriority === 1) {
+        const assignedIdleP1 = await assignTask(task.id, buildingId);
+        if (assignedIdleP1) {
+          const updated = await prisma.bookingTask.findUnique({
+            where: { id: task.id },
+            include: TASK_INCLUDE,
+          });
+          return Response.json(updated, { status: 201 });
+        }
+
+        // 同楼座无空闲：再尝试插单（仅同楼座忙碌助理）
         const busyAssistants = await prisma.profile.findMany({
           where: {
             role: { in: ["assistant", "assistant_leader"] },
@@ -207,20 +227,21 @@ export async function POST(request: NextRequest) {
 
         // 按当前任务优先级从低到高排序（P4→P3→P2），优先插最低的
         // 同时过滤掉类型不允许被打断的任务
-        const sortedCandidates = assistantCurrentTasks
-          .filter((t) => {
-            if (t.priority <= 1 || t.isLocked || !t.category.canBeInterrupted) return false;
-            // 若该任务类型设定了最大离场时间，P1 任务的预估时长不能超过它
-            if (t.category.maxInterruptMinutes != null && category.estDuration > t.category.maxInterruptMinutes) return false;
-            return true;
-          })
-          .sort((a, b) => b.priority - a.priority);
+        const filteredCandidates = assistantCurrentTasks.filter((t) => {
+          if (t.priority <= 1 || t.isLocked || !t.category.canBeInterrupted) return false;
+          if (t.category.maxInterruptMinutes != null && category.estDuration > t.category.maxInterruptMinutes) return false;
+          return true;
+        });
 
-        for (const candidate of sortedCandidates) {
+        // 顺序由 system_config.p1_interrupt_dispatch_mode 决定：分档优先 or 全体轮询
+        const interruptOrder = await buildP1InterruptCandidateOrderFromFiltered(buildingId, filteredCandidates);
+
+        for (const candidate of interruptOrder) {
           if (!candidate.assistantId) continue;
           const ok = await canInterrupt(candidate.assistantId, 1);
           if (ok) {
             await interruptAssistant(candidate.assistantId, task.id);
+            await recordP1InterruptRoundRobin(buildingId, candidate.assistantId);
             const updated = await prisma.bookingTask.findUnique({
               where: { id: task.id },
               include: TASK_INCLUDE,
@@ -228,9 +249,16 @@ export async function POST(request: NextRequest) {
             return Response.json(updated, { status: 201 });
           }
         }
+
+        // P1：同楼座无空闲且无法插单 → 保持未分配，由 sweep 在出现空闲时认领（此处不再重复 assignTask）
+        const p1Final = await prisma.bookingTask.findUnique({
+          where: { id: task.id },
+          include: TASK_INCLUDE,
+        });
+        return Response.json(p1Final ?? task, { status: 201 });
       }
 
-      // 普通派单：查找空闲助理
+      // P2–P5 普通派单：仅匹配同楼座空闲助理
       const assignedId = await assignTask(task.id, buildingId);
       if (assignedId) {
         const updated = await prisma.bookingTask.findUnique({
@@ -241,7 +269,11 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    return Response.json(task, { status: 201 });
+    const withInclude = await prisma.bookingTask.findUnique({
+      where: { id: task.id },
+      include: TASK_INCLUDE,
+    });
+    return Response.json(withInclude ?? task, { status: 201 });
   } catch (error) {
     console.error("[POST /api/tasks]", error);
     return Response.json({ error: "Failed to create task" }, { status: 500 });
