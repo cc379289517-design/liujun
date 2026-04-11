@@ -99,3 +99,35 @@ export function effectiveWorkMinutesFromApi(
 ): number {
   return Math.floor(totalEffectiveWorkSecondsFromApi(task, nowMs) / 60);
 }
+
+/** 预约所选时段上限（分钟）：优先 category.maxDuration，否则 estDuration */
+export function taskSlotCapMinutes(
+  cat: { maxDuration?: number; estDuration?: number } | undefined
+): number | null {
+  if (!cat) return null;
+  const max = cat.maxDuration;
+  if (typeof max === "number" && max > 0) return max;
+  const est = cat.estDuration;
+  if (typeof est === "number" && est > 0) return est;
+  return null;
+}
+
+type OvertimeTask = {
+  status: string;
+  category?: { maxDuration?: number; estDuration?: number };
+  effectiveWorkSeconds?: number | null;
+  workSegmentStartedAt?: string | Date | null;
+  startedAt?: string | Date | null;
+  completedAt?: string | Date | null;
+  pausedAt?: string | Date | null;
+};
+
+/** 进行中/已暂停且有效工时已超过时段上限时，返回超出的分钟数 */
+export function overtimeMinutesBeyondSlot(task: OvertimeTask, nowMs = Date.now()): number | null {
+  if (task.status !== "executing" && task.status !== "paused") return null;
+  const cap = taskSlotCapMinutes(task.category);
+  if (cap == null) return null;
+  const elapsed = effectiveWorkMinutesFromApi(task, nowMs);
+  if (elapsed <= cap) return null;
+  return elapsed - cap;
+}

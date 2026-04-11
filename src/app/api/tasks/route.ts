@@ -5,6 +5,8 @@ import {
   assignTask,
   buildP1InterruptCandidateOrderFromFiltered,
   canInterrupt,
+  effectiveInterruptLeaveCapMinutes,
+  getSchedulerRuntimeConfig,
   interruptAssistant,
   recordP1InterruptRoundRobin,
   sweepWaitingTasks,
@@ -16,7 +18,16 @@ import {
 const TASK_INCLUDE = {
   photographer: { select: { id: true, name: true, currentRoom: true, buildingId: true } },
   assistant: { select: { id: true, name: true, currentRoom: true } },
-  category: { select: { id: true, name: true, priorityLevel: true, estDuration: true } },
+  category: {
+    select: {
+      id: true,
+      name: true,
+      priorityLevel: true,
+      estDuration: true,
+      minDuration: true,
+      maxDuration: true,
+    },
+  },
 } as const;
 
 /**
@@ -155,7 +166,7 @@ export async function POST(request: NextRequest) {
 
     const category = await prisma.taskCategory.findUnique({
       where: { id: categoryId },
-      select: { priorityLevel: true, estDuration: true },
+      select: { priorityLevel: true, estDuration: true, maxDuration: true },
     });
 
     if (!category) {
@@ -190,83 +201,74 @@ export async function POST(request: NextRequest) {
       include: TASK_INCLUDE,
     });
 
-    // 自动派单（非指定助理模式）
+    // 自动派单（非指定助理模式）：先空闲助理；无空闲则对「更紧急的短时单」尝试插单
     if (!isSpecified) {
       const buildingId = task.photographer.buildingId;
       const taskPriority = task.priority;
 
-      // P1 紧急任务：同楼座有空闲助理时优先派给空闲，避免无故插断正在执行的助理
-      if (taskPriority === 1) {
-        const assignedIdleP1 = await assignTask(task.id, buildingId);
-        if (assignedIdleP1) {
-          const updated = await prisma.bookingTask.findUnique({
-            where: { id: task.id },
-            include: TASK_INCLUDE,
-          });
-          return Response.json(updated, { status: 201 });
-        }
-
-        // 同楼座无空闲：再尝试插单（仅同楼座忙碌助理）
-        const busyAssistants = await prisma.profile.findMany({
-          where: {
-            role: { in: ["assistant", "assistant_leader"] },
-            status: { in: ["executing", "busy"] },
-            onlineStatus: "online",
-            buildingId,
-          },
-        });
-
-        // 查找每个忙碌助理当前执行的任务优先级，优先插断低优先级
-        const assistantCurrentTasks = await prisma.bookingTask.findMany({
-          where: {
-            assistantId: { in: busyAssistants.map((a) => a.id) },
-            status: TaskStatus.executing,
-          },
-          include: { category: { select: { canBeInterrupted: true, maxInterruptMinutes: true } } },
-        });
-
-        // 按当前任务优先级从低到高排序（P4→P3→P2），优先插最低的
-        // 同时过滤掉类型不允许被打断的任务
-        const filteredCandidates = assistantCurrentTasks.filter((t) => {
-          if (t.priority <= 1 || t.isLocked || !t.category.canBeInterrupted) return false;
-          if (t.category.maxInterruptMinutes != null && category.estDuration > t.category.maxInterruptMinutes) return false;
-          return true;
-        });
-
-        // 顺序由 system_config.p1_interrupt_dispatch_mode 决定：分档优先 or 全体轮询
-        const interruptOrder = await buildP1InterruptCandidateOrderFromFiltered(buildingId, filteredCandidates);
-
-        for (const candidate of interruptOrder) {
-          if (!candidate.assistantId) continue;
-          const ok = await canInterrupt(candidate.assistantId, 1);
-          if (ok) {
-            await interruptAssistant(candidate.assistantId, task.id);
-            await recordP1InterruptRoundRobin(buildingId, candidate.assistantId);
-            const updated = await prisma.bookingTask.findUnique({
-              where: { id: task.id },
-              include: TASK_INCLUDE,
-            });
-            return Response.json(updated, { status: 201 });
-          }
-        }
-
-        // P1：同楼座无空闲且无法插单 → 保持未分配，由 sweep 在出现空闲时认领（此处不再重复 assignTask）
-        const p1Final = await prisma.bookingTask.findUnique({
-          where: { id: task.id },
-          include: TASK_INCLUDE,
-        });
-        return Response.json(p1Final ?? task, { status: 201 });
-      }
-
-      // P2–P5 普通派单：仅匹配同楼座空闲助理
-      const assignedId = await assignTask(task.id, buildingId);
-      if (assignedId) {
+      const assignedIdle = await assignTask(task.id, buildingId);
+      if (assignedIdle) {
         const updated = await prisma.bookingTask.findUnique({
           where: { id: task.id },
           include: TASK_INCLUDE,
         });
         return Response.json(updated, { status: 201 });
       }
+
+      // 同楼座无空闲：尝试插单（任意优先级，只要新单更紧急且离场在 cap 内、当前类型允许被打断）
+      const busyAssistants = await prisma.profile.findMany({
+        where: {
+          role: { in: ["assistant", "assistant_leader"] },
+          status: { in: ["executing", "busy"] },
+          onlineStatus: "online",
+          buildingId,
+        },
+      });
+
+      const runtimeCfg = await getSchedulerRuntimeConfig();
+      const globalInterruptCap = runtimeCfg.INTERRUPT_MAX_MINUTES;
+      /** 新任务「离场」保守上界：优先用类型 maxDuration（与快捷预约时段一致），否则 estDuration */
+      const newTaskLeaveUpperMin =
+        category.maxDuration > 0 ? category.maxDuration : Math.max(0, category.estDuration || 0);
+
+      const assistantCurrentTasks = await prisma.bookingTask.findMany({
+        where: {
+          assistantId: { in: busyAssistants.map((a) => a.id) },
+          status: TaskStatus.executing,
+        },
+        include: { category: { select: { canBeInterrupted: true, maxInterruptMinutes: true } } },
+      });
+
+      const filteredCandidates = assistantCurrentTasks.filter((t) => {
+        if (t.isLocked || !t.category.canBeInterrupted) return false;
+        // 当前执行单须比新单「更低优先」（数值更大），P1 进行中不可作为被插对象
+        if (t.priority <= taskPriority) return false;
+        const cap = effectiveInterruptLeaveCapMinutes(globalInterruptCap, t.category.maxInterruptMinutes);
+        if (newTaskLeaveUpperMin > cap) return false;
+        return true;
+      });
+
+      const interruptOrder = await buildP1InterruptCandidateOrderFromFiltered(buildingId, filteredCandidates);
+
+      for (const candidate of interruptOrder) {
+        if (!candidate.assistantId) continue;
+        const ok = await canInterrupt(candidate.assistantId, taskPriority);
+        if (ok) {
+          await interruptAssistant(candidate.assistantId, task.id);
+          await recordP1InterruptRoundRobin(buildingId, candidate.assistantId);
+          const updated = await prisma.bookingTask.findUnique({
+            where: { id: task.id },
+            include: TASK_INCLUDE,
+          });
+          return Response.json(updated, { status: 201 });
+        }
+      }
+
+      const finalTask = await prisma.bookingTask.findUnique({
+        where: { id: task.id },
+        include: TASK_INCLUDE,
+      });
+      return Response.json(finalTask ?? task, { status: 201 });
     }
 
     const withInclude = await prisma.bookingTask.findUnique({

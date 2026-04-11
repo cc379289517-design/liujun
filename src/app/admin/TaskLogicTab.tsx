@@ -424,9 +424,7 @@ export default function TaskLogicTab({ categories: initCategories, config, onRef
                               <span className="text-xs font-medium truncate">{cat.name}</span>
                             </button>
                             <span className="text-[11px] shrink-0 mx-1">{durationLabel(cat.minDuration, cat.maxDuration)}</span>
-                            {!cat.canBeInterrupted ? (
-                              <span className="text-[9px] px-1 py-0.5 rounded bg-gray-200 text-gray-500 shrink-0 mr-1" title="不可被插单">🔒</span>
-                            ) : cat.maxInterruptMinutes ? (
+                            {cat.canBeInterrupted && cat.maxInterruptMinutes ? (
                               <span className="text-[9px] px-1 py-0.5 rounded bg-purple-100 text-purple-500 shrink-0 mr-1" title={`最大离场 ${cat.maxInterruptMinutes} 分钟`}>⏱{cat.maxInterruptMinutes}m</span>
                             ) : null}
                             <button
@@ -527,9 +525,9 @@ export default function TaskLogicTab({ categories: initCategories, config, onRef
 
           <div className="card p-4 space-y-3">
             <div>
-              <h4 className="text-xs font-semibold text-[--text-primary]">P1 紧急插单派发策略</h4>
+              <h4 className="text-xs font-semibold text-[--text-primary]">插单派发策略</h4>
               <p className="text-[10px] text-[--text-muted] mt-1 leading-relaxed">
-                无空闲助理时，向同楼座「正在执行且可被打断」的助理插单。保存后立即对新建 P1 任务生效。
+                无空闲助理时，向同楼座「正在执行、类型允许被打断、且新单更紧急」的助理插单（新单离场须在全局/类型离场上限内）。保存后立即对新建任务生效。
               </p>
             </div>
             <div className="space-y-2">

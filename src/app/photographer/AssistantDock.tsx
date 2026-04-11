@@ -18,16 +18,44 @@ export interface DockAssistant {
   newTaskDesc: string | null;
   resumingFromPause: boolean;
   pendingRoom: string | null;   // 待执行插单任务的房间（蓝脉冲标记位置，旧任务未暂停时）
+  /** 主标记进行中任务超过类别时段上限的超出分钟数，未超时为 null */
+  executingOvertimeMin: number | null;
+  /** 灰色暂停标记任务超过时段上限的超出分钟数 */
+  pausedOvertimeMin: number | null;
 }
 
-const STATUS_ORDER: Record<string, number> = { idle: 0, assigned: 1, finishing: 2, busy: 3, executing: 4 };
+/** 状态色（Dock 状态点 / 地图头像描边等与文档一致） */
+export const DOCK_DOT = {
+  idle: "#22c55e",
+  assigned: "#3b82f6",
+  inProgress: "#f97316",
+  overtime: "#dc2626",
+  offline: "#9ca3af",
+} as const;
+
+/** 根据助理聚合状态与超时计算状态点颜色 */
+export function assistantDockDotColor(a: DockAssistant): string {
+  const isOffline = a.onlineStatus === "offline" || a.onlineStatus === "on_break";
+  if (isOffline) return DOCK_DOT.offline;
+  if (a.executingOvertimeMin != null || a.pausedOvertimeMin != null) return DOCK_DOT.overtime;
+  const st = a.status === "finishing" ? "executing" : a.status;
+  if (st === "idle") return DOCK_DOT.idle;
+  if (st === "assigned") return DOCK_DOT.assigned;
+  return DOCK_DOT.inProgress;
+}
+
+const STATUS_ORDER: Record<string, number> = { idle: 0, assigned: 1, busy: 2, executing: 3 };
+
+function dockStatusRank(status: string): number {
+  const s = status === "finishing" ? "executing" : status;
+  return STATUS_ORDER[s] ?? 9;
+}
 
 export const STATUS: Record<string, { color: string; label: string }> = {
-  idle: { color: "#22c55e", label: "空闲" },
-  assigned: { color: "#3b82f6", label: "待就位" },
-  finishing: { color: "#86efac", label: "快结束" },
-  busy: { color: "#fdba74", label: "在忙" },
-  executing: { color: "#f97316", label: "进行中" },
+  idle: { color: DOCK_DOT.idle, label: "空闲中" },
+  assigned: { color: DOCK_DOT.assigned, label: "待就位" },
+  busy: { color: DOCK_DOT.inProgress, label: "在忙" },
+  executing: { color: DOCK_DOT.inProgress, label: "进行中" },
 };
 
 const BASE = 50;
@@ -80,7 +108,7 @@ export default function AssistantDock({ assistants }: { assistants: DockAssistan
     const aOff = a.onlineStatus === "offline" || a.onlineStatus === "on_break" ? 1 : 0;
     const bOff = b.onlineStatus === "offline" || b.onlineStatus === "on_break" ? 1 : 0;
     if (aOff !== bOff) return aOff - bOff;
-    return (STATUS_ORDER[a.status] ?? 9) - (STATUS_ORDER[b.status] ?? 9);
+    return dockStatusRank(a.status) - dockStatusRank(b.status);
   });
   const sizes = getSizes(sorted.length, mouseY);
   const active = mouseY >= 0;
@@ -110,10 +138,17 @@ export default function AssistantDock({ assistants }: { assistants: DockAssistan
         >
           {sorted.map((a, i) => {
             const size = sizes[i] ?? BASE;
-            const cfg = STATUS[a.status] || STATUS.idle;
+            const effectiveStatus = a.status === "finishing" ? "executing" : a.status;
+            const cfg = STATUS[effectiveStatus] || STATUS.idle;
             const hovered = hoveredId === a.id;
             const dotSize = 8 + (size - BASE) / (MAX - BASE) * 4;
             const isOffline = a.onlineStatus === "offline" || a.onlineStatus === "on_break";
+            const dotColor = assistantDockDotColor(a);
+            const headerColor = isOffline
+              ? "#9ca3af"
+              : a.executingOvertimeMin != null || a.pausedOvertimeMin != null
+                ? DOCK_DOT.overtime
+                : cfg.color;
 
             return (
               <div
@@ -155,7 +190,7 @@ export default function AssistantDock({ assistants }: { assistants: DockAssistan
                       if (tasks.length === 0) {
                         return (
                           <>
-                            <p className="text-xs font-semibold" style={{ color: cfg.color }}>{a.name} · {cfg.label}</p>
+                            <p className="text-xs font-semibold" style={{ color: headerColor }}>{a.name} · {cfg.label}</p>
                             <p className="text-[10px] text-[--text-muted] mt-0.5">{a.currentRoom ? `${a.currentRoom}室` : "—"}</p>
                           </>
                         );
@@ -167,7 +202,7 @@ export default function AssistantDock({ assistants }: { assistants: DockAssistan
                         const detail = hasElapsed ? lines[1] : lines[0];
                         return (
                           <div key={i} className={i > 0 ? "mt-1.5 pt-1.5 border-t border-white/20" : ""}>
-                            <p className="text-xs font-semibold" style={{ color: cfg.color }}>{a.name} · {cfg.label}{elapsedText}</p>
+                            <p className="text-xs font-semibold" style={{ color: headerColor }}>{a.name} · {cfg.label}{elapsedText}</p>
                             <p className="text-[10px] text-[--text-muted] mt-0.5">{detail}</p>
                           </div>
                         );
@@ -176,9 +211,9 @@ export default function AssistantDock({ assistants }: { assistants: DockAssistan
                   </div>
                 </div>
 
-                {/* Avatar */}
+                {/* Avatar（超时不在此做脉冲，仅状态点与 tooltip 用红色强调） */}
                 <div
-                  className="w-full h-full rounded-full overflow-hidden"
+                  className="relative z-[1] h-full w-full rounded-full overflow-hidden"
                   style={{
                     filter: isOffline ? "grayscale(1)" : "none",
                     boxShadow: hovered
@@ -191,12 +226,12 @@ export default function AssistantDock({ assistants }: { assistants: DockAssistan
                     <img
                       src={a.avatar}
                       alt={a.name}
-                      className="w-full h-full object-cover cursor-pointer"
+                      className="h-full w-full object-cover cursor-pointer"
                       draggable={false}
                     />
                   ) : (
                     <div
-                      className="w-full h-full bg-gradient-to-br from-blue-200 to-blue-400 flex items-center justify-center text-white font-bold cursor-pointer"
+                      className="flex h-full w-full cursor-pointer items-center justify-center bg-gradient-to-br from-blue-200 to-blue-400 font-bold text-white"
                       style={{ fontSize: size * 0.35 }}
                     >
                       {a.name[0]}
@@ -206,11 +241,11 @@ export default function AssistantDock({ assistants }: { assistants: DockAssistan
 
                 {/* Status dot */}
                 <div
-                  className="absolute rounded-full"
+                  className="absolute z-10 rounded-full"
                   style={{
                     width: dotSize,
                     height: dotSize,
-                    backgroundColor: isOffline ? "#9ca3af" : cfg.color,
+                    backgroundColor: dotColor,
                     bottom: 0,
                     right: 0,
                     boxShadow: "0 0 0 2px white",
@@ -226,10 +261,16 @@ export default function AssistantDock({ assistants }: { assistants: DockAssistan
         <div className="absolute bottom-2 left-0 right-0 flex flex-col items-center" style={{ paddingLeft: 4 }}>
           <div className="w-10 border-t border-gray-300/40 mb-2.5" />
           <div className="flex flex-col gap-2">
-            {(["idle", "assigned", "finishing", "busy", "executing"] as const).map((s) => (
-              <div key={s} className="flex items-center gap-2">
-                <span className="flex-shrink-0 rounded-full" style={{ width: 8, height: 8, backgroundColor: STATUS[s].color }} />
-                <span className="text-[9px] text-[--text-muted] leading-none whitespace-nowrap">{STATUS[s].label}</span>
+            {[
+              { color: DOCK_DOT.idle, label: "空闲中" },
+              { color: DOCK_DOT.assigned, label: "待就位" },
+              { color: DOCK_DOT.inProgress, label: "进行中" },
+              { color: DOCK_DOT.overtime, label: "已超时" },
+              { color: DOCK_DOT.offline, label: "已下线" },
+            ].map((row) => (
+              <div key={row.label} className="flex items-center gap-2">
+                <span className="flex-shrink-0 rounded-full" style={{ width: 8, height: 8, backgroundColor: row.color }} />
+                <span className="text-[9px] text-[--text-muted] leading-none whitespace-nowrap">{row.label}</span>
               </div>
             ))}
           </div>

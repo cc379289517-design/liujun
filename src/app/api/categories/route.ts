@@ -1,8 +1,8 @@
-import { NextRequest } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 
 /**
- * GET /api/categories - 获取所有任务类型
+ * GET /api/categories - 获取所有任务类型（勿缓存：后台改时段后工作台需尽快读到新数据）
  */
 export async function GET() {
   try {
@@ -10,10 +10,12 @@ export async function GET() {
       orderBy: { priorityLevel: "asc" },
     });
 
-    return Response.json(categories);
+    return NextResponse.json(categories, {
+      headers: { "Cache-Control": "no-store, max-age=0" },
+    });
   } catch (error) {
     console.error("[GET /api/categories]", error);
-    return Response.json({ error: "Failed to fetch categories" }, { status: 500 });
+    return NextResponse.json({ error: "Failed to fetch categories" }, { status: 500 });
   }
 }
 

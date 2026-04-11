@@ -6,7 +6,7 @@ import { flushExecutingSegment } from "@/lib/taskEffectiveTime";
 /**
  * 从数据库获取动态配置，回退到硬编码默认值
  */
-async function getConfig() {
+export async function getSchedulerRuntimeConfig() {
   try {
     const configs = await prisma.systemConfig.findMany();
     const map: Record<string, string> = {};
@@ -19,6 +19,25 @@ async function getConfig() {
   } catch {
     return SCHEDULER_CONFIG;
   }
+}
+
+/** @deprecated 内部使用，请优先用 getSchedulerRuntimeConfig */
+async function getConfig() {
+  return getSchedulerRuntimeConfig();
+}
+
+/**
+ * 当前执行中的任务类型允许「被插单离场」的上限（分钟）。
+ * 取全局 interruption_max 与类型 maxInterruptMinutes 的较小值；类型未填时仅用全局。
+ */
+export function effectiveInterruptLeaveCapMinutes(
+  globalMaxMinutes: number,
+  executingCategoryMaxInterrupt: number | null | undefined
+): number {
+  if (executingCategoryMaxInterrupt != null && Number.isFinite(executingCategoryMaxInterrupt)) {
+    return Math.min(globalMaxMinutes, executingCategoryMaxInterrupt);
+  }
+  return globalMaxMinutes;
 }
 
 /**
@@ -205,15 +224,13 @@ export async function sweepWaitingTasks(): Promise<number> {
 
 /**
  * 判断是否可以插单
- * P1 任务可以插断优先级低于自己的未锁定任务（P2-P5）
- * 同时检查任务类型级别的 canBeInterrupted 设置
+ * 新任务须比当前执行单更紧急（priority 数值更小）；当前单须为 P2+、类型允许被打断、未锁定。
+ * 新任务离场时长是否合规由路由层在筛选候选时校验（全局+类型 maxInterrupt）。
  */
 export async function canInterrupt(
   assistantId: string,
   newPriority: number
 ): Promise<boolean> {
-  if (newPriority !== PRIORITY.P1) return false;
-
   const currentTask = await prisma.bookingTask.findFirst({
     where: {
       assistantId,
@@ -224,16 +241,22 @@ export async function canInterrupt(
 
   if (!currentTask) return false;
 
-  // 检查任务类型是否允许被打断
   if (!currentTask.category.canBeInterrupted) return false;
 
-  // P1 可以插断所有比自己优先级低的未锁定任务（P2-P5）
-  return currentTask.priority > PRIORITY.P1 && !currentTask.isLocked;
+  // 执行中 P1 不可被插断
+  if (currentTask.priority <= PRIORITY.P1) return false;
+
+  // 新单须更紧急（数值更小），同级或更低优先不可插
+  if (newPriority >= currentTask.priority) return false;
+
+  if (currentTask.isLocked) return false;
+
+  return true;
 }
 
 /**
  * 执行插单操作
- * 仅将新 P1 任务分配给助理（记录 parentTaskId），不立即暂停当前任务。
+ * 将新任务分配给助理并记录 parentTaskId，不立即暂停当前任务。
  * 助理需手动在工作台点击暂停，再确认就位后开始新任务。
  */
 export async function interruptAssistant(
