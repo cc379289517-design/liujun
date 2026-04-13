@@ -15,6 +15,10 @@ export interface DockAssistant {
   pausedTaskDesc: string | null;
   pausedTaskDetail: string | null;
   pausedElapsedMin: number;
+  /** 待就位被更高优先插单时，原较低优先任务所在房间（灰头像 50%） */
+  preemptedWaitingRoom: string | null;
+  preemptedWaitingTaskDesc: string | null;
+  preemptedWaitingTaskDetail: string | null;
   newTaskDesc: string | null;
   resumingFromPause: boolean;
   pendingRoom: string | null;   // 待执行插单任务的房间（蓝脉冲标记位置，旧任务未暂停时）
@@ -22,6 +26,8 @@ export interface DockAssistant {
   executingOvertimeMin: number | null;
   /** 灰色暂停标记任务超过时段上限的超出分钟数 */
   pausedOvertimeMin: number | null;
+  /** 被让行的待就位任务超过时段上限（与 pausedOvertimeMin 互斥场景） */
+  preemptedOvertimeMin: number | null;
 }
 
 /** 状态色（Dock 状态点 / 地图头像描边等与文档一致） */
@@ -37,7 +43,9 @@ export const DOCK_DOT = {
 export function assistantDockDotColor(a: DockAssistant): string {
   const isOffline = a.onlineStatus === "offline" || a.onlineStatus === "on_break";
   if (isOffline) return DOCK_DOT.offline;
-  if (a.executingOvertimeMin != null || a.pausedOvertimeMin != null) return DOCK_DOT.overtime;
+  if (a.executingOvertimeMin != null || a.pausedOvertimeMin != null || a.preemptedOvertimeMin != null) {
+    return DOCK_DOT.overtime;
+  }
   const st = a.status === "finishing" ? "executing" : a.status;
   if (st === "idle") return DOCK_DOT.idle;
   if (st === "assigned") return DOCK_DOT.assigned;
@@ -146,7 +154,7 @@ export default function AssistantDock({ assistants }: { assistants: DockAssistan
             const dotColor = assistantDockDotColor(a);
             const headerColor = isOffline
               ? "#9ca3af"
-              : a.executingOvertimeMin != null || a.pausedOvertimeMin != null
+              : a.executingOvertimeMin != null || a.pausedOvertimeMin != null || a.preemptedOvertimeMin != null
                 ? DOCK_DOT.overtime
                 : cfg.color;
 

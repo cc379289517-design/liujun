@@ -123,7 +123,12 @@ function sortTasksByStatus(tasks: DisplayTask[]): DisplayTask[] {
   return [...tasks].sort((a, b) => (STATUS_ORDER[a.statusLabel] ?? 99) - (STATUS_ORDER[b.statusLabel] ?? 99));
 }
 
-function resolveAssistantTasks(taskData: TaskFromAPI[]): { current: TaskFromAPI | null; paused: TaskFromAPI | null; pending: TaskFromAPI | null } {
+function resolveAssistantTasks(taskData: TaskFromAPI[]): {
+  current: TaskFromAPI | null;
+  paused: TaskFromAPI | null;
+  pending: TaskFromAPI | null;
+  deferredWaiting: TaskFromAPI | null;
+} {
   const executing = taskData.find((t) => t.status === "executing") || null;
   const paused = taskData.find((t) => t.status === "paused") || null;
   // waiting + parentTaskId = 插单待处理（pending）；waiting + no parentTaskId = 普通待就位
@@ -132,19 +137,42 @@ function resolveAssistantTasks(taskData: TaskFromAPI[]): { current: TaskFromAPI 
 
   if (executing && waitingWithParent) {
     // 旧任务执行中，新插单任务待处理
-    return { current: executing, paused: null, pending: waitingWithParent };
+    return { current: executing, paused: null, pending: waitingWithParent, deferredWaiting: null };
   }
   if (paused && waitingWithParent) {
     // 旧任务已暂停，新插单任务待就位
-    return { current: waitingWithParent, paused, pending: null };
+    return { current: waitingWithParent, paused, pending: null, deferredWaiting: null };
   }
   if (paused && executing) {
     // 旧任务已暂停，新插单任务执行中
-    return { current: executing, paused, pending: null };
+    return { current: executing, paused, pending: null, deferredWaiting: null };
+  }
+  if (executing?.parentTaskId) {
+    const parentOfExec = taskData.find((t) => t.id === executing.parentTaskId);
+    if (
+      parentOfExec &&
+      parentOfExec.status === "waiting" &&
+      parentOfExec.assistantId === executing.assistantId
+    ) {
+      // 待就位插单后已开始执行紧急单，父任务仍在 waiting（地图灰头像场景）
+      return { current: executing, paused: null, pending: null, deferredWaiting: parentOfExec };
+    }
+  }
+  if (waitingWithParent) {
+    const parent = taskData.find((t) => t.id === waitingWithParent.parentTaskId);
+    if (
+      parent &&
+      parent.status === "waiting" &&
+      parent.assistantId &&
+      parent.assistantId === waitingWithParent.assistantId
+    ) {
+      // 待就位被更高优先插单：当前为紧急单，原单让行（仍为 waiting）
+      return { current: waitingWithParent, paused: null, pending: null, deferredWaiting: parent };
+    }
   }
   // 普通单任务
   const current = executing || waitingNormal || waitingWithParent || null;
-  return { current, paused, pending: null };
+  return { current, paused, pending: null, deferredWaiting: null };
 }
 
 function apiTaskToDisplay(t: TaskFromAPI): DisplayTask {
@@ -644,6 +672,8 @@ export default function PhotographerPage() {
   const [currentRawTask, setCurrentRawTask] = useState<TaskFromAPI | null>(null);
   const [pausedRawTask, setPausedRawTask] = useState<TaskFromAPI | null>(null);
   const [pendingRawTask, setPendingRawTask] = useState<TaskFromAPI | null>(null);
+  /** 待就位被插单时，被让行的原较低优先任务 */
+  const [deferredWaitingRawTask, setDeferredWaitingRawTask] = useState<TaskFromAPI | null>(null);
   /** 助理视角下最近一次拉取到的原始任务列表（用于列表点击「待就位」与目标任务对齐） */
   const [assistantRawTasks, setAssistantRawTasks] = useState<TaskFromAPI[]>([]);
   /** 与「我的任务」展示同步的原始任务（摄影师/助理均填充，用于已进行/已等待实时文案） */
@@ -831,10 +861,36 @@ export default function PhotographerPage() {
     Promise.all([
       fetch(`/api/profiles?role=assistant&buildingId=${activeBuildingId}`, { cache: "no-store" }).then((r) => r.json()),
       fetch("/api/tasks?todayOnly=true", { cache: "no-store" }).then((r) => r.json()).catch(() => []),
-    ]).then(([profilesData, tasksData]) => {
+    ]).then(async ([profilesData, tasksData]) => {
       const nowMs = Date.now();
       const profiles = Array.isArray(profilesData) ? profilesData : [];
-      const allTasks = Array.isArray(tasksData) ? tasksData : [];
+      let allTasks: TaskFromAPI[] = Array.isArray(tasksData) ? tasksData : [];
+
+      // todayOnly 列表常不含「父任务」行，导致无法解析 preemptedWaitingRoom。按需补拉 parentTaskId 指向的任务。
+      const missingParentIds = new Set<string>();
+      for (const t of allTasks) {
+        if (t.parentTaskId && !allTasks.some((x) => x.id === t.parentTaskId)) {
+          missingParentIds.add(t.parentTaskId);
+        }
+      }
+      if (missingParentIds.size > 0) {
+        const fetched = await Promise.all(
+          [...missingParentIds].map((id) =>
+            fetch(`/api/tasks/${id}`, { cache: "no-store" }).then((r) => (r.ok ? r.json() : null)),
+          ),
+        );
+        for (const row of fetched) {
+          if (
+            row &&
+            typeof row === "object" &&
+            "id" in row &&
+            typeof (row as { id: string }).id === "string" &&
+            !allTasks.some((t) => t.id === (row as { id: string }).id)
+          ) {
+            allTasks.push(row as TaskFromAPI);
+          }
+        }
+      }
 
       // 每个助理收集：executing任务、paused任务、waiting插单任务（parentTaskId存在）
       type TaskInfo = {
@@ -842,6 +898,7 @@ export default function PhotographerPage() {
         pausedTask: typeof allTasks[0] | null;
         waitingInterruptTask: typeof allTasks[0] | null; // 未暂停时的待处理插单
         resumingTask: typeof allTasks[0] | null; // 插单完成后恢复待就位
+        preemptedWaitingTask: typeof allTasks[0] | null; // 待就位被插单时让行的原任务（仍为 waiting）
       };
       const infoMap = new Map<string, TaskInfo>();
 
@@ -849,7 +906,13 @@ export default function PhotographerPage() {
         if (!t.assistantId || !t.category) continue;
         if (!["executing", "paused", "waiting"].includes(t.status)) continue;
         if (!infoMap.has(t.assistantId)) {
-          infoMap.set(t.assistantId, { executingTask: null, pausedTask: null, waitingInterruptTask: null, resumingTask: null });
+          infoMap.set(t.assistantId, {
+            executingTask: null,
+            pausedTask: null,
+            waitingInterruptTask: null,
+            resumingTask: null,
+            preemptedWaitingTask: null,
+          });
         }
         const info = infoMap.get(t.assistantId)!;
         if (t.status === "executing") info.executingTask = t;
@@ -874,6 +937,36 @@ export default function PhotographerPage() {
         }
       }
 
+      // 四次：待就位被高优先插单 — 子任务 waiting+parent，父任务仍为 waiting（非暂停）
+      for (const [, info] of infoMap) {
+        const cand = info.resumingTask;
+        if (!cand || info.executingTask) continue;
+        const parent = allTasks.find((x) => x.id === cand.parentTaskId);
+        if (
+          parent &&
+          parent.status === "waiting" &&
+          parent.assistantId === cand.assistantId
+        ) {
+          info.preemptedWaitingTask = parent;
+          info.waitingInterruptTask = cand;
+          info.resumingTask = null;
+        }
+      }
+
+      // 五次：待就位插单后紧急单已开始执行 — 父任务仍为 waiting，须保留原（较低优先）坐标供灰头像
+      for (const [, info] of infoMap) {
+        const ex = info.executingTask;
+        if (!ex?.parentTaskId) continue;
+        const parent = allTasks.find((x) => x.id === ex.parentTaskId);
+        if (
+          parent &&
+          parent.status === "waiting" &&
+          parent.assistantId === ex.assistantId
+        ) {
+          info.preemptedWaitingTask = parent;
+        }
+      }
+
       setAssistants(profiles.map((p: DockAssistant) => {
         const info = infoMap.get(p.id);
         if (!info) {
@@ -891,10 +984,14 @@ export default function PhotographerPage() {
             pendingRoom: null,
             executingOvertimeMin: null,
             pausedOvertimeMin: null,
+            preemptedWaitingRoom: null,
+            preemptedWaitingTaskDesc: null,
+            preemptedWaitingTaskDetail: null,
+            preemptedOvertimeMin: null,
           };
         }
 
-        const { executingTask, pausedTask, waitingInterruptTask, resumingTask } = info;
+        const { executingTask, pausedTask, waitingInterruptTask, resumingTask, preemptedWaitingTask } = info;
 
         // 计算主任务状态和位置
         let finalStatus = "idle";
@@ -904,18 +1001,47 @@ export default function PhotographerPage() {
         let pausedTaskDesc: string | null = null;
         let pausedTaskDetail: string | null = null;
         let pausedElapsedMin = 0;
+        let preemptedWaitingRoom: string | null = null;
+        let preemptedWaitingTaskDesc: string | null = null;
+        let preemptedWaitingTaskDetail: string | null = null;
         let newTaskDesc: string | null = null;
         let resumingFromPause = false;
 
         const buildDesc = (t: typeof allTasks[0]) =>
-          `${t.roomNumber}室 · ${t.category.name} · ${taskCategoryDurationCaption(t.category, t.priority)}`;
+          t.category
+            ? `${t.roomNumber}室 · ${t.category.name} · ${taskCategoryDurationCaption(t.category, t.priority)}`
+            : `${t.roomNumber}室`;
 
-        if (executingTask && waitingInterruptTask) {
+        if (
+          preemptedWaitingTask &&
+          executingTask &&
+          executingTask.parentTaskId === preemptedWaitingTask.id
+        ) {
+          // 待就位插单后紧急单已执行中：父任务坐标灰头像 + 当前执行房间主标记（余骐彤低优先房间 + 叶梦妮执行中）
+          finalStatus = "executing";
+          preemptedWaitingRoom = preemptedWaitingTask.roomNumber;
+          currentRoom = executingTask.roomNumber;
+          newTaskDesc = buildDesc(executingTask);
+          const pOverPre = overtimeMinutesBeyondSlot(preemptedWaitingTask, nowMs);
+          preemptedWaitingTaskDesc =
+            pOverPre != null ? `已超时${fmtMin(pOverPre)}` : "已让行紧急单";
+          preemptedWaitingTaskDetail = buildDesc(preemptedWaitingTask);
+        } else if (executingTask && waitingInterruptTask) {
           // 旧任务进行中 + 新插单待处理：主标记在旧任务（橙色进行中），蓝脉冲标记在新任务
           finalStatus = "executing";
           currentRoom = executingTask.roomNumber;
           pendingRoom = waitingInterruptTask.roomNumber;
           newTaskDesc = buildDesc(waitingInterruptTask);
+        } else if (preemptedWaitingTask && waitingInterruptTask) {
+          // 待就位被更高优先插单：原任务房间灰 50%，紧急单房间蓝脉冲主标记
+          finalStatus = "assigned";
+          preemptedWaitingRoom = preemptedWaitingTask.roomNumber;
+          currentRoom = waitingInterruptTask.roomNumber;
+          newTaskDesc = buildDesc(waitingInterruptTask);
+          const pOverPre = overtimeMinutesBeyondSlot(preemptedWaitingTask, nowMs);
+          preemptedWaitingTaskDesc =
+            pOverPre != null ? `已超时${fmtMin(pOverPre)}` : "已让行紧急单";
+          preemptedWaitingTaskDetail = buildDesc(preemptedWaitingTask);
         } else if (pausedTask && waitingInterruptTask) {
           // 阶段B：旧任务已暂停 + 新插单待就位
           // - 旧任务房间：只保留灰色头像（pausedMarker）
@@ -979,7 +1105,13 @@ export default function PhotographerPage() {
         const descTask =
           (!executingTask && pausedTask && waitingInterruptTask)
             ? waitingInterruptTask
-            : (executingTask || pausedTask);
+            : (!executingTask && preemptedWaitingTask && waitingInterruptTask)
+              ? waitingInterruptTask
+              : preemptedWaitingTask &&
+                  executingTask &&
+                  executingTask.parentTaskId === preemptedWaitingTask.id
+                ? executingTask
+                : (executingTask || pausedTask);
         let currentTask: string | null = null;
         if (descTask) {
           const line = formatMapTaskElapsedLine(descTask, nowMs);
@@ -998,8 +1130,14 @@ export default function PhotographerPage() {
           newTaskDesc,
           resumingFromPause,
           pendingRoom,
+          preemptedWaitingRoom,
+          preemptedWaitingTaskDesc,
+          preemptedWaitingTaskDetail,
           executingOvertimeMin: executingTask ? overtimeMinutesBeyondSlot(executingTask, nowMs) : null,
           pausedOvertimeMin: pausedTask ? overtimeMinutesBeyondSlot(pausedTask, nowMs) : null,
+          preemptedOvertimeMin: preemptedWaitingTask
+            ? overtimeMinutesBeyondSlot(preemptedWaitingTask, nowMs)
+            : null,
         };
       }));
     }).catch(console.error);
@@ -1051,10 +1189,11 @@ export default function PhotographerPage() {
             setTasks(sortTasksByStatus(taskData.map(apiTaskToDisplay)));
             if (isAssistantRole(profile.role)) {
               setAssistantRawTasks(raw);
-              const { current: active, paused, pending } = resolveAssistantTasks(raw);
+              const { current: active, paused, pending, deferredWaiting } = resolveAssistantTasks(raw);
               setCurrentRawTask(active);
               setPausedRawTask(paused);
               setPendingRawTask(pending);
+              setDeferredWaitingRawTask(deferredWaiting);
               // 同步位置：有活跃任务则跟随任务位置
               if (active && active.roomNumber !== profile.currentRoom) {
                 setProfile((p) => p ? { ...p, currentRoom: active.roomNumber } : p);
@@ -1255,12 +1394,17 @@ export default function PhotographerPage() {
                   setTasks(sortTasksByStatus(taskData.map(apiTaskToDisplay)));
                   if (isAssistantRole(selected.role)) {
                     setAssistantRawTasks(raw);
-                    const { current: active, paused, pending } = resolveAssistantTasks(raw);
+                    const { current: active, paused, pending, deferredWaiting } = resolveAssistantTasks(raw);
                     setCurrentRawTask(active);
                     setPausedRawTask(paused);
                     setPendingRawTask(pending);
+                    setDeferredWaitingRawTask(deferredWaiting);
                   } else {
                     setAssistantRawTasks([]);
+                    setDeferredWaitingRawTask(null);
+                    setCurrentRawTask(null);
+                    setPausedRawTask(null);
+                    setPendingRawTask(null);
                   }
                 }
               })
@@ -1420,10 +1564,11 @@ export default function PhotographerPage() {
         setTaskListRaw(raw);
         setAssistantRawTasks(raw);
         setTasks(sortTasksByStatus(taskData.map(apiTaskToDisplay)));
-        const { current: active, paused, pending } = resolveAssistantTasks(raw);
+        const { current: active, paused, pending, deferredWaiting } = resolveAssistantTasks(raw);
         setCurrentRawTask(active);
         setPausedRawTask(paused);
         setPendingRawTask(pending);
+        setDeferredWaitingRawTask(deferredWaiting);
       }
       refreshAssistants();
     } catch (e) {
@@ -1465,10 +1610,11 @@ export default function PhotographerPage() {
           setTaskListRaw(raw);
           setAssistantRawTasks(raw);
           setTasks(sortTasksByStatus(taskData.map(apiTaskToDisplay)));
-          const { current: next, paused, pending } = resolveAssistantTasks(raw);
+          const { current: next, paused, pending, deferredWaiting } = resolveAssistantTasks(raw);
           setCurrentRawTask(next);
           setPausedRawTask(paused);
           setPendingRawTask(pending);
+          setDeferredWaitingRawTask(deferredWaiting);
           const nextRoom = next ? next.roomNumber : originalRoomRef.current;
           if (nextRoom) {
             setProfile((p) => p ? { ...p, currentRoom: nextRoom } : p);
@@ -1491,10 +1637,11 @@ export default function PhotographerPage() {
           setTaskListRaw(raw);
           setAssistantRawTasks(raw);
           setTasks(sortTasksByStatus(taskData.map(apiTaskToDisplay)));
-          const { current: active, paused, pending } = resolveAssistantTasks(raw);
+          const { current: active, paused, pending, deferredWaiting } = resolveAssistantTasks(raw);
           setCurrentRawTask(active);
           setPausedRawTask(paused);
           setPendingRawTask(pending);
+          setDeferredWaitingRawTask(deferredWaiting);
         }
         refreshAssistants();
       }
@@ -1621,16 +1768,18 @@ export default function PhotographerPage() {
               // 允许同一助理同时在多个坐标出现标记：
               // - currentRoom: 主标记（进行中头像 / 待就位蓝点 / 恢复待就位头像）
               // - pausedRoom:  暂停中的原任务灰头像
+              // - preemptedWaitingRoom: 待就位被插单时让行的原任务灰头像（固定 50% 透明）
               // - pendingRoom: 执行中时的插单待处理蓝脉冲点
               // 注意：不能只用 currentRoom 过滤，否则 pausedRoom 会被误删
               const visible = assistants.filter((a) =>
-                (a.currentRoom || a.pausedRoom || a.pendingRoom)
+                (a.currentRoom || a.pausedRoom || a.pendingRoom || a.preemptedWaitingRoom)
                 && (
                   a.status === "assigned"
                   || a.status === "executing"
                   || a.resumingFromPause
                   || !!a.pausedRoom
                   || !!a.pendingRoom
+                  || !!a.preemptedWaitingRoom
                 )
               );
               // 解析额外场地坐标
@@ -1646,16 +1795,97 @@ export default function PhotographerPage() {
                   }
                 } catch {}
               }
-              // 计算同房间内的索引，用于水平偏移防重叠
-              const roomCount = new Map<string, number>();
-              const roomIdx = new Map<string, number>();
+              // 同房间所有标记（含不同助理）统一横向错开：避免叶梦妮灰头像与张钰函主标记叠在同一点被盖住
+              const slotsByRoom = new Map<string, { key: string }[]>();
+              const pushSlot = (room: string | null | undefined, key: string) => {
+                if (!room) return;
+                const arr = slotsByRoom.get(room) ?? [];
+                arr.push({ key });
+                slotsByRoom.set(room, arr);
+              };
               for (const a of visible) {
-                if (!a.currentRoom) continue;
-                const r = a.currentRoom;
-                roomIdx.set(a.id, roomCount.get(r) || 0);
-                roomCount.set(r, (roomCount.get(r) || 0) + 1);
+                if (a.currentRoom) pushSlot(a.currentRoom, `main:${a.id}`);
+                if (a.preemptedWaitingRoom) pushSlot(a.preemptedWaitingRoom, `preempt:${a.id}`);
+                if (a.pausedRoom) pushSlot(a.pausedRoom, `paused:${a.id}`);
+                if (a.pendingRoom) pushSlot(a.pendingRoom, `pending:${a.id}`);
+              }
+              const SLOT_GAP = 22;
+              const slotLayout = new Map<string, { offsetPx: number; zBase: number }>();
+              for (const [, slotList] of slotsByRoom) {
+                const sorted = [...slotList].sort((x, y) => x.key.localeCompare(y.key));
+                const n = sorted.length;
+                sorted.forEach((s, i) => {
+                  const offsetPx = n > 1 ? (i - (n - 1) / 2) * SLOT_GAP : 0;
+                  slotLayout.set(s.key, { offsetPx, zBase: 8 + i });
+                });
               }
               return visible.flatMap((a) => {
+              // 待就位被插单：原较低优先任务坐标，灰头像 50%（与暂停让行区分 key）
+              const preemptedMarker = a.preemptedWaitingRoom ? (() => {
+                const pr = activeBuilding.rooms.find((r) => r.roomNumber === a.preemptedWaitingRoom);
+                const pv = !pr ? venueCoords.get(a.preemptedWaitingRoom!) : undefined;
+                const px = pr?.xPosition ?? pv?.x;
+                const py = pr?.yPosition ?? pv?.y;
+                if (px === undefined || py === undefined) return null;
+                const slPre = slotLayout.get(`preempt:${a.id}`);
+                const ox = slPre?.offsetPx ?? 0;
+                const zb = slPre?.zBase ?? 8;
+                const preemptHovered = hoveredMapAssistant === `${a.id}-preempted-wait`;
+                return (
+                  <div
+                    key={`${a.id}-preempted-wait`}
+                    className="absolute"
+                    style={{
+                      left: `${px}%`,
+                      top: `${py}%`,
+                      transform: `translate(calc(-50% + ${ox}px), -50%)`,
+                      zIndex: preemptHovered ? 50 : zb,
+                    }}
+                    onMouseEnter={(e) => {
+                      e.stopPropagation();
+                      setHoveredMapAssistant(`${a.id}-preempted-wait`);
+                    }}
+                    onMouseLeave={() => setHoveredMapAssistant(null)}
+                    onMouseDown={(e) => e.stopPropagation()}
+                  >
+                    <div className="relative h-[26px] w-[26px] overflow-visible">
+                      {a.preemptedOvertimeMin != null && (
+                        <>
+                          <div className="pointer-events-none absolute -inset-2 rounded-full bg-red-500/35 animate-ping" />
+                          <div className="pointer-events-none absolute -inset-1 rounded-full bg-red-500/25 animate-pulse" />
+                        </>
+                      )}
+                      <div
+                        className="relative z-[1] h-full w-full rounded-full overflow-hidden border-[2px] border-solid shadow-sm"
+                        style={{
+                          filter: "grayscale(1)",
+                          opacity: 0.5,
+                          borderColor: a.preemptedOvertimeMin != null ? DOCK_DOT.overtime : DOCK_DOT.offline,
+                        }}
+                      >
+                        {a.avatar ? (
+                          <img src={a.avatar} alt={a.name} className="w-full h-full object-cover" />
+                        ) : (
+                          <div className="w-full h-full bg-gradient-to-br from-gray-200 to-gray-400 flex items-center justify-center text-white text-[8px] font-bold">{a.name[0]}</div>
+                        )}
+                      </div>
+                    </div>
+                    {hoveredMapAssistant === `${a.id}-preempted-wait` && (
+                      <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 pointer-events-none whitespace-nowrap z-50">
+                        <div className="px-3 py-2 rounded-xl bg-white/95 backdrop-blur-xl shadow-lg border border-gray-100 text-center">
+                          {a.preemptedWaitingTaskDesc && (
+                            <p className="text-xs font-semibold text-[--text-primary]">{a.name} · {a.preemptedWaitingTaskDesc}</p>
+                          )}
+                          {a.preemptedWaitingTaskDetail && (
+                            <p className="text-[10px] text-[--text-muted] mt-0.5">{a.preemptedWaitingTaskDetail}</p>
+                          )}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })() : null;
+
               // 额外：插单进行中时，旧房间显示灰色头像（即使当前房间坐标缺失也要显示）
               const pausedMarker = a.pausedRoom ? (() => {
                 const pRoom = activeBuilding.rooms.find((r) => r.roomNumber === a.pausedRoom);
@@ -1666,11 +1896,20 @@ export default function PhotographerPage() {
                 // 暂停坐标与当前主任务坐标不同 = 多任务：灰头像弱化，突出主标记
                 const pausedMarkerMultitask =
                   !!a.currentRoom && a.pausedRoom !== a.currentRoom;
+                const slPaused = slotLayout.get(`paused:${a.id}`);
+                const oxP = slPaused?.offsetPx ?? 0;
+                const zbP = slPaused?.zBase ?? 8;
+                const pausedHovered = hoveredMapAssistant === `${a.id}-paused`;
                 return (
                   <div
                     key={`${a.id}-paused`}
                     className="absolute"
-                    style={{ left: `${pX}%`, top: `${pY}%`, transform: "translate(-50%, -50%)", zIndex: 8 }}
+                    style={{
+                      left: `${pX}%`,
+                      top: `${pY}%`,
+                      transform: `translate(calc(-50% + ${oxP}px), -50%)`,
+                      zIndex: pausedHovered ? 50 : zbP,
+                    }}
                     onMouseEnter={(e) => { e.stopPropagation(); setHoveredMapAssistant(`${a.id}-paused`); }}
                     onMouseLeave={() => setHoveredMapAssistant(null)}
                     onMouseDown={(e) => e.stopPropagation()}
@@ -1720,11 +1959,20 @@ export default function PhotographerPage() {
                 const px = pr?.xPosition ?? pvp?.x;
                 const py = pr?.yPosition ?? pvp?.y;
                 if (px === undefined || py === undefined) return null;
+                const slPen = slotLayout.get(`pending:${a.id}`);
+                const oxPen = slPen?.offsetPx ?? 0;
+                const zbPen = slPen?.zBase ?? 9;
+                const penHovered = hoveredMapAssistant === `${a.id}-pending`;
                 return (
                   <div
                     key={`${a.id}-pending`}
                     className="absolute"
-                    style={{ left: `${px}%`, top: `${py}%`, transform: "translate(-50%, -50%)", zIndex: 9 }}
+                    style={{
+                      left: `${px}%`,
+                      top: `${py}%`,
+                      transform: `translate(calc(-50% + ${oxPen}px), -50%)`,
+                      zIndex: penHovered ? 50 : zbPen,
+                    }}
                     onMouseEnter={(e) => { e.stopPropagation(); setHoveredMapAssistant(`${a.id}-pending`); }}
                     onMouseLeave={() => setHoveredMapAssistant(null)}
                     onMouseDown={(e) => e.stopPropagation()}
@@ -1753,14 +2001,17 @@ export default function PhotographerPage() {
               const posY = room?.yPosition ?? venuePos?.y;
               if (posX === undefined || posY === undefined) {
                 // 当前房间没有坐标时，也不要清空灰头像/蓝点（尤其是暂停后需要保留旧坐标灰头像）
-                return [pausedMarker, pendingMarker].filter(Boolean);
+                return [preemptedMarker, pausedMarker, pendingMarker].filter(Boolean);
               }
 
               const isAssigned = a.status === "assigned";
               const isHovered = hoveredMapAssistant === a.id;
-              const idx = roomIdx.get(a.id) || 0;
-              const total = roomCount.get(a.currentRoom!) || 1;
-              const offset = total > 1 ? (idx - (total - 1) / 2) * 22 : 0;
+              const slMain = slotLayout.get(`main:${a.id}`);
+              const offset = slMain?.offsetPx ?? 0;
+              const zMain = slMain?.zBase ?? 10;
+              // 执行中 + 紧急插单待处理：原（较低优先）进行中坐标用灰头像 50%，与 pending 蓝点并存
+              const dimExecutingForPendingInterrupt =
+                !isAssigned && !a.resumingFromPause && !!a.pendingRoom;
 
               const mainMarker = (
                 <div
@@ -1770,7 +2021,7 @@ export default function PhotographerPage() {
                     left: `${posX}%`,
                     top: `${posY}%`,
                     transform: `translate(calc(-50% + ${offset}px), -50%) scale(${isHovered ? 1.35 : 1})`,
-                    zIndex: isHovered ? 50 : 10 + idx,
+                    zIndex: isHovered ? 50 : zMain,
                     transition: "transform .3s cubic-bezier(.34,1.56,.64,1)",
                   }}
                   onMouseEnter={(e) => { e.stopPropagation(); setHoveredMapAssistant(a.id); }}
@@ -1803,7 +2054,15 @@ export default function PhotographerPage() {
                       )}
                       <div
                         className="relative z-[1] h-full w-full rounded-full overflow-hidden border-[2px] border-solid shadow-sm"
-                        style={{ borderColor: assistantDockDotColor(a) }}
+                        style={{
+                          borderColor: dimExecutingForPendingInterrupt
+                            ? a.executingOvertimeMin != null
+                              ? DOCK_DOT.overtime
+                              : DOCK_DOT.offline
+                            : assistantDockDotColor(a),
+                          filter: dimExecutingForPendingInterrupt ? "grayscale(1)" : "none",
+                          opacity: dimExecutingForPendingInterrupt ? 0.5 : 1,
+                        }}
                       >
                         {a.avatar ? (
                           <img src={a.avatar} alt={a.name} className="w-full h-full object-cover" />
@@ -1875,6 +2134,21 @@ export default function PhotographerPage() {
                                 </div>
                               ];
                             })() : []
+                          ).concat(
+                            a.preemptedWaitingTaskDesc && a.preemptedWaitingTaskDetail
+                              ? [
+                                  <div key="preempted-wait-info" className="mt-2 pt-2 border-t border-gray-100">
+                                    <p
+                                      className={`text-xs font-semibold ${
+                                        a.preemptedOvertimeMin != null ? "text-red-600" : "text-gray-600"
+                                      }`}
+                                    >
+                                      {a.preemptedWaitingTaskDesc}
+                                    </p>
+                                    <p className="text-[10px] text-[--text-muted] mt-0.5">{a.preemptedWaitingTaskDetail}</p>
+                                  </div>,
+                                ]
+                              : []
                           );
                         })()}
                       </div>
@@ -1882,7 +2156,7 @@ export default function PhotographerPage() {
                   )}
                 </div>
               );
-              return [pausedMarker, pendingMarker, mainMarker].filter(Boolean);
+              return [preemptedMarker, pausedMarker, pendingMarker, mainMarker].filter(Boolean);
               });
             })()}
           </div>
@@ -2081,6 +2355,26 @@ export default function PhotographerPage() {
                     );
                   };
 
+                  /** 待就位被插单：原较低优先任务让行，样式与地图灰 50% 一致 */
+                  const renderDeferredWaitingBlock = (task: TaskFromAPI, flex: number) => {
+                    const waitMs = Math.max(0, now.getTime() - new Date(task.createdAt).getTime());
+                    const waitSec = Math.floor(waitMs / 1000);
+                    return (
+                      <div
+                        key={task.id}
+                        className="w-full min-h-0 rounded-xl bg-gray-400/15 flex flex-col items-center justify-center gap-1 pt-1.5 pb-1 px-1 opacity-50"
+                        style={flexStyle(flex)}
+                      >
+                        <div className="w-8 max-w-full min-w-0 min-h-0 shrink-[2] max-h-[min(2rem,26%)] h-[min(2rem,26%)] rounded-full bg-gray-400/20 flex items-center justify-center overflow-hidden">
+                          <div className="min-w-0 min-h-0 w-[42%] h-[42%] max-w-[min(72%,1.1rem)] max-h-[min(72%,1.1rem)] rounded-full bg-gray-400" />
+                        </div>
+                        <span className="text-[13px] font-extrabold text-gray-500 text-center leading-tight">已让行紧急单</span>
+                        {lineRoomPhotoCategory(task, "text-gray-400")}
+                        {pixelHMSBlock(waitSec, "text-gray-500")}
+                      </div>
+                    );
+                  };
+
                   // 渲染执行中任务区块（点击暂停，有插单任务时）
                   const renderExecutingWithPause = (task: TaskFromAPI, flex: number) => {
                     const effSec = totalEffectiveWorkSecondsFromApi(task, now.getTime());
@@ -2181,6 +2475,34 @@ export default function PhotographerPage() {
                       <div className="flex-1 min-h-0 w-full flex flex-col gap-2">
                         {renderExecutingWithPause(currentRawTask, 2)}
                         {renderPendingBlock(pendingRawTask, 1)}
+                      </div>
+                    );
+                  }
+
+                  // 待就位插单后紧急单已执行中：父任务让行 1/3 + 当前执行 2/3（地图：余骐彤房间灰头像 + 执行房间主标记）
+                  if (
+                    deferredWaitingRawTask &&
+                    currentRawTask?.status === "executing" &&
+                    currentRawTask.parentTaskId === deferredWaitingRawTask.id
+                  ) {
+                    return (
+                      <div className="flex-1 min-h-0 w-full flex flex-col gap-2">
+                        {renderDeferredWaitingBlock(deferredWaitingRawTask, 1)}
+                        {renderTaskBlock(currentRawTask, 2)}
+                      </div>
+                    );
+                  }
+
+                  // 待就位被更高优先插单：让行任务 1/3（灰 50%），紧急单待就位 2/3
+                  if (
+                    deferredWaitingRawTask &&
+                    currentRawTask?.status === "waiting" &&
+                    currentRawTask.parentTaskId === deferredWaitingRawTask.id
+                  ) {
+                    return (
+                      <div className="flex-1 min-h-0 w-full flex flex-col gap-2">
+                        {renderDeferredWaitingBlock(deferredWaitingRawTask, 1)}
+                        {renderTaskBlock(currentRawTask, 2)}
                       </div>
                     );
                   }

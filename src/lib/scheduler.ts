@@ -144,7 +144,9 @@ export async function sweepWaitingTasks(): Promise<number> {
   _sweepRunning = true;
 
   try {
-    // 1. 查找所有空闲且可用的助理
+    let assignedCount = 0;
+
+    // —— 阶段 A：空闲助理 ↔ 未派单 waiting（原逻辑）——
     const idleAssistants = await prisma.profile.findMany({
       where: {
         role: { in: ["assistant", "assistant_leader"] },
@@ -155,23 +157,64 @@ export async function sweepWaitingTasks(): Promise<number> {
       orderBy: [{ name: "asc" }, { id: "asc" }],
     });
 
-    if (idleAssistants.length === 0) return 0;
+    if (idleAssistants.length > 0) {
+      const busyAssistantIds = (await prisma.bookingTask.findMany({
+        where: {
+          status: { in: [TaskStatus.waiting, TaskStatus.executing, TaskStatus.paused] },
+          assistantId: { not: null },
+        },
+        select: { assistantId: true },
+        distinct: ["assistantId"],
+      })).map((t) => t.assistantId!);
 
-    // 2. 排除已有活跃任务的助理（防止重复分配）
-    const busyAssistantIds = (await prisma.bookingTask.findMany({
-      where: {
-        status: { in: [TaskStatus.waiting, TaskStatus.executing, TaskStatus.paused] },
-        assistantId: { not: null },
-      },
-      select: { assistantId: true },
-      distinct: ["assistantId"],
-    })).map((t) => t.assistantId!);
+      const trulyIdle = idleAssistants.filter((a) => !busyAssistantIds.includes(a.id));
+      if (trulyIdle.length > 0) {
+        const waitingTasks = await prisma.bookingTask.findMany({
+          where: {
+            status: TaskStatus.waiting,
+            assistantId: null,
+          },
+          include: { photographer: { select: { buildingId: true } } },
+          orderBy: [{ priority: "asc" }, { createdAt: "asc" }],
+        });
 
-    const trulyIdle = idleAssistants.filter((a) => !busyAssistantIds.includes(a.id));
-    if (trulyIdle.length === 0) return 0;
+        if (waitingTasks.length > 0) {
+          const assistantsByBuilding = new Map<number, string[]>();
+          for (const a of trulyIdle) {
+            if (a.buildingId == null) continue;
+            const list = assistantsByBuilding.get(a.buildingId) || [];
+            list.push(a.id);
+            assistantsByBuilding.set(a.buildingId, list);
+          }
 
-    // 3. 查找等待中且未分配助理的任务
-    const waitingTasks = await prisma.bookingTask.findMany({
+          for (const task of waitingTasks) {
+            const buildingId = task.photographer.buildingId;
+            if (buildingId == null) continue;
+            const available = assistantsByBuilding.get(buildingId);
+            if (!available || available.length === 0) continue;
+
+            const assistantId = available.shift()!;
+
+            await prisma.$transaction([
+              prisma.bookingTask.update({
+                where: { id: task.id },
+                data: { assistantId },
+              }),
+              prisma.profile.update({
+                where: { id: assistantId },
+                data: { status: ProfileStatus.assigned },
+              }),
+            ]);
+
+            console.log(`[sweepWaitingTasks] 助理 ${assistantId} 分配任务 ${task.id} (P${task.priority})`);
+            assignedCount++;
+          }
+        }
+      }
+    }
+
+    // —— 阶段 B：仍无助理的 waiting → 待就位插单（与 POST /api/tasks 一致；修复「全楼无 idle 时 sweep 直接返回」导致永不插单）——
+    const stillOrphans = await prisma.bookingTask.findMany({
       where: {
         status: TaskStatus.waiting,
         assistantId: null,
@@ -179,41 +222,14 @@ export async function sweepWaitingTasks(): Promise<number> {
       include: { photographer: { select: { buildingId: true } } },
       orderBy: [{ priority: "asc" }, { createdAt: "asc" }],
     });
-
-    if (waitingTasks.length === 0) return 0;
-
-    // 4. 按楼座分组空闲助理
-    const assistantsByBuilding = new Map<number, string[]>();
-    for (const a of trulyIdle) {
-      if (a.buildingId == null) continue;
-      const list = assistantsByBuilding.get(a.buildingId) || [];
-      list.push(a.id);
-      assistantsByBuilding.set(a.buildingId, list);
-    }
-
-    // 5. 按优先级顺序逐个分配
-    let assignedCount = 0;
-    for (const task of waitingTasks) {
-      const buildingId = task.photographer.buildingId;
-      if (buildingId == null) continue;
-      const available = assistantsByBuilding.get(buildingId);
-      if (!available || available.length === 0) continue;
-
-      const assistantId = available.shift()!;
-
-      await prisma.$transaction([
-        prisma.bookingTask.update({
-          where: { id: task.id },
-          data: { assistantId },
-        }),
-        prisma.profile.update({
-          where: { id: assistantId },
-          data: { status: ProfileStatus.assigned },
-        }),
-      ]);
-
-      console.log(`[sweepWaitingTasks] 助理 ${assistantId} 分配任务 ${task.id} (P${task.priority})`);
-      assignedCount++;
+    for (const task of stillOrphans) {
+      const bid = task.photographer.buildingId;
+      if (bid == null) continue;
+      const ok = await interruptWaitingPreempt(bid, task.id, task.priority);
+      if (ok) {
+        console.log(`[sweepWaitingTasks] 待就位插单 任务 ${task.id} (P${task.priority}) → 楼座 ${bid}`);
+        assignedCount++;
+      }
     }
 
     return assignedCount;
@@ -276,6 +292,77 @@ export async function interruptAssistant(
   });
 
   return true;
+}
+
+/**
+ * 待就位插单：助理已分配到较低优先任务且尚未开始，新单更紧急时把新单挂到该助理下，
+ * parentTaskId 指向原等待任务；原任务保持 waiting + assistantId（让行），完成后走 completeTask 恢复父任务待就位。
+ */
+export async function interruptWaitingPreempt(
+  buildingId: number,
+  newTaskId: string,
+  newPriority: number
+): Promise<boolean> {
+  const assignedAssistants = await prisma.profile.findMany({
+    where: {
+      role: { in: ["assistant", "assistant_leader"] },
+      status: ProfileStatus.assigned,
+      onlineStatus: OnlineStatus.online,
+      subStatus: null,
+      buildingId,
+    },
+    orderBy: [{ name: "asc" }, { id: "asc" }],
+  });
+
+  type Row = { assistantId: string; priority: number; waitingTaskId: string };
+  const rows: Row[] = [];
+
+  for (const a of assignedAssistants) {
+    const waitingTask = await prisma.bookingTask.findFirst({
+      where: {
+        assistantId: a.id,
+        status: TaskStatus.waiting,
+        parentTaskId: null,
+        isLocked: false,
+      },
+      orderBy: [{ priority: "desc" }, { createdAt: "asc" }],
+    });
+    if (!waitingTask) continue;
+    // 已有「待就位插单」子任务时不再作为抢占对象，避免同一父任务挂多条插单
+    const existingChild = await prisma.bookingTask.findFirst({
+      where: {
+        assistantId: a.id,
+        status: TaskStatus.waiting,
+        parentTaskId: waitingTask.id,
+      },
+    });
+    if (existingChild) continue;
+    // 新单更紧急（数值更小）才可抢占待就位
+    if (waitingTask.priority <= newPriority) continue;
+    rows.push({
+      assistantId: a.id,
+      priority: waitingTask.priority,
+      waitingTaskId: waitingTask.id,
+    });
+  }
+
+  if (rows.length === 0) return false;
+
+  const filtered = rows.map((r) => ({ assistantId: r.assistantId, priority: r.priority }));
+  const order = await buildP1InterruptCandidateOrderFromFiltered(buildingId, filtered);
+
+  for (const item of order) {
+    const row = rows.find((r) => r.assistantId === item.assistantId);
+    if (!row) continue;
+    await prisma.bookingTask.update({
+      where: { id: newTaskId },
+      data: { assistantId: row.assistantId, parentTaskId: row.waitingTaskId },
+    });
+    await recordP1InterruptRoundRobin(buildingId, row.assistantId);
+    return true;
+  }
+
+  return false;
 }
 
 const P1_INTERRUPT_RR_KEY = (buildingId: number) => `p1_interrupt_rr_b${buildingId}`;

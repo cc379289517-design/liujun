@@ -8,6 +8,7 @@ import {
   effectiveInterruptLeaveCapMinutes,
   getSchedulerRuntimeConfig,
   interruptAssistant,
+  interruptWaitingPreempt,
   recordP1InterruptRoundRobin,
   sweepWaitingTasks,
   cleanupStaleTasks,
@@ -215,7 +216,17 @@ export async function POST(request: NextRequest) {
         return Response.json(updated, { status: 201 });
       }
 
-      // 同楼座无空闲：尝试插单（任意优先级，只要新单更紧急且离场在 cap 内、当前类型允许被打断）
+      // 同楼座无空闲助理：尝试抢占「已派发、尚在待就位」的较低优先任务（新单更紧急）
+      const preempted = await interruptWaitingPreempt(buildingId, task.id, taskPriority);
+      if (preempted) {
+        const updated = await prisma.bookingTask.findUnique({
+          where: { id: task.id },
+          include: TASK_INCLUDE,
+        });
+        return Response.json(updated ?? task, { status: 201 });
+      }
+
+      // 仍无：尝试对执行中单插单（新单更紧急且离场在 cap 内、当前类型允许被打断）
       const busyAssistants = await prisma.profile.findMany({
         where: {
           role: { in: ["assistant", "assistant_leader"] },
