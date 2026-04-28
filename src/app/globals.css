@@ -181,3 +181,26 @@ body {
   overflow: hidden;
   pointer-events: none;
 }
+
+/* Note marquee animation */
+@keyframes note-marquee {
+  0% { transform: translateX(0); }
+  100% { transform: translateX(-100%); }
+}
+.note-marquee {
+  display: inline-block;
+  white-space: nowrap;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.note-marquee-container {
+  overflow: hidden;
+  flex: 1;
+  min-w: 0;
+}
+.note-marquee-container:hover .note-marquee {
+  max-width: none;
+  text-overflow: clip;
+  animation: note-marquee 6s linear 1 forwards;
+}

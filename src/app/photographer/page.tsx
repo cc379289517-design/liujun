@@ -656,6 +656,11 @@ export default function PhotographerPage() {
     onlineStatus: string;
   } | null>(null);
   const [hoveredMapAssistant, setHoveredMapAssistant] = useState<string | null>(null);
+  const [notePopupTaskId, setNotePopupTaskId] = useState<string | null>(null);
+  const [notePopupValue, setNotePopupValue] = useState("");
+  const [noteSaving, setNoteSaving] = useState(false);
+  const [editingNoteTaskId, setEditingNoteTaskId] = useState<string | null>(null);
+  const [editingNoteValue, setEditingNoteValue] = useState("");
   const [showAvatarModal, setShowAvatarModal] = useState(false);
   const [showVenueMenu, setShowVenueMenu] = useState(false);
   const originalRoomRef = useRef<string | null>(null);
@@ -1111,7 +1116,7 @@ export default function PhotographerPage() {
                   executingTask &&
                   executingTask.parentTaskId === preemptedWaitingTask.id
                 ? executingTask
-                : (executingTask || pausedTask);
+                : (executingTask || pausedTask || allTasks.find((t: typeof allTasks[0]) => t.assistantId === p.id && t.status === "waiting") || null);
         let currentTask: string | null = null;
         if (descTask) {
           const line = formatMapTaskElapsedLine(descTask, nowMs);
@@ -1123,6 +1128,8 @@ export default function PhotographerPage() {
           status: finalStatus,
           currentTask,
           currentRoom,
+          currentTaskNote: descTask?.note ?? null,
+          currentTaskId: descTask?.id ?? null,
           pausedRoom,
           pausedElapsedMin,
           pausedTaskDesc,
@@ -1526,6 +1533,25 @@ export default function PhotographerPage() {
       console.error("Failed to update building", e);
     }
   }, [buildings, refreshAssistants]);
+
+  const handleSaveNote = useCallback(async (taskId: string, note: string) => {
+    setNoteSaving(true);
+    try {
+      await fetch(`/api/tasks/${taskId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "updateNote", note }),
+      });
+      // 更新本地 taskListRaw 和 assistantRawTasks 中的 note
+      setTaskListRaw((prev) => prev.map((t) => t.id === taskId ? { ...t, note: note.trim() || null } : t));
+      setAssistantRawTasks((prev) => prev.map((t) => t.id === taskId ? { ...t, note: note.trim() || null } : t));
+      setCurrentRawTask((prev) => prev?.id === taskId ? { ...prev, note: note.trim() || null } : prev);
+      setPausedRawTask((prev) => prev?.id === taskId ? { ...prev, note: note.trim() || null } : prev);
+      setPendingRawTask((prev) => prev?.id === taskId ? { ...prev, note: note.trim() || null } : prev);
+    } finally {
+      setNoteSaving(false);
+    }
+  }, []);
 
   // 助理：手动暂停当前任务（插单场景）
   const handlePauseCurrentTask = useCallback(async () => {
@@ -2027,6 +2053,13 @@ export default function PhotographerPage() {
                   onMouseEnter={(e) => { e.stopPropagation(); setHoveredMapAssistant(a.id); }}
                   onMouseLeave={() => setHoveredMapAssistant(null)}
                   onMouseDown={(e) => e.stopPropagation()}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    if (a.currentTaskId) {
+                      setNotePopupTaskId(a.currentTaskId);
+                      setNotePopupValue(a.currentTaskNote ?? "");
+                    }
+                  }}
                 >
                   {isAssigned || a.resumingFromPause ? (
                     <div className="relative h-[26px] w-[26px] overflow-visible">
@@ -2091,6 +2124,14 @@ export default function PhotographerPage() {
                               <>
                                 <p className={`text-xs font-semibold ${statusColor}`}>{a.name} · {statusLabel}</p>
                                 <p className="text-[10px] text-[--text-muted] mt-0.5">{a.currentRoom ? `${a.currentRoom}室` : "—"}</p>
+                                {a.currentTaskNote && (
+                                  <div className="mt-1 pt-2 border-t border-gray-100">
+                                    <p className="text-[8px] text-orange-500 flex items-center gap-1">
+                                      <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+                                      {a.currentTaskNote}
+                                    </p>
+                                  </div>
+                                )}
                               </>
                             );
                           }
@@ -2100,7 +2141,7 @@ export default function PhotographerPage() {
                             const elapsedText = hasElapsed ? ` · ${lines[0]}` : "";
                             const detail = hasElapsed ? lines[1] : lines[0];
                             return (
-                              <div key={i} className={i > 0 ? "mt-2 pt-2 border-t border-gray-100" : ""}>
+                              <div key={i} className={i > 0 ? "mt-1 pt-2 border-t border-gray-100" : ""}>
                                 <p className={`text-xs font-semibold ${statusColor}`}>{a.name} · {statusLabel}{elapsedText}</p>
                                 <p className="text-[10px] text-[--text-muted] mt-0.5">{detail}</p>
                               </div>
@@ -2149,6 +2190,15 @@ export default function PhotographerPage() {
                                   </div>,
                                 ]
                               : []
+                          ).concat(
+                            a.currentTaskNote ? [
+                              <div key="note-info" className="mt-2 pt-2 border-t border-gray-100">
+                                <p className="text-[8px] text-orange-500 flex items-center gap-1">
+                                  <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+                                  {a.currentTaskNote}
+                                </p>
+                              </div>
+                            ] : []
                           );
                         })()}
                       </div>
@@ -2170,6 +2220,47 @@ export default function PhotographerPage() {
           className="absolute inset-0 pointer-events-none transition-all duration-700"
           style={{ background: "var(--map-overlay)" }}
         />
+        {/* 备注弹窗 */}
+        {notePopupTaskId && (
+          <div
+            className="absolute inset-0 z-[60] flex items-center justify-center"
+            onClick={() => setNotePopupTaskId(null)}
+          >
+            <div
+              className="bg-white/95 backdrop-blur-xl rounded-2xl shadow-xl border border-gray-100 px-5 py-4 w-[260px]"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <p className="text-[12px] font-bold text-[--text-primary] mb-2">任务备注</p>
+              <textarea
+                autoFocus
+                className="w-full text-[11px] px-3 py-2 rounded-xl border border-orange-200/60 bg-white/60 outline-none focus:border-orange-400/60 text-[--text-primary] placeholder:text-gray-400 resize-none"
+                placeholder="添加备注信息..."
+                rows={3}
+                maxLength={100}
+                value={notePopupValue}
+                onChange={(e) => setNotePopupValue(e.target.value)}
+              />
+              <div className="flex gap-2 mt-2.5 justify-end">
+                <button
+                  className="text-[11px] px-3 py-1.5 rounded-lg text-gray-500 hover:bg-gray-100 transition-colors"
+                  onClick={() => setNotePopupTaskId(null)}
+                >
+                  取消
+                </button>
+                <button
+                  disabled={noteSaving}
+                  className="text-[11px] px-3 py-1.5 rounded-lg bg-orange-500 text-white hover:bg-orange-600 transition-colors disabled:opacity-60"
+                  onClick={async () => {
+                    await handleSaveNote(notePopupTaskId, notePopupValue);
+                    setNotePopupTaskId(null);
+                  }}
+                >
+                  {noteSaving ? "保存中..." : "保存"}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
 
 
@@ -2330,6 +2421,12 @@ export default function PhotographerPage() {
                       {task.roomNumber}室 · {task.photographer?.name ?? "—"} · {assistantCatName(task)}
                     </p>
                   );
+                  const noteBlock = (task: TaskFromAPI) => task.note ? (
+                    <p className="text-[8px] text-orange-500/80 text-center px-2 leading-snug flex items-center justify-center gap-1">
+                      <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+                      {task.note}
+                    </p>
+                  ) : null;
                   const pixelHMSBlock = (totalSeconds: number, colorCls: string) => (
                     <div className={`flex justify-center items-center min-h-0 py-0 mt-1 w-full ${colorCls}`}>
                       <span className="font-mono font-semibold tabular-nums leading-none tracking-tight text-[clamp(0.95rem,2.9vmin,1.28rem)]">
@@ -2350,6 +2447,7 @@ export default function PhotographerPage() {
                         </div>
                         <span className="text-[13px] font-extrabold text-gray-500 text-center leading-tight">暂停中/已离开</span>
                         {lineRoomPhotoCategory(task, "text-gray-400")}
+                        {noteBlock(task)}
                         {pixelHMSBlock(leaveSec, "text-gray-500")}
                       </div>
                     );
@@ -2370,6 +2468,7 @@ export default function PhotographerPage() {
                         </div>
                         <span className="text-[13px] font-extrabold text-gray-500 text-center leading-tight">已让行紧急单</span>
                         {lineRoomPhotoCategory(task, "text-gray-400")}
+                        {noteBlock(task)}
                         {pixelHMSBlock(waitSec, "text-gray-500")}
                       </div>
                     );
@@ -2391,6 +2490,7 @@ export default function PhotographerPage() {
                         </div>
                         <span className="text-[13px] font-extrabold text-orange-600">点击暂停</span>
                         {lineRoomPhotoCategory(task, "text-orange-600/80")}
+                        {noteBlock(task)}
                         {pixelHMSBlock(effSec, "text-orange-600")}
                         <div className="absolute bottom-0 left-0 right-0 h-1 overflow-hidden">
                           <div className="h-full w-[200%] bg-gradient-to-r from-orange-400 to-orange-500 from-orange-400 animate-[shimmer_2s_linear_infinite]" />
@@ -2407,6 +2507,7 @@ export default function PhotographerPage() {
                       </div>
                       <span className="text-[13px] font-extrabold text-blue-600">待就位</span>
                       {lineRoomPhotoCategory(task, "text-blue-600/80")}
+                      {noteBlock(task)}
                       <p className="text-[10px] text-blue-600/70 text-center px-2">
                         {taskCategoryDurationCaption(task.category, task.priority)}
                       </p>
@@ -2430,6 +2531,7 @@ export default function PhotographerPage() {
                           </div>
                           <span className="text-[16px] font-extrabold text-blue-600">点击开始任务</span>
                           {lineRoomPhotoCategory(task, "text-blue-600/80")}
+                          {noteBlock(task)}
                           <p className="text-[11px] text-blue-600/70 text-center px-2">
                             {taskCategoryDurationCaption(task.category, task.priority)} · 待就位
                           </p>
@@ -2459,6 +2561,7 @@ export default function PhotographerPage() {
                           </div>
                           <span className={`text-[16px] font-extrabold ${textColor}`}>点击完成任务</span>
                           {lineRoomPhotoCategory(task, subColor)}
+                          {noteBlock(task)}
                           {pixelHMSBlock(effSec, textColor)}
                           <div className="absolute bottom-0 left-0 right-0 h-1 overflow-hidden">
                             <div className={`h-full w-[200%] bg-gradient-to-r ${barFrom} ${barTo} ${barFrom} animate-[shimmer_2s_linear_infinite]`} />
@@ -2704,6 +2807,73 @@ export default function PhotographerPage() {
                           <div className="h-full rounded-full bg-gradient-to-r from-orange-400 to-orange-500" style={{ width: `${task.progress}%` }} />
                         </div>
                       )}
+                      {/* 备注区域 */}
+                      {editingNoteTaskId === task.id ? (
+                        <div className="mt-1.5" onClick={(e) => e.stopPropagation()}>
+                          <input
+                            autoFocus
+                            className="w-full text-[10px] px-2 py-1 rounded-lg border border-orange-200/60 bg-white/60 outline-none focus:border-orange-400/60 text-[--text-primary] placeholder:text-gray-400"
+                            placeholder="添加备注..."
+                            value={editingNoteValue}
+                            maxLength={100}
+                            onChange={(e) => setEditingNoteValue(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter") {
+                                void handleSaveNote(task.id, editingNoteValue);
+                                setEditingNoteTaskId(null);
+                              } else if (e.key === "Escape") {
+                                setEditingNoteTaskId(null);
+                              }
+                            }}
+                            onBlur={() => {
+                              void handleSaveNote(task.id, editingNoteValue);
+                              setEditingNoteTaskId(null);
+                            }}
+                          />
+                        </div>
+                      ) : (() => {
+                        const rawNote = taskListRaw.find((x) => x.id === task.id)?.note;
+                        const isPhotographer = !isAssistantRole(profile?.role);
+                        if (rawNote) {
+                          return (
+                            <div
+                              className="mt-0.5 flex items-center gap-1 group/note min-w-0"
+                              onClick={(e) => e.stopPropagation()}
+                            >
+                              <svg className="shrink-0 text-orange-400" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+                              <div className="note-marquee-container">
+                                <span
+                                  className={`text-[10px] text-orange-500/80 note-marquee leading-none ${isPhotographer ? "cursor-pointer" : ""}`}
+                                  title={rawNote}
+                                  onClick={isPhotographer ? () => { setEditingNoteValue(rawNote); setEditingNoteTaskId(task.id); } : undefined}
+                                >
+                                  {rawNote}
+                                </span>
+                              </div>
+                              {isPhotographer && (
+                                <button
+                                  className="shrink-0 opacity-0 group-hover/note:opacity-100 transition-opacity"
+                                  title="删除备注"
+                                  onClick={(e) => { e.stopPropagation(); void handleSaveNote(task.id, ""); }}
+                                >
+                                  <svg width="12" height="12" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" fill="#ef4444"/><line x1="8" y1="12" x2="16" y2="12" stroke="white" strokeWidth="2.5" strokeLinecap="round"/></svg>
+                                </button>
+                              )}
+                            </div>
+                          );
+                        }
+                        if (isPhotographer && task.statusLabel !== "已完成") {
+                          return (
+                            <button
+                              className="mt-1 text-[9px] text-gray-400 hover:text-orange-500 transition-colors"
+                              onClick={(e) => { e.stopPropagation(); setEditingNoteValue(""); setEditingNoteTaskId(task.id); }}
+                            >
+                              + 添加备注
+                            </button>
+                          );
+                        }
+                        return null;
+                      })()}
                     </div>
                   );
                 })}
@@ -3334,7 +3504,7 @@ export default function PhotographerPage() {
         </div>
       )}
 
-      <AssistantDock assistants={assistants} />
+      <AssistantDock assistants={assistants} onNoteEdit={(taskId, note) => { setNotePopupTaskId(taskId); setNotePopupValue(note); }} />
     </div>
   );
 }

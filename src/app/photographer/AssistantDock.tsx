@@ -22,6 +22,10 @@ export interface DockAssistant {
   newTaskDesc: string | null;
   resumingFromPause: boolean;
   pendingRoom: string | null;   // 待执行插单任务的房间（蓝脉冲标记位置，旧任务未暂停时）
+  /** 当前活跃任务的备注（用于地图 tooltip 和点击弹窗） */
+  currentTaskNote: string | null;
+  /** 当前活跃任务的 ID（用于地图点击弹窗保存备注） */
+  currentTaskId: string | null;
   /** 主标记进行中任务超过类别时段上限的超出分钟数，未超时为 null */
   executingOvertimeMin: number | null;
   /** 灰色暂停标记任务超过时段上限的超出分钟数 */
@@ -94,7 +98,7 @@ function getSizes(count: number, mouseY: number): number[] {
   return sizes;
 }
 
-export default function AssistantDock({ assistants }: { assistants: DockAssistant[] }) {
+export default function AssistantDock({ assistants, onNoteEdit }: { assistants: DockAssistant[]; onNoteEdit?: (taskId: string, note: string) => void }) {
   const [mouseY, setMouseY] = useState(-1);
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -200,6 +204,12 @@ export default function AssistantDock({ assistants }: { assistants: DockAssistan
                           <>
                             <p className="text-xs font-semibold" style={{ color: headerColor }}>{a.name} · {cfg.label}</p>
                             <p className="text-[10px] text-[--text-muted] mt-0.5">{a.currentRoom ? `${a.currentRoom}室` : "—"}</p>
+                            {a.currentTaskNote && (
+                              <p className="text-[10px] text-orange-500 mt-0.5 flex items-center gap-1">
+                                <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+                                {a.currentTaskNote}
+                              </p>
+                            )}
                           </>
                         );
                       }
@@ -212,9 +222,17 @@ export default function AssistantDock({ assistants }: { assistants: DockAssistan
                           <div key={i} className={i > 0 ? "mt-1.5 pt-1.5 border-t border-white/20" : ""}>
                             <p className="text-xs font-semibold" style={{ color: headerColor }}>{a.name} · {cfg.label}{elapsedText}</p>
                             <p className="text-[10px] text-[--text-muted] mt-0.5">{detail}</p>
+                            {i === 0 && a.currentTaskNote && (
+                              <p className="text-[10px] text-orange-500 mt-0.5 flex items-center gap-1">
+                                <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+                                {a.currentTaskNote}
+                              </p>
+                            )}
                           </div>
                         );
-                      });
+                      }).concat(
+                        []
+                      );
                     })()}
                   </div>
                 </div>
@@ -229,6 +247,7 @@ export default function AssistantDock({ assistants }: { assistants: DockAssistan
                       : "0 2px 8px rgba(0,0,0,0.1), 0 0 0 1.5px rgba(255,255,255,0.5)",
                     transition: "box-shadow 0.15s ease-out",
                   }}
+                  onClick={() => { if (a.currentTaskId && onNoteEdit) onNoteEdit(a.currentTaskId, a.currentTaskNote ?? ""); }}
                 >
                   {a.avatar ? (
                     <img

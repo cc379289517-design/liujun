@@ -280,9 +280,18 @@ export async function PATCH(request: NextRequest, { params }: RouteContext) {
         return Response.json(updated);
       }
 
+      case "updateNote": {
+        const { note } = body as { note: string };
+        const updated = await prisma.bookingTask.update({
+          where: { id },
+          data: { note: note?.trim() || null },
+        });
+        return Response.json(updated);
+      }
+
       default:
         return Response.json(
-          { error: "Invalid action. Use: start, pause, complete, extend, setStatus" },
+          { error: "Invalid action. Use: start, pause, complete, extend, setStatus, updateNote" },
           { status: 400 }
         );
     }
