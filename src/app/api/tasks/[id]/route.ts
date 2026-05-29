@@ -1,19 +1,11 @@
 import { NextRequest } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { completeTask, assignTask, sweepWaitingTasks } from "@/lib/scheduler";
+import { completeTask, assignTask, sweepWaitingTasks, syncProfileStatus, updateTaskParticipantStatus } from "@/lib/scheduler";
 import { TaskStatus, ProfileStatus } from "@/generated/prisma/client";
 import { Prisma } from "@/generated/prisma/client";
 import { flushExecutingSegment } from "@/lib/taskEffectiveTime";
 
 type RouteContext = { params: Promise<{ id: string }> };
-
-/** 避免 DB/迁移产生的非法日期经 Prisma 写回时报错 */
-function coerceValidDate(value: Date | string | null | undefined): Date | null {
-  if (value == null) return null;
-  const d = value instanceof Date ? value : new Date(value);
-  const t = d.getTime();
-  return Number.isFinite(t) ? d : null;
-}
 
 /**
  * GET /api/tasks/[id] - 获取单个任务详情
@@ -30,6 +22,12 @@ export async function GET(_request: NextRequest, { params }: RouteContext) {
         category: true,
         parentTask: true,
         interruptTasks: true,
+        collaborators: {
+          where: { status: { not: "left" } },
+          include: {
+            assistant: { select: { id: true, name: true, currentRoom: true, avatar: true, buildingId: true } },
+          },
+        },
       },
     });
 
@@ -51,20 +49,25 @@ export async function DELETE(_request: NextRequest, { params }: RouteContext) {
   try {
     const { id } = await params;
 
-    const task = await prisma.bookingTask.findUnique({ where: { id } });
+    const task = await prisma.bookingTask.findUnique({
+      where: { id },
+      include: { collaborators: { where: { status: { in: ["waiting", "executing", "paused"] } }, select: { assistantId: true } } },
+    });
     if (!task) {
       return Response.json({ error: "Task not found" }, { status: 404 });
     }
 
-    // 如果任务有分配的助理，将助理状态恢复为 idle
-    if (task.assistantId) {
-      await prisma.profile.update({
-        where: { id: task.assistantId },
+    const releasedIds = [task.assistantId, ...task.collaborators.map((c) => c.assistantId)]
+      .filter((id): id is string => id != null);
+    if (releasedIds.length > 0) {
+      await prisma.profile.updateMany({
+        where: { id: { in: releasedIds } },
         data: { status: ProfileStatus.idle },
       });
     }
 
     await prisma.bookingTask.delete({ where: { id } });
+    await syncProfileStatus();
 
     // 助理释放后，扫描等待队列自动派单
     await sweepWaitingTasks();
@@ -84,7 +87,7 @@ export async function PATCH(request: NextRequest, { params }: RouteContext) {
   try {
     const { id } = await params;
     const body = await request.json();
-    const { action, estMinutes } = body;
+    const { action, estMinutes, actorAssistantId } = body;
 
     const task = await prisma.bookingTask.findUnique({ where: { id } });
     if (!task) {
@@ -93,85 +96,34 @@ export async function PATCH(request: NextRequest, { params }: RouteContext) {
 
     switch (action) {
       case "start": {
-        const estEndTime = estMinutes
-          ? new Date(Date.now() + estMinutes * 60 * 1000)
-          : task.estEndTime;
-
-        // 暂停后恢复执行：保留首次合法开始时间；有效工时从新片段累计
-        const startedAt = coerceValidDate(task.startedAt) ?? new Date();
-        const segmentStart = new Date();
-
-        // 事务：任务与助理状态一致更新（仅更新任务而 profile.update 失败时曾导致 500 且状态分裂）
-        const updated = await prisma.$transaction(async (tx) => {
-          const row = await tx.bookingTask.update({
-            where: { id },
-            data: {
-              status: TaskStatus.executing,
-              startedAt,
-              workSegmentStartedAt: segmentStart,
-              estEndTime,
-              // 重新开跑时清除暂停锚点，避免脏数据
-              pausedAt: null,
-            },
-          });
-          if (task.assistantId) {
-            const { count } = await tx.profile.updateMany({
-              where: { id: task.assistantId },
-              data: { status: ProfileStatus.executing },
-            });
-            if (count === 0) {
-              throw new Error(`助理不存在或已删除: ${task.assistantId}`);
-            }
-          }
-          return row;
-        });
+        const actorId = actorAssistantId ?? task.assistantId;
+        if (!actorId) {
+          return Response.json({ error: "actorAssistantId required for start" }, { status: 400 });
+        }
+        await updateTaskParticipantStatus(id, actorId, "executing", estMinutes);
+        const updated = await prisma.bookingTask.findUnique({ where: { id } });
 
         return Response.json(updated);
       }
 
       case "pause": {
-        // 检查该助理是否有等待中的插单任务（有则改为 assigned，否则 busy）
-        let profileStatus: ProfileStatus = ProfileStatus.busy;
-        if (task.assistantId) {
-          const waitingInterrupt = await prisma.bookingTask.findFirst({
-            where: {
-              assistantId: task.assistantId,
-              status: TaskStatus.waiting,
-              parentTaskId: { not: null },
-            },
-          });
-          if (waitingInterrupt) profileStatus = ProfileStatus.assigned;
+        const actorId = actorAssistantId ?? task.assistantId;
+        if (!actorId) {
+          return Response.json({ error: "actorAssistantId required for pause" }, { status: 400 });
         }
-
-        const flushed = flushExecutingSegment({
-          effectiveWorkSeconds: task.effectiveWorkSeconds,
-          workSegmentStartedAt: task.workSegmentStartedAt,
-          startedAt: task.startedAt,
-          status: task.status,
-        });
-
-        const updated = await prisma.bookingTask.update({
-          where: { id },
-          data: {
-            status: TaskStatus.paused,
-            pausedAt: new Date(),
-            effectiveWorkSeconds: flushed.effectiveWorkSeconds,
-            workSegmentStartedAt: null,
-          },
-        });
-
-        if (task.assistantId) {
-          await prisma.profile.update({
-            where: { id: task.assistantId },
-            data: { status: profileStatus },
-          });
-        }
+        await updateTaskParticipantStatus(id, actorId, "paused");
+        const updated = await prisma.bookingTask.findUnique({ where: { id } });
 
         return Response.json(updated);
       }
 
       case "complete": {
-        await completeTask(id);
+        const actorId = actorAssistantId ?? task.assistantId;
+        if (actorId) {
+          await updateTaskParticipantStatus(id, actorId, "completed");
+        } else {
+          await completeTask(id);
+        }
         const updated = await prisma.bookingTask.findUnique({ where: { id } });
         return Response.json(updated);
       }
@@ -261,6 +213,7 @@ export async function PATCH(request: NextRequest, { params }: RouteContext) {
         if (newStatus === "waiting" && !task.assistantId) {
           await assignTask(id);
         }
+        await syncProfileStatus();
 
         return Response.json(updated);
       }

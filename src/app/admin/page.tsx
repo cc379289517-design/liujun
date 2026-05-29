@@ -137,7 +137,7 @@ export default function AdminPage() {
               <>
                 {tab === "profiles" && <ProfilesTab profiles={profiles} buildings={buildings} onRefresh={fetchData} />}
                 {tab === "spaces" && <SpaceTab buildings={buildings} onRefresh={fetchData} />}
-                {tab === "tasks" && <TaskLogicTab categories={categories} config={config} onRefresh={fetchData} />}
+                {tab === "tasks" && <TaskLogicTab categories={categories} buildings={buildings} config={config} onRefresh={fetchData} />}
                 {tab === "approvals" && <ApprovalTab config={config} onRefresh={fetchData} />}
                 {tab === "stats" && <StatsTab />}
               </>

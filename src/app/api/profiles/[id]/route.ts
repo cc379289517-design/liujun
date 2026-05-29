@@ -1,6 +1,6 @@
 import { NextRequest } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { ProfileStatus } from "@/generated/prisma/client";
+import { ProfileStatus, TaskStatus } from "@/generated/prisma/client";
 import { sweepWaitingTasks } from "@/lib/scheduler";
 
 type RouteContext = { params: Promise<{ id: string }> };
@@ -69,7 +69,7 @@ export async function PATCH(request: NextRequest, { params }: RouteContext) {
     // 记录更新前的状态，用于判断是否需要触发自动派单
     const before = await prisma.profile.findUnique({
       where: { id },
-      select: { status: true, onlineStatus: true, subStatus: true, role: true },
+      select: { status: true, onlineStatus: true, subStatus: true, role: true, buildingId: true },
     });
 
     // 助理/助理组长在任务中时，不允许切换在线状态
@@ -91,11 +91,47 @@ export async function PATCH(request: NextRequest, { params }: RouteContext) {
       );
     }
 
-    const updated = await prisma.profile.update({
-      where: { id },
-      data,
-      include: { building: { select: { id: true, name: true, extraVenues: true } } },
+    const nextBuildingId =
+      buildingId !== undefined ? parseInt(String(buildingId)) : undefined;
+    const isAssistant =
+      before && ["assistant", "assistant_leader"].includes(before.role);
+    const isBuildingChange =
+      isAssistant &&
+      nextBuildingId !== undefined &&
+      Number.isFinite(nextBuildingId) &&
+      nextBuildingId !== before.buildingId;
+    let shouldSweep = false;
+
+    if (
+      isBuildingChange &&
+      (before.status === ProfileStatus.executing || before.status === ProfileStatus.finishing)
+    ) {
+      return Response.json(
+        { error: "助理进行中时不能切换楼座" },
+        { status: 400 }
+      );
+    }
+
+    let updated = await prisma.$transaction(async (tx) => {
+      if (isBuildingChange && before.status === ProfileStatus.assigned) {
+        await tx.bookingTask.updateMany({
+          where: { assistantId: id, status: TaskStatus.waiting },
+          data: { assistantId: null, parentTaskId: null },
+        });
+        const pausedCount = await tx.bookingTask.count({
+          where: { assistantId: id, status: TaskStatus.paused },
+        });
+        data.status = pausedCount > 0 ? ProfileStatus.busy : ProfileStatus.idle;
+        shouldSweep = true;
+      }
+
+      return tx.profile.update({
+        where: { id },
+        data,
+        include: { building: { select: { id: true, name: true, extraVenues: true } } },
+      });
     });
+    if (isBuildingChange) shouldSweep = true;
 
     // 助理变为可用状态时，自动扫描等待中的任务进行派单
     if (before && ["assistant", "assistant_leader"].includes(before.role)) {
@@ -103,10 +139,17 @@ export async function PATCH(request: NextRequest, { params }: RouteContext) {
       const nowAvailable = updated.status === ProfileStatus.idle && updated.onlineStatus === "online" && !updated.subStatus;
 
       if (!wasAvailable && nowAvailable) {
-        sweepWaitingTasks().catch((err) =>
-          console.error("[PATCH /api/profiles/[id]] sweep failed:", err)
-        );
+        shouldSweep = true;
       }
+    }
+
+    if (shouldSweep) {
+      await sweepWaitingTasks();
+      const fresh = await prisma.profile.findUnique({
+        where: { id },
+        include: { building: { select: { id: true, name: true, extraVenues: true } } },
+      });
+      if (fresh) updated = fresh;
     }
 
     return Response.json(updated);

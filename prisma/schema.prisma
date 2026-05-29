@@ -99,6 +99,7 @@ model Profile {
   // 关系
   createdTasks  BookingTask[] @relation("TaskPhotographer")
   assignedTasks BookingTask[] @relation("TaskAssistant")
+  collaboratedTasks TaskCollaborator[]
 
   @@map("profiles")
 }
@@ -179,6 +180,7 @@ model BookingTask {
   parentTaskId    String?     @map("parent_task_id") // 被插单的原任务
   parentTask      BookingTask? @relation("TaskInterrupt", fields: [parentTaskId], references: [id])
   interruptTasks  BookingTask[] @relation("TaskInterrupt")
+  collaborators   TaskCollaborator[]
 
   // 关系
   photographer    Profile      @relation("TaskPhotographer", fields: [photographerId], references: [id])
@@ -189,4 +191,29 @@ model BookingTask {
   @@index([assistantId, status])
   @@index([photographerId])
   @@map("booking_tasks")
+}
+
+// ============================================
+// 任务协作助理表
+// ============================================
+model TaskCollaborator {
+  id          String      @id @default(uuid())
+  taskId      String      @map("task_id")
+  assistantId String      @map("assistant_id")
+  role        String      @default("helper")
+  status      String      @default("waiting")
+  joinedAt    DateTime    @default(now()) @map("joined_at")
+  leftAt      DateTime?   @map("left_at")
+  startedAt   DateTime?   @map("started_at")
+  completedAt DateTime?   @map("completed_at")
+  effectiveWorkSeconds Int       @default(0) @map("effective_work_seconds")
+  workSegmentStartedAt DateTime? @map("work_segment_started_at")
+
+  task      BookingTask @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  assistant Profile     @relation(fields: [assistantId], references: [id])
+
+  @@unique([taskId, assistantId])
+  @@index([assistantId, status])
+  @@index([taskId, status])
+  @@map("task_collaborators")
 }

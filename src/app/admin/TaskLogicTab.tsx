@@ -1,6 +1,12 @@
 "use client";
 
 import { useState, useRef, useEffect } from "react";
+import {
+  collaborationEnabledConfigKey,
+  collaborationMaxParticipantsConfigKey,
+  parseCollaborationEnabled,
+  parseCollaborationMaxParticipants,
+} from "@/lib/collaborationRules";
 
 const P1_DISPATCH_CFG_KEY = "p1_interrupt_dispatch_mode";
 type P1DispatchUi = "priority_tier_rr" | "flat_round_robin";
@@ -34,9 +40,11 @@ type Category = {
 };
 
 type SystemConfigMap = Record<string, { value: string; label: string | null }>;
+type Building = { id: number; name: string };
 
 interface Props {
   categories: Category[];
+  buildings: Building[];
   config: SystemConfigMap;
   onRefresh: () => void;
 }
@@ -113,7 +121,7 @@ type EditForm = {
   maxInterruptMinutes: number | null;
 };
 
-export default function TaskLogicTab({ categories: initCategories, config, onRefresh }: Props) {
+export default function TaskLogicTab({ categories: initCategories, buildings, config, onRefresh }: Props) {
   const [localCats, setLocalCats] = useState<Category[]>(initCategories);
   const [upgradeThreshold, setUpgradeThreshold] = useState(
     Number(config.upgrade_threshold?.value ?? 30)
@@ -126,6 +134,20 @@ export default function TaskLogicTab({ categories: initCategories, config, onRef
     return init;
   });
   const debounceTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+  const [collaborationEnabledByBuilding, setCollaborationEnabledByBuilding] = useState<Record<number, boolean>>(() => {
+    const init: Record<number, boolean> = {};
+    for (const building of buildings) {
+      init[building.id] = parseCollaborationEnabled(config[collaborationEnabledConfigKey(building.id)]?.value);
+    }
+    return init;
+  });
+  const [collaborationMaxByBuilding, setCollaborationMaxByBuilding] = useState<Record<number, number>>(() => {
+    const init: Record<number, number> = {};
+    for (const building of buildings) {
+      init[building.id] = parseCollaborationMaxParticipants(config[collaborationMaxParticipantsConfigKey(building.id)]?.value);
+    }
+    return init;
+  });
 
   const [confirmDeleteId, setConfirmDeleteId] = useState<number | null>(null);
   const [editingId, setEditingId] = useState<number | null>(null);
@@ -312,10 +334,58 @@ export default function TaskLogicTab({ categories: initCategories, config, onRef
   );
 
   useEffect(() => {
+    setCollaborationEnabledByBuilding(() => {
+      const next: Record<number, boolean> = {};
+      for (const building of buildings) {
+        next[building.id] = parseCollaborationEnabled(config[collaborationEnabledConfigKey(building.id)]?.value);
+      }
+      return next;
+    });
+    setCollaborationMaxByBuilding(() => {
+      const next: Record<number, number> = {};
+      for (const building of buildings) {
+        next[building.id] = parseCollaborationMaxParticipants(config[collaborationMaxParticipantsConfigKey(building.id)]?.value);
+      }
+      return next;
+    });
+  }, [buildings, config]);
+
+  useEffect(() => {
     setP1DispatchMode(
       config[P1_DISPATCH_CFG_KEY]?.value === "flat_round_robin" ? "flat_round_robin" : "priority_tier_rr"
     );
   }, [config[P1_DISPATCH_CFG_KEY]?.value]);
+
+  const saveCollaborationEnabled = async (buildingId: number, enabled: boolean) => {
+    const previousEnabled = collaborationEnabledByBuilding[buildingId] ?? true;
+    setCollaborationEnabledByBuilding((prev) => ({ ...prev, [buildingId]: enabled }));
+    try {
+      const response = await fetch("/api/config", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ [collaborationEnabledConfigKey(buildingId)]: enabled }),
+      });
+      if (!response.ok) throw new Error("Failed to save collaboration setting");
+    } catch {
+      setCollaborationEnabledByBuilding((prev) => ({ ...prev, [buildingId]: previousEnabled }));
+    }
+  };
+
+  const saveCollaborationMax = async (buildingId: number, value: number) => {
+    const maxParticipants = parseCollaborationMaxParticipants(String(value));
+    const previousValue = collaborationMaxByBuilding[buildingId] ?? 3;
+    setCollaborationMaxByBuilding((prev) => ({ ...prev, [buildingId]: maxParticipants }));
+    try {
+      const response = await fetch("/api/config", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ [collaborationMaxParticipantsConfigKey(buildingId)]: maxParticipants }),
+      });
+      if (!response.ok) throw new Error("Failed to save collaboration max participants");
+    } catch {
+      setCollaborationMaxByBuilding((prev) => ({ ...prev, [buildingId]: previousValue }));
+    }
+  };
 
   const saveP1DispatchMode = async (mode: P1DispatchUi) => {
     setP1DispatchMode(mode);
@@ -423,10 +493,16 @@ export default function TaskLogicTab({ categories: initCategories, config, onRef
                               </svg>
                               <span className="text-xs font-medium truncate">{cat.name}</span>
                             </button>
-                            <span className="text-[11px] shrink-0 mx-1">{durationLabel(cat.minDuration, cat.maxDuration)}</span>
                             {cat.canBeInterrupted && cat.maxInterruptMinutes ? (
-                              <span className="text-[9px] px-1 py-0.5 rounded bg-purple-100 text-purple-500 shrink-0 mr-1" title={`最大离场 ${cat.maxInterruptMinutes} 分钟`}>⏱{cat.maxInterruptMinutes}m</span>
+                              <span
+                                className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded bg-purple-100 text-purple-500 shrink-0 mx-1"
+                                title={`可插单离场 ${cat.maxInterruptMinutes} 分钟`}
+                              >
+                                <span className="text-[9px] leading-none">可插单离场</span>
+                                <span className="text-[11px] font-semibold leading-none">⏱{cat.maxInterruptMinutes}m</span>
+                              </span>
                             ) : null}
+                            <span className="text-[11px] shrink-0 mr-1">{durationLabel(cat.minDuration, cat.maxDuration)}</span>
                             <button
                               type="button"
                               onClick={() => setConfirmDeleteId(cat.id)}
@@ -507,8 +583,11 @@ export default function TaskLogicTab({ categories: initCategories, config, onRef
         <div className="space-y-2">
           <div className="card p-4">
             <div className="flex items-center justify-between mb-2">
-              <span className="text-xs text-[--text-secondary]">队列中任务等待多久进行优先级提权</span>
+              <span className="text-xs text-[--text-secondary]">未分配队列任务等待多久进行优先级提权</span>
             </div>
+            <p className="mb-2 text-[10px] leading-relaxed text-[--text-muted]">
+              只作用于还没有派给助理的任务；已派发待就位任务不再参与普通队列提权。
+            </p>
             <div className="flex items-center gap-2">
               <input
                 type="range"
@@ -522,6 +601,26 @@ export default function TaskLogicTab({ categories: initCategories, config, onRef
               <span className="text-sm font-medium text-[--text-primary] w-14 text-right">{upgradeThreshold} 分钟</span>
             </div>
           </div>
+
+          {PARAM_DEFS.map((def) => (
+            <div key={def.key} className="card p-4">
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-xs text-[--text-secondary]">{def.label}</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <input
+                  type="range"
+                  min={def.min}
+                  max={def.max}
+                  step={def.step}
+                  value={params[def.key]}
+                  onChange={(e) => handleParamChange(def.key, Number(e.target.value))}
+                  className="flex-1 accent-purple-500"
+                />
+                <span className="text-sm font-medium text-[--text-primary] w-14 text-right">{params[def.key]} 分钟</span>
+              </div>
+            </div>
+          ))}
 
           <div className="card p-4 space-y-3">
             <div>
@@ -568,25 +667,76 @@ export default function TaskLogicTab({ categories: initCategories, config, onRef
             </div>
           </div>
 
-          {PARAM_DEFS.map((def) => (
-            <div key={def.key} className="card p-4">
-              <div className="flex items-center justify-between mb-2">
-                <span className="text-xs text-[--text-secondary]">{def.label}</span>
-              </div>
-              <div className="flex items-center gap-2">
-                <input
-                  type="range"
-                  min={def.min}
-                  max={def.max}
-                  step={def.step}
-                  value={params[def.key]}
-                  onChange={(e) => handleParamChange(def.key, Number(e.target.value))}
-                  className="flex-1 accent-purple-500"
-                />
-                <span className="text-sm font-medium text-[--text-primary] w-14 text-right">{params[def.key]} 分钟</span>
-              </div>
+          <div className="card p-4 space-y-3">
+            <div>
+              <h4 className="text-xs font-semibold text-[--text-primary]">多人协作规则</h4>
+              <p className="mt-1 truncate text-[10px] leading-relaxed text-[--text-muted]">
+                按大区单独控制 30 分钟以上任务是否允许添加协作助理；关闭后不再开放新增协作，已存在的协作状态仍可展示和移除。
+              </p>
             </div>
-          ))}
+            <div className="space-y-1.5">
+              {buildings.length === 0 ? (
+                <p className="text-[10px] text-[--text-muted]">暂无大区数据</p>
+              ) : (
+                buildings.map((building) => {
+                  const enabled = collaborationEnabledByBuilding[building.id] ?? true;
+                  const maxParticipants = collaborationMaxByBuilding[building.id] ?? 3;
+                  return (
+                    <div key={building.id} className="flex min-h-10 items-center justify-between gap-3 rounded-lg border border-gray-100 bg-gray-50/70 px-3 py-1.5">
+                      <div className="flex min-w-0 items-center gap-3">
+                        <p className="shrink-0 text-xs font-semibold text-[--text-secondary]">{building.name}</p>
+                        <p className="truncate text-[10px] font-medium text-gray-600">
+                          {enabled ? "允许多人协作" : "关闭多人协作"}
+                        </p>
+                      </div>
+                      <div className="flex shrink-0 items-center gap-2">
+                        <div className="group relative">
+                          <button
+                            type="button"
+                            disabled={!enabled}
+                            className="flex h-7 w-16 items-center justify-center gap-0.5 rounded-lg border border-gray-200 bg-white text-[10px] font-semibold text-[--text-muted] shadow-sm transition-colors disabled:bg-gray-100 disabled:text-gray-400"
+                            title="鼠标移入选择人数上限"
+                          >
+                            <span>最多</span>
+                            <span className="text-xs font-extrabold text-[--text-primary] group-disabled:text-gray-400">{maxParticipants}</span>
+                            <span>人</span>
+                          </button>
+                          {enabled && (
+                            <div className="absolute right-0 top-full z-20 hidden pt-1 group-hover:block">
+                              <div className="flex w-14 flex-col gap-1 rounded-xl border border-gray-100 bg-white p-1.5 shadow-lg">
+                                {[2, 3, 4].map((value) => (
+                                  <button
+                                    key={value}
+                                    type="button"
+                                    onClick={() => saveCollaborationMax(building.id, value)}
+                                    className={`flex h-6 items-center justify-center rounded-md px-2 text-[10px] font-bold transition-colors ${
+                                      value === maxParticipants
+                                        ? "bg-purple-500 text-white"
+                                        : "text-[--text-secondary] hover:bg-purple-50 hover:text-purple-600"
+                                    }`}
+                                  >
+                                    {value}人
+                                  </button>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => saveCollaborationEnabled(building.id, !enabled)}
+                          className={`relative h-5 w-10 shrink-0 overflow-hidden rounded-full transition-colors ${enabled ? "bg-emerald-500" : "bg-gray-300"}`}
+                          title={enabled ? "关闭多人协作规则" : "开启多人协作规则"}
+                        >
+                          <span className={`absolute left-0.5 top-0.5 h-4 w-4 rounded-full bg-white shadow transition-transform ${enabled ? "translate-x-5" : "translate-x-0"}`} />
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+          </div>
         </div>
       </div>
     </div>

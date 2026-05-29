@@ -14,6 +14,7 @@ import {
   cleanupStaleTasks,
   syncProfileStatus,
   escalatePriorities,
+  taskCategoryCanBeInterrupted,
 } from "@/lib/scheduler";
 
 const TASK_INCLUDE = {
@@ -27,6 +28,12 @@ const TASK_INCLUDE = {
       estDuration: true,
       minDuration: true,
       maxDuration: true,
+    },
+  },
+  collaborators: {
+    where: { status: { not: "left" } },
+    include: {
+      assistant: { select: { id: true, name: true, currentRoom: true, avatar: true, buildingId: true } },
     },
   },
 } as const;
@@ -49,7 +56,12 @@ export async function GET(request: NextRequest) {
     if (status) where.status = status;
     if (priority) where.priority = parseInt(priority);
     if (photographerId) where.photographerId = photographerId;
-    if (assistantId) where.assistantId = assistantId;
+    if (assistantId) {
+      where.OR = [
+        { assistantId },
+        { collaborators: { some: { assistantId, status: { not: "left" } } } },
+      ];
+    }
 
     // 只返回今天的任务（基于 createdAt，过了24点自动不显示昨天的）
     if (todayOnly === "true") {
@@ -109,14 +121,17 @@ export async function DELETE(request: NextRequest) {
     // 排除已完成的任务，只清空进行中/等待中的
     where.status = { not: TaskStatus.completed };
 
-    // 先释放被分配的助理
+    // 先释放被分配的助理与协作助理
     const tasksToDelete = await prisma.bookingTask.findMany({
       where,
-      select: { assistantId: true },
+      select: {
+        assistantId: true,
+        collaborators: { where: { status: { in: ["waiting", "executing", "paused"] } }, select: { assistantId: true } },
+      },
     });
 
     const assistantIds = tasksToDelete
-      .map((t) => t.assistantId)
+      .flatMap((t) => [t.assistantId, ...t.collaborators.map((c) => c.assistantId)])
       .filter((id): id is string => id !== null);
 
     if (assistantIds.length > 0) {
@@ -127,6 +142,7 @@ export async function DELETE(request: NextRequest) {
     }
 
     const result = await prisma.bookingTask.deleteMany({ where });
+    await syncProfileStatus();
 
     // 助理释放后，扫描等待队列自动派单
     await sweepWaitingTasks();
@@ -202,6 +218,25 @@ export async function POST(request: NextRequest) {
       include: TASK_INCLUDE,
     });
 
+    if (isSpecified && assistantId) {
+      await prisma.$transaction([
+        prisma.taskCollaborator.upsert({
+          where: { taskId_assistantId: { taskId: task.id, assistantId } },
+          create: { taskId: task.id, assistantId, role: "primary", status: "waiting" },
+          update: { role: "primary", status: "waiting", leftAt: null },
+        }),
+        prisma.profile.update({
+          where: { id: assistantId },
+          data: { status: "assigned" },
+        }),
+      ]);
+      const updated = await prisma.bookingTask.findUnique({
+        where: { id: task.id },
+        include: TASK_INCLUDE,
+      });
+      return Response.json(updated ?? task, { status: 201 });
+    }
+
     // 自动派单（非指定助理模式）：先空闲助理；无空闲则对「更紧急的短时单」尝试插单
     if (!isSpecified) {
       const buildingId = task.photographer.buildingId;
@@ -247,11 +282,11 @@ export async function POST(request: NextRequest) {
           assistantId: { in: busyAssistants.map((a) => a.id) },
           status: TaskStatus.executing,
         },
-        include: { category: { select: { canBeInterrupted: true, maxInterruptMinutes: true } } },
+        include: { category: { select: { canBeInterrupted: true, maxDuration: true, maxInterruptMinutes: true } } },
       });
 
       const filteredCandidates = assistantCurrentTasks.filter((t) => {
-        if (t.isLocked || !t.category.canBeInterrupted) return false;
+        if (t.isLocked || !taskCategoryCanBeInterrupted(t.category)) return false;
         // 当前执行单须比新单「更低优先」（数值更大），P1 进行中不可作为被插对象
         if (t.priority <= taskPriority) return false;
         const cap = effectiveInterruptLeaveCapMinutes(globalInterruptCap, t.category.maxInterruptMinutes);

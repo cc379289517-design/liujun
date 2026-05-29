@@ -34,18 +34,21 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    const parsedMaxDuration = maxDuration != null ? parseInt(maxDuration) : 0;
+    const forceNonInterruptible = parsedMaxDuration > 0 && parsedMaxDuration <= 30;
+
     const category = await prisma.taskCategory.create({
       data: {
         name,
         description: description || null,
         priorityLevel: parseInt(priorityLevel),
         minDuration: minDuration != null ? parseInt(minDuration) : 0,
-        maxDuration: maxDuration != null ? parseInt(maxDuration) : 0,
+        maxDuration: parsedMaxDuration,
         estDuration: estDuration ? parseInt(estDuration) : undefined,
         hexColor: hexColor || null,
         sortRank: sortRank !== undefined ? parseInt(sortRank) : 0,
-        canBeInterrupted: canBeInterrupted !== undefined ? canBeInterrupted : true,
-        maxInterruptMinutes: maxInterruptMinutes != null ? parseInt(maxInterruptMinutes) : null,
+        canBeInterrupted: forceNonInterruptible ? false : canBeInterrupted !== undefined ? canBeInterrupted : true,
+        maxInterruptMinutes: forceNonInterruptible ? null : maxInterruptMinutes != null ? parseInt(maxInterruptMinutes) : null,
       },
     });
 

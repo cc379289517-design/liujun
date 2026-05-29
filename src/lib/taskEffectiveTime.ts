@@ -100,6 +100,33 @@ export function effectiveWorkMinutesFromApi(
   return Math.floor(totalEffectiveWorkSecondsFromApi(task, nowMs) / 60);
 }
 
+/** API/JSON 任务对象：暂停/离开的累计秒数 */
+export function totalPausedSecondsFromApi(
+  task: {
+    effectiveWorkSeconds?: number | null;
+    workSegmentStartedAt?: string | Date | null;
+    startedAt?: string | Date | null;
+    completedAt?: string | Date | null;
+    pausedAt?: string | Date | null;
+    status: string;
+  },
+  nowMs = Date.now()
+): number {
+  if (task.status !== "paused" && task.status !== "executing") return 0;
+
+  const startedAt = toDate(task.startedAt);
+  if (startedAt) {
+    const wallSeconds = Math.max(0, Math.floor((nowMs - startedAt.getTime()) / 1000));
+    const effectiveSeconds = totalEffectiveWorkSecondsFromApi(task, nowMs);
+    return Math.max(0, wallSeconds - effectiveSeconds);
+  }
+
+  if (task.status !== "paused") return 0;
+
+  const pausedAt = toDate(task.pausedAt);
+  return pausedAt ? Math.max(0, Math.floor((nowMs - pausedAt.getTime()) / 1000)) : 0;
+}
+
 /** 预约所选时段上限（分钟）：优先 category.maxDuration，否则 estDuration */
 export function taskSlotCapMinutes(
   cat: { maxDuration?: number; estDuration?: number } | undefined

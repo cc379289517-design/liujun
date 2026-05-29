@@ -70,6 +70,12 @@ export const STATUS: Record<string, { color: string; label: string }> = {
   executing: { color: DOCK_DOT.inProgress, label: "进行中" },
 };
 
+function formatRoomOrVenue(value: string | null | undefined): string {
+  if (!value) return "—";
+  if (value.endsWith("室")) return value;
+  return /^\d+$/.test(value) ? `${value}室` : value;
+}
+
 const BASE = 50;
 const MAX = 84;
 const GAP = 10;
@@ -98,7 +104,14 @@ function getSizes(count: number, mouseY: number): number[] {
   return sizes;
 }
 
-export default function AssistantDock({ assistants, onNoteEdit }: { assistants: DockAssistant[]; onNoteEdit?: (taskId: string, note: string) => void }) {
+export type NoteEditAnchor = {
+  top: number;
+  left: number;
+  width: number;
+  height: number;
+};
+
+export default function AssistantDock({ assistants, onNoteEdit }: { assistants: DockAssistant[]; onNoteEdit?: (taskId: string, note: string, anchor: NoteEditAnchor) => void }) {
   const [mouseY, setMouseY] = useState(-1);
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -194,7 +207,7 @@ export default function AssistantDock({ assistants, onNoteEdit }: { assistants: 
                         return (
                           <>
                             <p className="text-xs font-semibold text-gray-400">{a.name} · {offLabel}</p>
-                            <p className="text-[10px] text-[--text-muted] mt-0.5">{a.currentRoom ? `${a.currentRoom}室` : "—"}</p>
+                            <p className="text-[10px] text-[--text-muted] mt-0.5">{formatRoomOrVenue(a.currentRoom)}</p>
                           </>
                         );
                       }
@@ -203,11 +216,13 @@ export default function AssistantDock({ assistants, onNoteEdit }: { assistants: 
                         return (
                           <>
                             <p className="text-xs font-semibold" style={{ color: headerColor }}>{a.name} · {cfg.label}</p>
-                            <p className="text-[10px] text-[--text-muted] mt-0.5">{a.currentRoom ? `${a.currentRoom}室` : "—"}</p>
+                            <p className="text-[10px] text-[--text-muted] mt-0.5">{formatRoomOrVenue(a.currentRoom)}</p>
                             {a.currentTaskNote && (
-                              <p className="text-[10px] text-orange-500 mt-0.5 flex items-center gap-1">
-                                <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
-                                {a.currentTaskNote}
+                              <p className="text-[10px] text-orange-500 mt-0.5 flex items-start gap-1 whitespace-normal text-left max-w-[190px]">
+                                <svg className="shrink-0 mt-[1px]" width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+                                <span className="note-two-line leading-[1.25]" style={{ maxHeight: "2.5em", overflow: "hidden" }}>
+                                  {a.currentTaskNote}
+                                </span>
                               </p>
                             )}
                           </>
@@ -223,9 +238,11 @@ export default function AssistantDock({ assistants, onNoteEdit }: { assistants: 
                             <p className="text-xs font-semibold" style={{ color: headerColor }}>{a.name} · {cfg.label}{elapsedText}</p>
                             <p className="text-[10px] text-[--text-muted] mt-0.5">{detail}</p>
                             {i === 0 && a.currentTaskNote && (
-                              <p className="text-[10px] text-orange-500 mt-0.5 flex items-center gap-1">
-                                <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
-                                {a.currentTaskNote}
+                              <p className="text-[10px] text-orange-500 mt-0.5 flex items-start gap-1 whitespace-normal text-left max-w-[190px]">
+                                <svg className="shrink-0 mt-[1px]" width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+                                <span className="note-two-line leading-[1.25]" style={{ maxHeight: "2.5em", overflow: "hidden" }}>
+                                  {a.currentTaskNote}
+                                </span>
                               </p>
                             )}
                           </div>
@@ -247,7 +264,16 @@ export default function AssistantDock({ assistants, onNoteEdit }: { assistants: 
                       : "0 2px 8px rgba(0,0,0,0.1), 0 0 0 1.5px rgba(255,255,255,0.5)",
                     transition: "box-shadow 0.15s ease-out",
                   }}
-                  onClick={() => { if (a.currentTaskId && onNoteEdit) onNoteEdit(a.currentTaskId, a.currentTaskNote ?? ""); }}
+                  onClick={(e) => {
+                    if (!a.currentTaskId || !onNoteEdit) return;
+                    const rect = e.currentTarget.getBoundingClientRect();
+                    onNoteEdit(a.currentTaskId, a.currentTaskNote ?? "", {
+                      top: rect.top,
+                      left: rect.left,
+                      width: rect.width,
+                      height: rect.height,
+                    });
+                  }}
                 >
                   {a.avatar ? (
                     <img

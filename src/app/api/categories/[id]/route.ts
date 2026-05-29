@@ -24,6 +24,18 @@ export async function PATCH(request: NextRequest, { params }: RouteContext) {
     if (canBeInterrupted !== undefined) data.canBeInterrupted = canBeInterrupted;
     if (maxInterruptMinutes !== undefined) data.maxInterruptMinutes = maxInterruptMinutes !== null ? parseInt(String(maxInterruptMinutes)) : null;
 
+    const nextMaxDuration =
+      maxDuration !== undefined
+        ? parseInt(String(maxDuration))
+        : (await prisma.taskCategory.findUnique({
+            where: { id: parseInt(id) },
+            select: { maxDuration: true },
+          }))?.maxDuration;
+    if (nextMaxDuration != null && nextMaxDuration > 0 && nextMaxDuration <= 30) {
+      data.canBeInterrupted = false;
+      data.maxInterruptMinutes = null;
+    }
+
     const updated = await prisma.taskCategory.update({
       where: { id: parseInt(id) },
       data,
