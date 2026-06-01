@@ -390,6 +390,7 @@ function ProfileModal({
     group: profile?.group || "",
   });
   const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const avatarInputRef = useRef<HTMLInputElement>(null);
   const [avatarDragOver, setAvatarDragOver] = useState(false);
 
@@ -406,28 +407,43 @@ function ProfileModal({
     e.preventDefault();
     if (!form.name || !form.buildingId) return;
     setSaving(true);
+    setError(null);
 
     const payload = { ...form, buildingId: parseInt(form.buildingId) };
 
-    let res: Response;
-    if (profile) {
-      res = await fetch(`/api/profiles/${profile.id}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-    } else {
-      res = await fetch("/api/profiles", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-    }
+    try {
+      let res: Response;
+      if (profile) {
+        res = await fetch(`/api/profiles/${profile.id}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+      } else {
+        res = await fetch("/api/profiles", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+      }
 
-    const saved = await res.json();
-    setSaving(false);
-    onSaved(saved);
-    onClose();
+      const saved = await res.json().catch(() => null);
+      if (!res.ok) {
+        setError(saved?.error || "保存失败，请稍后重试");
+        return;
+      }
+      if (!saved?.id) {
+        setError("保存失败：接口没有返回人员信息");
+        return;
+      }
+      onSaved(saved);
+      onClose();
+    } catch (err) {
+      console.error("[ProfileModal] save failed", err);
+      setError("保存失败，请检查网络或稍后重试");
+    } finally {
+      setSaving(false);
+    }
   }
 
   return (
@@ -548,6 +564,11 @@ function ProfileModal({
               )}
             </div>
           </div>
+          {error && (
+            <div className="rounded-lg border border-red-100 bg-red-50 px-3 py-2 text-xs font-medium text-red-600">
+              {error}
+            </div>
+          )}
           <div className="flex gap-3 pt-2">
             <button
               type="button"

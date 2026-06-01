@@ -1,7 +1,7 @@
 import { NextRequest } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { TaskStatus } from "@/generated/prisma/client";
-import { isCollaborationEnabledForBuilding, syncProfileStatus, syncTaskAggregateFromParticipants } from "@/lib/scheduler";
+import { getCollaborationAvailabilityForBuilding, syncProfileStatus, syncTaskAggregateFromParticipants } from "@/lib/scheduler";
 import {
   collaborationMaxParticipantsConfigKey,
   parseCollaborationMaxParticipants,
@@ -9,6 +9,8 @@ import {
 } from "@/lib/collaborationRules";
 
 type RouteContext = { params: Promise<{ id: string }> };
+const ACTIVE_TASK_STATUSES = [TaskStatus.waiting, TaskStatus.executing, TaskStatus.paused] as const;
+const ACTIVE_PARTICIPANT_STATUSES = ["waiting", "executing", "paused"] as const;
 
 const TASK_WITH_COLLABORATORS_INCLUDE = {
   photographer: { select: { id: true, name: true, currentRoom: true, buildingId: true } },
@@ -39,6 +41,7 @@ export async function POST(request: NextRequest, { params }: RouteContext) {
   try {
     const { id } = await params;
     const body = await request.json();
+    const actorAssistantId = typeof body.actorAssistantId === "string" ? body.actorAssistantId : null;
     const requestedIds: string[] = Array.isArray(body.assistantIds)
       ? Array.from(new Set<string>(body.assistantIds.filter((v: unknown): v is string => typeof v === "string" && v.length > 0)))
       : [];
@@ -48,26 +51,50 @@ export async function POST(request: NextRequest, { params }: RouteContext) {
       include: {
         photographer: { select: { buildingId: true } },
         category: { select: { minDuration: true, maxDuration: true } },
-        collaborators: { where: { role: "helper", status: { not: "left" } }, select: { assistantId: true } },
+        collaborators: { where: { status: { not: "left" } }, select: { assistantId: true, role: true, status: true } },
       },
     });
     if (!task) return Response.json({ error: "Task not found" }, { status: 404 });
     if (task.status === TaskStatus.completed) {
       return Response.json({ error: "Completed task cannot add collaborators" }, { status: 400 });
     }
+    if (actorAssistantId) {
+      const primary = task.collaborators.find((c) => c.role === "primary" && c.assistantId === actorAssistantId);
+      const isActivePrimary =
+        task.assistantId === actorAssistantId &&
+        (!primary || ACTIVE_PARTICIPANT_STATUSES.includes(primary.status as typeof ACTIVE_PARTICIPANT_STATUSES[number]));
+      if (!isActivePrimary) {
+        return Response.json({ error: "Only the primary assistant can manage collaborators" }, { status: 403 });
+      }
+    }
+    const taskBuildingId = task.locationBuildingId ?? task.photographer.buildingId;
 
+    const currentIds = task.collaborators.filter((c) => c.role === "helper").map((c) => c.assistantId);
     const assistantIds = requestedIds.filter((assistantId) => assistantId !== task.assistantId);
+    const addedIds = assistantIds.filter((assistantId) => !currentIds.includes(assistantId));
     const primaryParticipantCount = task.assistantId ? 1 : 0;
-    if (assistantIds.length > 0) {
+    if (addedIds.length > 0) {
       if (!taskCategoryAllowsCollaboration(task.category)) {
         return Response.json({ error: "Only tasks over 30 minutes can add collaborators" }, { status: 400 });
       }
-      const enabled = await isCollaborationEnabledForBuilding(task.photographer.buildingId);
-      if (!enabled) {
-        return Response.json({ error: "Collaboration disabled for this building" }, { status: 400 });
+      const availability = await getCollaborationAvailabilityForBuilding(taskBuildingId);
+      if (!availability.enabled) {
+        return Response.json(
+          {
+            error: availability.autoClosed
+              ? `当前区域任务队列已达到 ${availability.queueLimit} 条，已自动关闭新增多人协作`
+              : "Collaboration disabled for this building",
+            code: availability.autoClosed
+              ? "COLLABORATION_AUTO_CLOSED_BY_QUEUE"
+              : "COLLABORATION_DISABLED_FOR_BUILDING",
+            queueCount: availability.queueCount,
+            queueLimit: availability.queueLimit,
+          },
+          { status: 400 }
+        );
       }
       const maxConfig = await prisma.systemConfig.findUnique({
-        where: { key: collaborationMaxParticipantsConfigKey(task.photographer.buildingId) },
+        where: { key: collaborationMaxParticipantsConfigKey(taskBuildingId) },
         select: { value: true },
       });
       const maxParticipants = parseCollaborationMaxParticipants(maxConfig?.value);
@@ -79,22 +106,36 @@ export async function POST(request: NextRequest, { params }: RouteContext) {
       }
     }
 
-    const candidates = assistantIds.length > 0
+    const retainedCurrentIds = assistantIds.filter((assistantId) => currentIds.includes(assistantId));
+    const candidates = addedIds.length > 0
       ? await prisma.profile.findMany({
           where: {
-            id: { in: assistantIds },
+            id: { in: addedIds },
             role: { in: ["assistant", "assistant_leader"] },
+            status: "idle",
             onlineStatus: "online",
             subStatus: null,
-            buildingId: task.photographer.buildingId,
+            OR: [
+              { activeBuildingId: taskBuildingId },
+              { activeBuildingId: null, buildingId: taskBuildingId },
+            ],
+            assignedTasks: {
+              none: { status: { in: [...ACTIVE_TASK_STATUSES] } },
+            },
+            collaboratedTasks: {
+              none: {
+                status: { in: [...ACTIVE_PARTICIPANT_STATUSES] },
+                task: { status: { in: [...ACTIVE_TASK_STATUSES] } },
+              },
+            },
           },
           select: { id: true },
         })
       : [];
-    const validIds = candidates.map((p) => p.id);
-    if (assistantIds.length > 0) {
+    const validIds = Array.from(new Set([...retainedCurrentIds, ...candidates.map((p) => p.id)]));
+    if (addedIds.length > 0) {
       const maxConfig = await prisma.systemConfig.findUnique({
-        where: { key: collaborationMaxParticipantsConfigKey(task.photographer.buildingId) },
+        where: { key: collaborationMaxParticipantsConfigKey(taskBuildingId) },
         select: { value: true },
       });
       const maxParticipants = parseCollaborationMaxParticipants(maxConfig?.value);
@@ -106,7 +147,6 @@ export async function POST(request: NextRequest, { params }: RouteContext) {
       }
     }
 
-    const currentIds = task.collaborators.map((c) => c.assistantId);
     const leavingIds = currentIds.filter((assistantId) => !validIds.includes(assistantId));
 
     await prisma.$transaction(async (tx) => {

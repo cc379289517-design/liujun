@@ -48,28 +48,30 @@ export async function PATCH(request: NextRequest, { params }: RouteContext) {
     const { id } = await params;
     const body = await request.json();
 
-    const { status, subStatus, currentRoom, buildingId, isOnline, name, role, avatar, employeeId, onlineStatus, department, group } = body;
+    const { status, subStatus, currentRoom, buildingId, activeBuildingId, activeRoom, isOnline, name, role, avatar, employeeId, onlineStatus, department, group } = body;
 
     const data: Record<string, unknown> = {};
     if (status && Object.values(ProfileStatus).includes(status)) {
       data.status = status;
     }
     if (subStatus !== undefined) data.subStatus = subStatus;
-    if (currentRoom !== undefined) data.currentRoom = currentRoom;
+    if (currentRoom !== undefined) data.currentRoom = currentRoom || null;
     if (buildingId !== undefined) data.buildingId = parseInt(String(buildingId));
+    if (activeBuildingId !== undefined) data.activeBuildingId = activeBuildingId == null ? null : parseInt(String(activeBuildingId));
+    if (activeRoom !== undefined) data.activeRoom = activeRoom;
     if (isOnline !== undefined) data.isOnline = isOnline;
     if (name !== undefined) data.name = name;
     if (role !== undefined) data.role = role;
     if (avatar !== undefined) data.avatar = avatar;
-    if (employeeId !== undefined) data.employeeId = employeeId;
+    if (employeeId !== undefined) data.employeeId = employeeId || null;
     if (onlineStatus !== undefined) data.onlineStatus = onlineStatus;
-    if (department !== undefined) data.department = department;
-    if (group !== undefined) data.group = group;
+    if (department !== undefined) data.department = department || null;
+    if (group !== undefined) data.group = group || null;
 
     // 记录更新前的状态，用于判断是否需要触发自动派单
     const before = await prisma.profile.findUnique({
       where: { id },
-      select: { status: true, onlineStatus: true, subStatus: true, role: true, buildingId: true },
+      select: { status: true, onlineStatus: true, subStatus: true, role: true, buildingId: true, activeBuildingId: true },
     });
 
     // 助理/助理组长在任务中时，不允许切换在线状态
@@ -91,15 +93,18 @@ export async function PATCH(request: NextRequest, { params }: RouteContext) {
       );
     }
 
+    const beforeServiceBuildingId = before?.activeBuildingId ?? before?.buildingId;
     const nextBuildingId =
-      buildingId !== undefined ? parseInt(String(buildingId)) : undefined;
+      activeBuildingId !== undefined && activeBuildingId != null
+        ? parseInt(String(activeBuildingId))
+        : undefined;
     const isAssistant =
       before && ["assistant", "assistant_leader"].includes(before.role);
     const isBuildingChange =
       isAssistant &&
       nextBuildingId !== undefined &&
       Number.isFinite(nextBuildingId) &&
-      nextBuildingId !== before.buildingId;
+      nextBuildingId !== beforeServiceBuildingId;
     let shouldSweep = false;
 
     if (

@@ -22,7 +22,17 @@ export async function GET(request: NextRequest) {
         where.role = role;
       }
     }
-    if (buildingId) where.buildingId = parseInt(buildingId);
+    if (buildingId) {
+      const bid = parseInt(buildingId);
+      if (role === "assistant") {
+        where.OR = [
+          { activeBuildingId: bid },
+          { activeBuildingId: null, buildingId: bid },
+        ];
+      } else {
+        where.buildingId = bid;
+      }
+    }
     if (status) where.status = status;
 
     const profiles = await prisma.profile.findMany({

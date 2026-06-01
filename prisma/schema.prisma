@@ -88,6 +88,8 @@ model Profile {
   group         String?       @map("group_name")
   buildingId    Int           @map("building_id")
   currentRoom   String?       @map("current_room")
+  activeBuildingId Int?       @map("active_building_id")
+  activeRoom    String?       @map("active_room")
   status        ProfileStatus @default(idle)
   subStatus     String?       @map("sub_status") // 微标签：上厕所、请假、身体不适
   onlineStatus  OnlineStatus  @default(online) @map("online_status")
@@ -154,6 +156,7 @@ model BookingTask {
   id              String      @id @default(uuid())
   photographerId  String      @map("photographer_id")
   assistantId     String?     @map("assistant_id")
+  locationBuildingId Int?     @map("location_building_id")
   roomNumber      String      @map("room_number")
   categoryId      Int         @map("category_id")
   priority        Int         @default(4) // 动态优先级 1-4
@@ -171,6 +174,7 @@ model BookingTask {
   completedAt     DateTime?   @map("completed_at")
   pausedAt        DateTime?   @map("paused_at")  // 被插单暂停的时间点
   escalatedAt     DateTime?   @map("escalated_at") // 最后一次提权时间
+  escalatedFromPriority Int?  @map("escalated_from_priority") // 第一次提权前的原始优先级
 
   // 有效执行时长：仅统计 executing 片段；暂停/待就位/插单间隔不计入
   effectiveWorkSeconds Int       @default(0) @map("effective_work_seconds")
@@ -181,6 +185,7 @@ model BookingTask {
   parentTask      BookingTask? @relation("TaskInterrupt", fields: [parentTaskId], references: [id])
   interruptTasks  BookingTask[] @relation("TaskInterrupt")
   collaborators   TaskCollaborator[]
+  standbyReassignmentNotices StandbyReassignmentNotice[]
 
   // 关系
   photographer    Profile      @relation("TaskPhotographer", fields: [photographerId], references: [id])
@@ -190,7 +195,33 @@ model BookingTask {
   @@index([status, priority])
   @@index([assistantId, status])
   @@index([photographerId])
+  @@index([locationBuildingId])
   @@map("booking_tasks")
+}
+
+model StandbyReassignmentNotice {
+  id                       String    @id @default(uuid())
+  taskId                   String    @map("task_id")
+  oldAssistantId           String    @map("old_assistant_id")
+  oldAssistantName         String    @map("old_assistant_name")
+  newAssistantId           String    @map("new_assistant_id")
+  newAssistantName         String    @map("new_assistant_name")
+  taskRoomNumber           String    @map("task_room_number")
+  taskCategoryName         String    @map("task_category_name")
+  taskPriority             Int       @map("task_priority")
+  waitedMinutes            Int       @map("waited_minutes")
+  thresholdMinutes         Int       @map("threshold_minutes")
+  score                    Int
+  newAssistantAcknowledgedAt DateTime? @map("new_assistant_acknowledged_at")
+  oldAssistantAcknowledgedAt DateTime? @map("old_assistant_acknowledged_at")
+  createdAt                DateTime  @default(now()) @map("created_at")
+
+  task BookingTask @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  @@index([newAssistantId, newAssistantAcknowledgedAt])
+  @@index([oldAssistantId, oldAssistantAcknowledgedAt])
+  @@index([taskId])
+  @@map("standby_reassignment_notices")
 }
 
 // ============================================

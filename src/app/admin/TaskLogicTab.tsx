@@ -2,11 +2,19 @@
 
 import { useState, useRef, useEffect } from "react";
 import {
+  COLLABORATION_QUEUE_AUTO_CLOSE_LIMIT_CONFIG_KEY,
+  COLLABORATION_QUEUE_AUTO_CLOSE_LIMIT_OPTIONS,
   collaborationEnabledConfigKey,
   collaborationMaxParticipantsConfigKey,
   parseCollaborationEnabled,
   parseCollaborationMaxParticipants,
+  parseCollaborationQueueAutoCloseLimit,
 } from "@/lib/collaborationRules";
+import {
+  PHOTOGRAPHER_MAX_ACTIVE_TASKS_CONFIG_KEY,
+  PHOTOGRAPHER_MAX_ACTIVE_TASK_OPTIONS,
+  parsePhotographerMaxActiveTasks,
+} from "@/lib/photographerTaskLimit";
 
 const P1_DISPATCH_CFG_KEY = "p1_interrupt_dispatch_mode";
 type P1DispatchUi = "priority_tier_rr" | "flat_round_robin";
@@ -121,7 +129,10 @@ type EditForm = {
   maxInterruptMinutes: number | null;
 };
 
-export default function TaskLogicTab({ categories: initCategories, buildings, config, onRefresh }: Props) {
+export default function TaskLogicTab({ categories: initCategories, buildings, config }: Props) {
+  const p1DispatchModeConfigValue = config[P1_DISPATCH_CFG_KEY]?.value;
+  const photographerMaxActiveTasksConfigValue = config[PHOTOGRAPHER_MAX_ACTIVE_TASKS_CONFIG_KEY]?.value;
+  const collaborationQueueAutoCloseLimitConfigValue = config[COLLABORATION_QUEUE_AUTO_CLOSE_LIMIT_CONFIG_KEY]?.value;
   const [localCats, setLocalCats] = useState<Category[]>(initCategories);
   const [upgradeThreshold, setUpgradeThreshold] = useState(
     Number(config.upgrade_threshold?.value ?? 30)
@@ -133,6 +144,12 @@ export default function TaskLogicTab({ categories: initCategories, buildings, co
     }
     return init;
   });
+  const [photographerMaxActiveTasks, setPhotographerMaxActiveTasks] = useState(() =>
+    parsePhotographerMaxActiveTasks(photographerMaxActiveTasksConfigValue)
+  );
+  const [collaborationQueueAutoCloseLimit, setCollaborationQueueAutoCloseLimit] = useState(() =>
+    parseCollaborationQueueAutoCloseLimit(collaborationQueueAutoCloseLimitConfigValue)
+  );
   const debounceTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   const [collaborationEnabledByBuilding, setCollaborationEnabledByBuilding] = useState<Record<number, boolean>>(() => {
     const init: Record<number, boolean> = {};
@@ -184,6 +201,22 @@ export default function TaskLogicTab({ categories: initCategories, buildings, co
         });
       } catch {}
     }, 500);
+  };
+
+  const savePhotographerMaxActiveTasks = async (value: number) => {
+    const nextValue = parsePhotographerMaxActiveTasks(value);
+    const previousValue = photographerMaxActiveTasks;
+    setPhotographerMaxActiveTasks(nextValue);
+    try {
+      const response = await fetch("/api/config", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ [PHOTOGRAPHER_MAX_ACTIVE_TASKS_CONFIG_KEY]: nextValue }),
+      });
+      if (!response.ok) throw new Error("Failed to save photographer task limit");
+    } catch {
+      setPhotographerMaxActiveTasks(previousValue);
+    }
   };
 
   const startEdit = (cat: Category) => {
@@ -330,7 +363,7 @@ export default function TaskLogicTab({ categories: initCategories, buildings, co
   const priorities = [1, 2, 3, 4, 5];
 
   const [p1DispatchMode, setP1DispatchMode] = useState<P1DispatchUi>(() =>
-    config[P1_DISPATCH_CFG_KEY]?.value === "flat_round_robin" ? "flat_round_robin" : "priority_tier_rr"
+    p1DispatchModeConfigValue === "flat_round_robin" ? "flat_round_robin" : "priority_tier_rr"
   );
 
   useEffect(() => {
@@ -352,9 +385,21 @@ export default function TaskLogicTab({ categories: initCategories, buildings, co
 
   useEffect(() => {
     setP1DispatchMode(
-      config[P1_DISPATCH_CFG_KEY]?.value === "flat_round_robin" ? "flat_round_robin" : "priority_tier_rr"
+      p1DispatchModeConfigValue === "flat_round_robin" ? "flat_round_robin" : "priority_tier_rr"
     );
-  }, [config[P1_DISPATCH_CFG_KEY]?.value]);
+  }, [p1DispatchModeConfigValue]);
+
+  useEffect(() => {
+    setPhotographerMaxActiveTasks(
+      parsePhotographerMaxActiveTasks(photographerMaxActiveTasksConfigValue)
+    );
+  }, [photographerMaxActiveTasksConfigValue]);
+
+  useEffect(() => {
+    setCollaborationQueueAutoCloseLimit(
+      parseCollaborationQueueAutoCloseLimit(collaborationQueueAutoCloseLimitConfigValue)
+    );
+  }, [collaborationQueueAutoCloseLimitConfigValue]);
 
   const saveCollaborationEnabled = async (buildingId: number, enabled: boolean) => {
     const previousEnabled = collaborationEnabledByBuilding[buildingId] ?? true;
@@ -387,6 +432,22 @@ export default function TaskLogicTab({ categories: initCategories, buildings, co
     }
   };
 
+  const saveCollaborationQueueAutoCloseLimit = async (value: number) => {
+    const nextValue = parseCollaborationQueueAutoCloseLimit(value);
+    const previousValue = collaborationQueueAutoCloseLimit;
+    setCollaborationQueueAutoCloseLimit(nextValue);
+    try {
+      const response = await fetch("/api/config", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ [COLLABORATION_QUEUE_AUTO_CLOSE_LIMIT_CONFIG_KEY]: nextValue }),
+      });
+      if (!response.ok) throw new Error("Failed to save collaboration queue auto close limit");
+    } catch {
+      setCollaborationQueueAutoCloseLimit(previousValue);
+    }
+  };
+
   const saveP1DispatchMode = async (mode: P1DispatchUi) => {
     setP1DispatchMode(mode);
     try {
@@ -395,7 +456,6 @@ export default function TaskLogicTab({ categories: initCategories, buildings, co
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ [P1_DISPATCH_CFG_KEY]: mode }),
       });
-      onRefresh();
     } catch {}
   };
 
@@ -622,6 +682,42 @@ export default function TaskLogicTab({ categories: initCategories, buildings, co
             </div>
           ))}
 
+          <div className="card p-4">
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-xs text-[--text-secondary]">摄影师最多同时下达任务数</span>
+              <div className="group relative">
+                <button
+                  type="button"
+                  className="flex h-8 min-w-16 items-center justify-center rounded-lg border border-gray-100 bg-white px-3 text-sm font-extrabold text-[--text-primary] shadow-sm shadow-gray-200/60 transition-colors hover:border-purple-200 focus:border-purple-300 focus:outline-none"
+                >
+                  {photographerMaxActiveTasks} 个
+                </button>
+                <div className="absolute right-0 top-full z-30 hidden pt-2 group-focus-within:block group-hover:block">
+                  <div className="flex w-20 flex-col gap-1 rounded-xl border border-gray-100 bg-white p-1.5 shadow-xl shadow-gray-200/80">
+                    {PHOTOGRAPHER_MAX_ACTIVE_TASK_OPTIONS.map((value) => (
+                      <button
+                        key={value}
+                        type="button"
+                        onMouseDown={(e) => e.preventDefault()}
+                        onClick={() => savePhotographerMaxActiveTasks(value)}
+                        className={`h-8 rounded-lg text-xs font-extrabold transition-colors ${
+                          value === photographerMaxActiveTasks
+                            ? "bg-purple-500 text-white"
+                            : "text-[--text-primary] hover:bg-purple-50 hover:text-purple-600"
+                        }`}
+                      >
+                        {value}个
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            </div>
+            <p className="mb-3 text-[10px] leading-relaxed text-[--text-muted]">
+              同一摄影师未完成任务达到上限时，将不能继续下达新任务，直到已有任务完成或被清理。
+            </p>
+          </div>
+
           <div className="card p-4 space-y-3">
             <div>
               <h4 className="text-xs font-semibold text-[--text-primary]">插单派发策略</h4>
@@ -667,13 +763,11 @@ export default function TaskLogicTab({ categories: initCategories, buildings, co
             </div>
           </div>
 
-          <div className="card p-4 space-y-3">
-            <div>
-              <h4 className="text-xs font-semibold text-[--text-primary]">多人协作规则</h4>
-              <p className="mt-1 truncate text-[10px] leading-relaxed text-[--text-muted]">
-                按大区单独控制 30 分钟以上任务是否允许添加协作助理；关闭后不再开放新增协作，已存在的协作状态仍可展示和移除。
-              </p>
-            </div>
+	          <div className="card p-4 space-y-3">
+	            <h4 className="text-xs font-semibold text-[--text-primary]">多人协作规则</h4>
+	            <p className="text-[10px] leading-4 text-[--text-muted]">
+	              按大区控制 30 分钟以上任务协作；队列达阈值后自动关闭新增协作，已有协作仍可展示和移除。
+	            </p>
             <div className="space-y-1.5">
               {buildings.length === 0 ? (
                 <p className="text-[10px] text-[--text-muted]">暂无大区数据</p>
@@ -736,6 +830,37 @@ export default function TaskLogicTab({ categories: initCategories, buildings, co
                 })
               )}
             </div>
+	            <div className="ml-3 flex items-center gap-1.5 whitespace-nowrap text-[10px] font-semibold text-[--text-secondary]">
+	              <span>队列任务达</span>
+	              <div className="group relative">
+	                <button
+	                  type="button"
+	                  className="flex h-7 min-w-12 items-center justify-center rounded-lg border border-gray-200 bg-white px-2 text-xs font-extrabold text-[--text-primary] shadow-sm transition-colors hover:border-purple-200 hover:text-purple-600"
+	                  title="鼠标移入选择自动关闭阈值"
+	                >
+	                  {collaborationQueueAutoCloseLimit}条
+	                </button>
+	                <div className="absolute left-0 bottom-full z-20 hidden pb-1 group-hover:block">
+	                  <div className="flex w-20 flex-col gap-1 rounded-xl border border-gray-100 bg-white p-1.5 shadow-lg">
+	                    {COLLABORATION_QUEUE_AUTO_CLOSE_LIMIT_OPTIONS.map((value) => (
+	                      <button
+	                        key={value}
+	                        type="button"
+	                        onClick={() => saveCollaborationQueueAutoCloseLimit(value)}
+	                        className={`flex h-6 items-center justify-center rounded-md px-2 text-[10px] font-bold transition-colors ${
+	                          value === collaborationQueueAutoCloseLimit
+	                            ? "bg-purple-500 text-white"
+	                            : "text-[--text-secondary] hover:bg-purple-50 hover:text-purple-600"
+	                        }`}
+	                      >
+	                        {value}条
+	                      </button>
+	                    ))}
+	                  </div>
+	                </div>
+	              </div>
+	              <span>自动关闭多人协作逻辑</span>
+	            </div>
           </div>
         </div>
       </div>

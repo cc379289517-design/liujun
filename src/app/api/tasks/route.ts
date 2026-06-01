@@ -5,6 +5,7 @@ import {
   assignTask,
   buildP1InterruptCandidateOrderFromFiltered,
   canInterrupt,
+  checkPhotographerActiveTaskLimit,
   effectiveInterruptLeaveCapMinutes,
   getSchedulerRuntimeConfig,
   interruptAssistant,
@@ -15,7 +16,13 @@ import {
   syncProfileStatus,
   escalatePriorities,
   taskCategoryCanBeInterrupted,
+  taskLeaveUpperMinutes,
 } from "@/lib/scheduler";
+import {
+  PHOTOGRAPHER_LIMIT_QUEUE_CAPACITY,
+  PHOTOGRAPHER_LIMIT_QUEUE_LOCK_REASON,
+  photographerLimitQueueFullPrompt,
+} from "@/lib/photographerTaskLimit";
 
 const TASK_INCLUDE = {
   photographer: { select: { id: true, name: true, currentRoom: true, buildingId: true } },
@@ -163,9 +170,9 @@ export async function POST(request: NextRequest) {
 
     const {
       photographerId,
+      locationBuildingId,
       roomNumber,
       categoryId,
-      priority: requestedPriority,
       assistantId,
       isSpecified,
       isLocked,
@@ -181,6 +188,33 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    const taskLimit = await checkPhotographerActiveTaskLimit(photographerId);
+    const queuedByPhotographerLimit = !taskLimit.allowed;
+    if (queuedByPhotographerLimit) {
+      const existingLimitQueuedTasks = await prisma.bookingTask.count({
+        where: {
+          photographerId,
+          status: TaskStatus.waiting,
+          assistantId: null,
+          isLocked: true,
+          lockReason: PHOTOGRAPHER_LIMIT_QUEUE_LOCK_REASON,
+        },
+      });
+      if (existingLimitQueuedTasks >= PHOTOGRAPHER_LIMIT_QUEUE_CAPACITY) {
+        return Response.json(
+          {
+            error: photographerLimitQueueFullPrompt(taskLimit.limit),
+            code: "PHOTOGRAPHER_LIMIT_QUEUE_FULL",
+            activeTaskCount: taskLimit.activeCount,
+            maxActiveTasks: taskLimit.limit,
+            queuedTaskCount: existingLimitQueuedTasks,
+            maxQueuedTasks: PHOTOGRAPHER_LIMIT_QUEUE_CAPACITY,
+          },
+          { status: 409 }
+        );
+      }
+    }
+
     const category = await prisma.taskCategory.findUnique({
       where: { id: categoryId },
       select: { priorityLevel: true, estDuration: true, maxDuration: true },
@@ -191,7 +225,7 @@ export async function POST(request: NextRequest) {
     }
 
     // 锁定开关打开时必须填写原因
-    if (isLocked && !lockReason) {
+    if (isLocked && !lockReason && !queuedByPhotographerLimit) {
       return Response.json(
         { error: "lockReason is required when isLocked is true" },
         { status: 400 }
@@ -202,21 +236,34 @@ export async function POST(request: NextRequest) {
       ? new Date(Date.now() + estMinutes * 60 * 1000)
       : null;
 
+    const parsedLocationBuildingId =
+      locationBuildingId != null && locationBuildingId !== ""
+        ? parseInt(String(locationBuildingId), 10)
+        : null;
     const task = await prisma.bookingTask.create({
       data: {
         photographerId,
+        locationBuildingId: Number.isFinite(parsedLocationBuildingId) ? parsedLocationBuildingId : null,
         roomNumber,
         categoryId,
-        priority: requestedPriority ?? category.priorityLevel,
-        isSpecified: isSpecified ?? false,
-        assistantId: isSpecified ? assistantId : null,
-        isLocked: isLocked ?? false,
-        lockReason: isLocked ? lockReason : null,
+        priority: category.priorityLevel,
+        isSpecified: queuedByPhotographerLimit ? false : isSpecified ?? false,
+        assistantId: !queuedByPhotographerLimit && isSpecified ? assistantId : null,
+        isLocked: queuedByPhotographerLimit ? true : isLocked ?? false,
+        lockReason: queuedByPhotographerLimit
+          ? PHOTOGRAPHER_LIMIT_QUEUE_LOCK_REASON
+          : isLocked
+            ? lockReason
+            : null,
         estEndTime,
         note,
       },
       include: TASK_INCLUDE,
     });
+
+    if (queuedByPhotographerLimit) {
+      return Response.json(task, { status: 201 });
+    }
 
     if (isSpecified && assistantId) {
       await prisma.$transaction([
@@ -239,8 +286,10 @@ export async function POST(request: NextRequest) {
 
     // 自动派单（非指定助理模式）：先空闲助理；无空闲则对「更紧急的短时单」尝试插单
     if (!isSpecified) {
-      const buildingId = task.photographer.buildingId;
+      const buildingId = task.locationBuildingId ?? task.photographer.buildingId;
       const taskPriority = task.priority;
+      /** 新任务「离场」保守上界：优先用类型 maxDuration（与快捷预约时段一致），否则 estDuration */
+      const newTaskLeaveUpperMin = taskLeaveUpperMinutes(category);
 
       const assignedIdle = await assignTask(task.id, buildingId);
       if (assignedIdle) {
@@ -252,7 +301,7 @@ export async function POST(request: NextRequest) {
       }
 
       // 同楼座无空闲助理：尝试抢占「已派发、尚在待就位」的较低优先任务（新单更紧急）
-      const preempted = await interruptWaitingPreempt(buildingId, task.id, taskPriority);
+      const preempted = await interruptWaitingPreempt(buildingId, task.id, taskPriority, newTaskLeaveUpperMin);
       if (preempted) {
         const updated = await prisma.bookingTask.findUnique({
           where: { id: task.id },
@@ -267,25 +316,44 @@ export async function POST(request: NextRequest) {
           role: { in: ["assistant", "assistant_leader"] },
           status: { in: ["executing", "busy"] },
           onlineStatus: "online",
-          buildingId,
+          OR: [
+            { activeBuildingId: buildingId },
+            { activeBuildingId: null, buildingId },
+          ],
         },
       });
 
       const runtimeCfg = await getSchedulerRuntimeConfig();
       const globalInterruptCap = runtimeCfg.INTERRUPT_MAX_MINUTES;
-      /** 新任务「离场」保守上界：优先用类型 maxDuration（与快捷预约时段一致），否则 estDuration */
-      const newTaskLeaveUpperMin =
-        category.maxDuration > 0 ? category.maxDuration : Math.max(0, category.estDuration || 0);
+      const busyAssistantIds = busyAssistants.map((a) => a.id);
+      const pendingInterrupts = await prisma.bookingTask.findMany({
+        where: {
+          assistantId: { in: busyAssistantIds },
+          status: { in: [TaskStatus.waiting, TaskStatus.executing, TaskStatus.paused] },
+          parentTaskId: { not: null },
+        },
+        select: { assistantId: true },
+        distinct: ["assistantId"],
+      });
+      const pendingInterruptAssistantIds = new Set(pendingInterrupts.map((task) => task.assistantId).filter(Boolean));
 
       const assistantCurrentTasks = await prisma.bookingTask.findMany({
         where: {
-          assistantId: { in: busyAssistants.map((a) => a.id) },
+          assistantId: { in: busyAssistantIds },
           status: TaskStatus.executing,
         },
-        include: { category: { select: { canBeInterrupted: true, maxDuration: true, maxInterruptMinutes: true } } },
+        include: {
+          category: { select: { canBeInterrupted: true, maxDuration: true, maxInterruptMinutes: true } },
+          collaborators: {
+            where: { role: "helper", status: { in: ["waiting", "executing", "paused"] } },
+            select: { id: true },
+          },
+        },
       });
 
       const filteredCandidates = assistantCurrentTasks.filter((t) => {
+        if (!t.assistantId || pendingInterruptAssistantIds.has(t.assistantId) || t.parentTaskId) return false;
+        if (t.collaborators.length > 0) return false;
         if (t.isLocked || !taskCategoryCanBeInterrupted(t.category)) return false;
         // 当前执行单须比新单「更低优先」（数值更大），P1 进行中不可作为被插对象
         if (t.priority <= taskPriority) return false;
@@ -298,7 +366,7 @@ export async function POST(request: NextRequest) {
 
       for (const candidate of interruptOrder) {
         if (!candidate.assistantId) continue;
-        const ok = await canInterrupt(candidate.assistantId, taskPriority);
+        const ok = await canInterrupt(candidate.assistantId, taskPriority, newTaskLeaveUpperMin);
         if (ok) {
           await interruptAssistant(candidate.assistantId, task.id);
           await recordP1InterruptRoundRobin(buildingId, candidate.assistantId);

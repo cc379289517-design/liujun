@@ -84,6 +84,8 @@ async function main() {
     { key: "ending_alert_min", value: "2", label: "快结束提醒(分钟)" },
     { key: "interruption_max", value: "30", label: "插单最大离场时间(分钟)" },
     { key: "upgrade_threshold", value: "30", label: "自动提权阈值(分钟)" },
+    { key: "photographer_max_active_tasks", value: "1", label: "摄影师最多同时下达任务数" },
+    { key: "collaboration_queue_auto_close_limit", value: "10", label: "当前区域任务队列达到多少条自动关闭多人协作" },
     {
       key: "p1_interrupt_dispatch_mode",
       value: "priority_tier_rr",

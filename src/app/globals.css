@@ -30,8 +30,8 @@
   --shadow-card: 0 2px 12px rgba(0, 0, 0, 0.3);
   --shadow-card-hover: 0 4px 24px rgba(0, 0, 0, 0.4);
   --map-brightness: 1;
-  --map-filter: invert(1) brightness(0.68) contrast(1.18) saturate(0.75);
-  --map-overlay: rgba(10, 14, 28, 0.18);
+  --map-filter: invert(0.88) brightness(1.78) contrast(0.78) saturate(0.76);
+  --map-overlay: transparent;
 }
 
 @theme inline {
@@ -244,7 +244,7 @@ body {
 /* Note marquee animation */
 @keyframes note-marquee {
   0% { transform: translateX(0); }
-  100% { transform: translateX(-100%); }
+  100% { transform: translateX(var(--note-marquee-distance, 0)); }
 }
 .note-marquee {
   display: inline-block;
@@ -261,7 +261,7 @@ body {
 .note-marquee-container:hover .note-marquee {
   max-width: none;
   text-overflow: clip;
-  animation: note-marquee 6s linear 1 forwards;
+  animation: note-marquee 5s linear 1 forwards;
 }
 
 .task-assignee-marquee-container {
@@ -282,6 +282,24 @@ body {
   text-overflow: ellipsis;
   white-space: nowrap;
   line-height: 20px;
+}
+.task-assignee-line {
+  display: inline-flex;
+  height: 14px;
+  align-items: center;
+  line-height: 14px;
+  vertical-align: top;
+}
+.task-assignee-line .task-assignee-static {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  line-height: 14px;
+}
+.task-assignee-line .task-assignee-marquee {
+  line-height: 14px;
 }
 .task-assignee-marquee-container:hover .task-assignee-marquee {
   max-width: none;
@@ -354,6 +372,34 @@ body {
 .public-queue-own-task > * {
   position: relative;
   z-index: 1;
+}
+
+@keyframes public-queue-promote-inserting {
+  0% {
+    transform: translateY(16px) scale(0.985);
+    box-shadow: 0 2px 8px rgba(249, 115, 22, 0.08);
+    border-color: rgba(249, 115, 22, 0.12);
+    background: rgba(255, 255, 255, 0.55);
+  }
+  38% {
+    transform: translateY(-8px) scale(1.035);
+    box-shadow: 0 14px 28px rgba(249, 115, 22, 0.28);
+    border-color: rgba(249, 115, 22, 0.55);
+    background: rgba(255, 247, 237, 0.92);
+  }
+  72% {
+    transform: translateY(2px) scale(1.01);
+    box-shadow: 0 8px 18px rgba(249, 115, 22, 0.18);
+    border-color: rgba(249, 115, 22, 0.34);
+  }
+  100% {
+    transform: translateY(0) scale(1);
+  }
+}
+
+.public-queue-promote-inserting {
+  animation: public-queue-promote-inserting 0.78s cubic-bezier(0.22, 1, 0.36, 1);
+  z-index: 3;
 }
 
 .note-two-line {
