@@ -1,7 +1,13 @@
 import { NextRequest } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { ProfileStatus, TaskStatus } from "@/generated/prisma/client";
+import { OnlineStatus, ProfileStatus, TaskStatus } from "@/generated/prisma/client";
 import { sweepWaitingTasks } from "@/lib/scheduler";
+import {
+  ASSISTANT_EATING_SUB_STATUS,
+  EATING_REENTRY_COOLDOWN_CONFIG_KEY,
+  eatingReentryRemainingMs,
+  parseEatingReentryCooldownMin,
+} from "@/lib/eatingPresence";
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -64,22 +70,52 @@ export async function PATCH(request: NextRequest, { params }: RouteContext) {
     if (role !== undefined) data.role = role;
     if (avatar !== undefined) data.avatar = avatar;
     if (employeeId !== undefined) data.employeeId = employeeId || null;
-    if (onlineStatus !== undefined) data.onlineStatus = onlineStatus;
+    if (onlineStatus !== undefined) {
+      if (!Object.values(OnlineStatus).includes(onlineStatus)) {
+        return Response.json({ error: "Invalid onlineStatus" }, { status: 400 });
+      }
+      data.onlineStatus = onlineStatus;
+    }
     if (department !== undefined) data.department = department || null;
     if (group !== undefined) data.group = group || null;
 
     // 记录更新前的状态，用于判断是否需要触发自动派单
     const before = await prisma.profile.findUnique({
       where: { id },
-      select: { status: true, onlineStatus: true, subStatus: true, role: true, buildingId: true, activeBuildingId: true },
+      select: {
+        status: true,
+        onlineStatus: true,
+        subStatus: true,
+        eatingStartedAt: true,
+        eatingEndedAt: true,
+        role: true,
+        buildingId: true,
+        activeBuildingId: true,
+      },
     });
 
-    // 助理/助理组长在任务中时，不允许切换在线状态
+    if (!before) {
+      return Response.json({ error: "Profile not found" }, { status: 404 });
+    }
+
+    const pausedTaskCount = before && ["assistant", "assistant_leader"].includes(before.role)
+      ? await prisma.bookingTask.count({
+        where: {
+          status: TaskStatus.paused,
+          OR: [
+            { assistantId: id },
+            { collaborators: { some: { assistantId: id, status: "paused" } } },
+          ],
+        },
+      })
+      : 0;
+
+    // 助理/助理组长在任务中时，不允许切换在线状态；暂停中允许切换吃饭/休假
     if (
-      before &&
-      onlineStatus !== undefined &&
+      (onlineStatus !== undefined || subStatus !== undefined) &&
       ["assistant", "assistant_leader"].includes(before.role) &&
-      before.status !== ProfileStatus.idle
+      before.status !== ProfileStatus.idle &&
+      !(before.status === ProfileStatus.busy && pausedTaskCount > 0)
     ) {
       const statusLabel: Record<string, string> = {
         assigned: "待就位",
@@ -93,13 +129,69 @@ export async function PATCH(request: NextRequest, { params }: RouteContext) {
       );
     }
 
+    const isAssistant = ["assistant", "assistant_leader"].includes(before.role);
+    const requestedSubStatus =
+      subStatus !== undefined
+        ? subStatus || null
+        : onlineStatus !== undefined && onlineStatus !== OnlineStatus.online
+          ? null
+          : undefined;
+    const requestedOnlineStatus = onlineStatus as OnlineStatus | undefined;
+    const enteringEating =
+      isAssistant &&
+      requestedSubStatus === ASSISTANT_EATING_SUB_STATUS &&
+      before.subStatus !== ASSISTANT_EATING_SUB_STATUS;
+    const leavingEating =
+      isAssistant &&
+      before.subStatus === ASSISTANT_EATING_SUB_STATUS &&
+      (
+        (requestedSubStatus !== undefined && requestedSubStatus !== ASSISTANT_EATING_SUB_STATUS) ||
+        (requestedOnlineStatus !== undefined && requestedOnlineStatus !== OnlineStatus.online)
+      );
+
+    if (enteringEating) {
+      const cfg = await prisma.systemConfig.findUnique({
+        where: { key: EATING_REENTRY_COOLDOWN_CONFIG_KEY },
+        select: { value: true },
+      });
+      const cooldownMinutes = parseEatingReentryCooldownMin(cfg?.value);
+      const now = new Date();
+      const remainingMs = eatingReentryRemainingMs(before.eatingEndedAt, now, cooldownMinutes);
+      if (remainingMs > 0) {
+        const remainingMinutes = Math.max(1, Math.ceil(remainingMs / 60000));
+        return Response.json(
+          {
+            code: "EATING_REENTRY_COOLDOWN",
+            error: `刚结束吃饭状态，${remainingMinutes}分钟后才可以再次切换为吃饭中`,
+            remainingMinutes,
+            cooldownMinutes,
+            canRetryAt: new Date(now.getTime() + remainingMs).toISOString(),
+          },
+          { status: 400 }
+        );
+      }
+      data.subStatus = ASSISTANT_EATING_SUB_STATUS;
+      data.onlineStatus = OnlineStatus.online;
+      data.isOnline = true;
+      data.eatingStartedAt = now;
+      data.eatingEndedAt = null;
+    } else if (leavingEating) {
+      data.subStatus = requestedSubStatus ?? null;
+      data.eatingEndedAt = new Date();
+    } else if (
+      isAssistant &&
+      requestedSubStatus === ASSISTANT_EATING_SUB_STATUS &&
+      before.subStatus === ASSISTANT_EATING_SUB_STATUS
+    ) {
+      data.eatingStartedAt = before.eatingStartedAt ?? new Date();
+      data.eatingEndedAt = null;
+    }
+
     const beforeServiceBuildingId = before?.activeBuildingId ?? before?.buildingId;
     const nextBuildingId =
       activeBuildingId !== undefined && activeBuildingId != null
         ? parseInt(String(activeBuildingId))
         : undefined;
-    const isAssistant =
-      before && ["assistant", "assistant_leader"].includes(before.role);
     const isBuildingChange =
       isAssistant &&
       nextBuildingId !== undefined &&

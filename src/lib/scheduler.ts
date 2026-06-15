@@ -234,6 +234,7 @@ export async function getCollaborationAvailabilityForBuilding(buildingId: number
 
 export type ParticipantStatus = "waiting" | "executing" | "paused" | "completed" | "left";
 const ACTIVE_PARTICIPANT_STATUSES: ParticipantStatus[] = ["waiting", "executing", "paused"];
+const WORKING_PARTICIPANT_STATUSES: ParticipantStatus[] = ["executing", "paused"];
 
 const IDLE_DISPATCH_RR_KEY = (buildingId: number) => `idle_dispatch_rr_b${buildingId}`;
 
@@ -800,10 +801,43 @@ export async function reassignOverdueStandbyTasks(): Promise<number> {
           leftAt: null,
         },
       });
-      await tx.profile.update({
-        where: { id: oldAssistantId },
-        data: { status: ProfileStatus.idle, onlineStatus: OnlineStatus.offline, isOnline: false },
-      });
+      const [oldAssistantOtherParticipants, oldAssistantOtherTasks] = await Promise.all([
+        tx.taskCollaborator.findMany({
+          where: {
+            assistantId: oldAssistantId,
+            taskId: { not: candidate.task.id },
+            status: { in: WORKING_PARTICIPANT_STATUSES },
+            task: { status: { in: [TaskStatus.waiting, TaskStatus.executing, TaskStatus.paused] } },
+          },
+          select: { status: true },
+        }),
+        tx.bookingTask.findMany({
+          where: {
+            id: { not: candidate.task.id },
+            assistantId: oldAssistantId,
+            status: { in: [TaskStatus.executing, TaskStatus.paused] },
+          },
+          select: { status: true },
+        }),
+      ]);
+      const hasOtherExecutingWork =
+        oldAssistantOtherParticipants.some((participant) => participant.status === "executing") ||
+        oldAssistantOtherTasks.some((task) => task.status === TaskStatus.executing);
+      const hasOtherPausedWork =
+        oldAssistantOtherParticipants.some((participant) => participant.status === "paused") ||
+        oldAssistantOtherTasks.some((task) => task.status === TaskStatus.paused);
+
+      if (hasOtherExecutingWork || hasOtherPausedWork) {
+        await tx.profile.update({
+          where: { id: oldAssistantId },
+          data: { status: hasOtherExecutingWork ? ProfileStatus.executing : ProfileStatus.busy },
+        });
+      } else {
+        await tx.profile.update({
+          where: { id: oldAssistantId },
+          data: { status: ProfileStatus.idle, onlineStatus: OnlineStatus.offline, isOnline: false },
+        });
+      }
       await tx.profile.update({
         where: { id: newAssistant.id },
         data: { status: ProfileStatus.assigned },

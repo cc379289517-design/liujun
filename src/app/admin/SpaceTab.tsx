@@ -3,6 +3,7 @@
 import { useState, useRef, useEffect } from "react";
 import MapEditor from "./components/MapEditor";
 import type { Venue } from "./components/MapEditor";
+import { WORKBENCH_PAGE_BACKGROUND_CONFIG_KEY } from "@/lib/workbenchBackground";
 
 type Building = {
   id: number;
@@ -28,24 +29,32 @@ type Room = {
 
 interface SpaceTabProps {
   buildings: Building[];
+  config: Record<string, { value: string; label: string | null }>;
   onRefresh: () => void;
 }
 
-export default function SpaceTab({ buildings: buildingsProp, onRefresh }: SpaceTabProps) {
+export default function SpaceTab({ buildings: buildingsProp, config, onRefresh }: SpaceTabProps) {
   const [localBuildings, setLocalBuildings] = useState<Building[]>(buildingsProp);
   const [selectedBuildingId, setSelectedBuildingId] = useState<number | null>(null);
   const [showBuildingModal, setShowBuildingModal] = useState(false);
   const [showRoomModal, setShowRoomModal] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [backgroundUploading, setBackgroundUploading] = useState(false);
+  const [pageBackgroundUrl, setPageBackgroundUrl] = useState(config[WORKBENCH_PAGE_BACKGROUND_CONFIG_KEY]?.value ?? "");
   const [newVenue, setNewVenue] = useState("");
   const [newVenueType, setNewVenueType] = useState<"实景棚" | "无影棚">("实景棚");
   const [cropMode, setCropMode] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const backgroundInputRef = useRef<HTMLInputElement>(null);
 
   // Sync from parent when prop changes (e.g. initial load or tab switch)
   useEffect(() => {
     setLocalBuildings(buildingsProp);
   }, [buildingsProp]);
+
+  useEffect(() => {
+    setPageBackgroundUrl(config[WORKBENCH_PAGE_BACKGROUND_CONFIG_KEY]?.value ?? "");
+  }, [config]);
 
   // Auto-select the first building when list loads and nothing is selected
   useEffect(() => {
@@ -175,6 +184,50 @@ export default function SpaceTab({ buildings: buildingsProp, onRefresh }: SpaceT
     setUploading(false);
   }
 
+  async function savePageBackground(dataUrl: string) {
+    await fetch("/api/config", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ [WORKBENCH_PAGE_BACKGROUND_CONFIG_KEY]: dataUrl }),
+    });
+    setPageBackgroundUrl(dataUrl);
+    onRefresh();
+  }
+
+  async function uploadPageBackground(file: File) {
+    if (!file.type.startsWith("image/")) return;
+    setBackgroundUploading(true);
+    try {
+      const reader = new FileReader();
+      const dataUrl = await new Promise<string>((resolve, reject) => {
+        reader.onload = () => resolve(reader.result as string);
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
+      await savePageBackground(dataUrl);
+    } catch (err) {
+      console.error("Page background upload failed", err);
+    } finally {
+      setBackgroundUploading(false);
+      if (backgroundInputRef.current) backgroundInputRef.current.value = "";
+    }
+  }
+
+  function handlePageBackgroundSelect(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (file) void uploadPageBackground(file);
+  }
+
+  function handlePageBackgroundDrop(e: React.DragEvent) {
+    e.preventDefault();
+    const file = e.dataTransfer.files[0];
+    if (file) void uploadPageBackground(file);
+  }
+
+  async function clearPageBackground() {
+    await savePageBackground("");
+  }
+
   function handleFloorPlanDrop(e: React.DragEvent) {
     e.preventDefault();
     if (!selectedBuilding) return;
@@ -191,6 +244,66 @@ export default function SpaceTab({ buildings: buildingsProp, onRefresh }: SpaceT
   }
 
   return (
+    <div className="space-y-3">
+      <div className="card overflow-hidden p-4">
+        <input
+          ref={backgroundInputRef}
+          type="file"
+          accept="image/*"
+          className="hidden"
+          onChange={handlePageBackgroundSelect}
+        />
+        <div className="flex items-stretch gap-4">
+          <div
+            className={`relative h-24 w-40 shrink-0 overflow-hidden rounded-2xl border border-gray-200 bg-gray-100 ${
+              backgroundUploading ? "ring-2 ring-orange-300" : ""
+            }`}
+            onDragOver={(e) => e.preventDefault()}
+            onDrop={handlePageBackgroundDrop}
+          >
+            {pageBackgroundUrl ? (
+              <img src={pageBackgroundUrl} alt="页面背景预览" className="h-full w-full object-cover" />
+            ) : (
+              <div className="flex h-full w-full items-center justify-center bg-gradient-to-br from-gray-100 to-gray-200">
+                <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="#9ca3af" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+                  <rect x="3" y="3" width="18" height="18" rx="2" />
+                  <circle cx="8.5" cy="8.5" r="1.5" />
+                  <path d="M21 15l-5-5L5 21" />
+                </svg>
+              </div>
+            )}
+          </div>
+          <div className="flex min-w-0 flex-1 items-center justify-between gap-4">
+            <div className="min-w-0">
+              <h3 className="text-sm font-bold text-[--text-primary]">页面背景素材</h3>
+              <p className="mt-1 text-xs font-medium leading-relaxed text-[--text-muted]">
+                上传后会作为摄影师/助理工作台的整页背景，自动居中铺满页面。
+              </p>
+              <p className="mt-1 text-[10px] font-semibold text-gray-400">支持 JPG / PNG / WebP，建议使用横向高清素材。</p>
+            </div>
+            <div className="flex shrink-0 items-center gap-2">
+              {pageBackgroundUrl && (
+                <button
+                  type="button"
+                  onClick={() => void clearPageBackground()}
+                  className="rounded-xl border border-gray-200 px-3 py-2 text-xs font-bold text-gray-500 transition-colors hover:bg-gray-50"
+                >
+                  清除背景
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => backgroundInputRef.current?.click()}
+                disabled={backgroundUploading}
+                className="rounded-xl bg-orange-500 px-4 py-2 text-xs font-bold text-white shadow-sm shadow-orange-200 transition-all hover:bg-orange-600 active:scale-[0.98] disabled:opacity-60"
+              >
+                {backgroundUploading ? "上传中..." : pageBackgroundUrl ? "更换素材" : "上传素材"}
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+
     <div className="flex gap-3">
       {/* Left Panel: Building List */}
       <div className="w-60 shrink-0 flex flex-col gap-2">
@@ -498,6 +611,8 @@ export default function SpaceTab({ buildings: buildingsProp, onRefresh }: SpaceT
         />
       )}
     </div>
+
+      </div>
   );
 }
 

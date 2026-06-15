@@ -84,7 +84,9 @@ export async function GET(request: NextRequest) {
       const now = new Date();
       const dow = now.getDay(); // 0=周日
       const mondayOffset = dow === 0 ? -6 : 1 - dow;
-      const monday = new Date(now.getFullYear(), now.getMonth(), now.getDate() + mondayOffset);
+      const rawWeekOffset = Number.parseInt(searchParams.get("weekOffset") ?? "0", 10);
+      const weekOffset = Number.isFinite(rawWeekOffset) ? rawWeekOffset : 0;
+      const monday = new Date(now.getFullYear(), now.getMonth(), now.getDate() + mondayOffset + weekOffset * 7);
       const nextMonday = new Date(monday.getTime() + 7 * 24 * 60 * 60 * 1000);
       where.createdAt = { gte: monday, lt: nextMonday };
     }

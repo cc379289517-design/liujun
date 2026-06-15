@@ -24,8 +24,8 @@ const ROLE_CN_MAP: Record<string, string> = {
 
 const ONLINE_STATUS_MAP: Record<string, { label: string; color: string; bg: string }> = {
   online: { label: "在线", color: "text-green-600", bg: "bg-green-50" },
-  offline: { label: "下线", color: "text-gray-500", bg: "bg-gray-100" },
-  on_break: { label: "休假", color: "text-gray-400", bg: "bg-gray-50" },
+  offline: { label: "离线", color: "text-gray-500", bg: "bg-gray-100" },
+  on_break: { label: "休假/下班 /离线", color: "text-gray-400", bg: "bg-gray-50" },
 };
 
 const TASK_STATUS_LABEL: Record<string, string> = {

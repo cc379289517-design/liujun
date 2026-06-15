@@ -15,6 +15,12 @@ import {
   PHOTOGRAPHER_MAX_ACTIVE_TASK_OPTIONS,
   parsePhotographerMaxActiveTasks,
 } from "@/lib/photographerTaskLimit";
+import {
+  DEFAULT_EATING_OVERTIME_ALERT_MIN,
+  DEFAULT_EATING_REENTRY_COOLDOWN_MIN,
+  EATING_OVERTIME_ALERT_CONFIG_KEY,
+  EATING_REENTRY_COOLDOWN_CONFIG_KEY,
+} from "@/lib/eatingPresence";
 
 const P1_DISPATCH_CFG_KEY = "p1_interrupt_dispatch_mode";
 type P1DispatchUi = "priority_tier_rr" | "flat_round_robin";
@@ -117,7 +123,9 @@ function durationLabel(min: number, max: number): string {
 }
 
 const PARAM_DEFS = [
-  { key: "ending_alert_min", min: 1, max: 10, step: 1, label: "快结束提醒(分钟)" },
+  { key: "ending_alert_min", min: 1, max: 10, step: 1, defaultValue: 2, label: "快结束提醒(分钟)" },
+  { key: EATING_OVERTIME_ALERT_CONFIG_KEY, min: 5, max: 120, step: 5, defaultValue: DEFAULT_EATING_OVERTIME_ALERT_MIN, label: "吃饭中超时提醒(分钟)" },
+  { key: EATING_REENTRY_COOLDOWN_CONFIG_KEY, min: 5, max: 180, step: 5, defaultValue: DEFAULT_EATING_REENTRY_COOLDOWN_MIN, label: "吃饭再次切换冷却(分钟)" },
 ] as const;
 
 type EditForm = {
@@ -140,7 +148,7 @@ export default function TaskLogicTab({ categories: initCategories, buildings, co
   const [params, setParams] = useState<Record<string, number>>(() => {
     const init: Record<string, number> = {};
     for (const d of PARAM_DEFS) {
-      init[d.key] = Number(config[d.key]?.value ?? d.min);
+      init[d.key] = Number(config[d.key]?.value ?? d.defaultValue);
     }
     return init;
   });

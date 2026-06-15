@@ -92,6 +92,8 @@ model Profile {
   activeRoom    String?       @map("active_room")
   status        ProfileStatus @default(idle)
   subStatus     String?       @map("sub_status") // 微标签：上厕所、请假、身体不适
+  eatingStartedAt DateTime?   @map("eating_started_at")
+  eatingEndedAt   DateTime?   @map("eating_ended_at")
   onlineStatus  OnlineStatus  @default(online) @map("online_status")
   isOnline      Boolean       @default(true) @map("is_online")
   building      Building      @relation(fields: [buildingId], references: [id])
@@ -166,6 +168,7 @@ model BookingTask {
   estEndTime      DateTime?   @map("est_end_time")
   status          TaskStatus  @default(waiting)
   note            String?     // 特殊备注（带小推车、工具等）
+  publisherFeedback String?   @map("publisher_feedback") // 摄影师任务发布明细反馈：like / dislike
 
   // 时间戳
   createdAt       DateTime    @default(now()) @map("created_at")

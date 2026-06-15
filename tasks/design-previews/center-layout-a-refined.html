@@ -1,0 +1,773 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>SPAD Center Layout Refined Concepts</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --ink: #151b27;
+        --muted: #6f7784;
+        --soft: rgba(255, 255, 255, 0.58);
+        --soft-strong: rgba(255, 255, 255, 0.74);
+        --line: rgba(81, 101, 130, 0.14);
+        --blue: #3478ff;
+        --green: #20c77a;
+        --orange: #ff7a1a;
+        --red: #ef3f54;
+        --shadow: 0 30px 90px rgba(56, 68, 89, 0.14);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        color: var(--ink);
+        background:
+          radial-gradient(circle at 74% 6%, rgba(149, 202, 255, 0.27), transparent 25%),
+          radial-gradient(circle at 16% 22%, rgba(207, 238, 225, 0.7), transparent 28%),
+          linear-gradient(145deg, #f7f9fb 0%, #edf3f7 54%, #e8f0f2 100%);
+        font-family:
+          "SF Pro Display", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei",
+          system-ui, sans-serif;
+        letter-spacing: 0;
+      }
+
+      body::before {
+        position: fixed;
+        inset: 0;
+        pointer-events: none;
+        content: "";
+        background-image:
+          linear-gradient(rgba(38, 54, 78, 0.034) 1px, transparent 1px),
+          linear-gradient(90deg, rgba(38, 54, 78, 0.034) 1px, transparent 1px);
+        background-size: 48px 48px;
+        mask-image: linear-gradient(to bottom, rgba(0, 0, 0, 0.74), transparent 76%);
+      }
+
+      .concept {
+        display: none;
+      }
+
+      body[data-view="a"] .concept-a,
+      body[data-view="b"] .concept-b,
+      body[data-view="c"] .concept-c {
+        display: block;
+      }
+
+      .shell {
+        width: 1600px;
+        height: 1000px;
+        padding: 18px;
+      }
+
+      .app {
+        display: grid;
+        grid-template-columns: 224px minmax(0, 1fr) 74px;
+        gap: 16px;
+        width: 100%;
+        height: 100%;
+      }
+
+      .glass {
+        border: 1px solid rgba(255, 255, 255, 0.7);
+        background: var(--soft);
+        box-shadow: var(--shadow), inset 0 1px 0 rgba(255, 255, 255, 0.72);
+        backdrop-filter: blur(26px) saturate(1.24);
+      }
+
+      .left {
+        display: grid;
+        grid-template-rows: 112px 396px 1fr;
+        gap: 12px;
+        padding: 12px;
+        border-radius: 36px;
+      }
+
+      .profile {
+        display: grid;
+        grid-template-columns: 68px 1fr;
+        align-items: center;
+        gap: 12px;
+      }
+
+      .avatar {
+        width: 68px;
+        height: 68px;
+        border-radius: 28px;
+        background:
+          linear-gradient(140deg, rgba(63, 141, 206, 0.8), rgba(224, 236, 240, 0.72)),
+          url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='80' height='80'%3E%3Ccircle cx='40' cy='40' r='40' fill='%23cad6df'/%3E%3Cpath d='M13 57c14-26 39-31 55-8v31H13z' fill='%232a435b'/%3E%3Ccircle cx='39' cy='32' r='16' fill='%23f3c7aa'/%3E%3C/svg%3E");
+        background-size: cover;
+        box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.75);
+      }
+
+      .name {
+        margin: 0 0 7px;
+        font-size: 15px;
+        font-weight: 760;
+      }
+
+      .role,
+      .tiny {
+        color: var(--muted);
+        font-size: 11px;
+        font-weight: 600;
+      }
+
+      .location {
+        display: inline-flex;
+        margin-top: 10px;
+        color: #ff6b16;
+        font-size: 12px;
+        font-weight: 760;
+      }
+
+      .quick {
+        display: grid;
+        gap: 10px;
+      }
+
+      .section-title {
+        font-size: 12px;
+        font-weight: 760;
+      }
+
+      .quick-chip {
+        display: grid;
+        place-items: center;
+        min-height: 62px;
+        border-radius: 24px;
+        font-size: 22px;
+        font-weight: 780;
+      }
+
+      .quick-chip:nth-child(2) { background: rgba(255, 214, 220, 0.64); color: #d5172c; }
+      .quick-chip:nth-child(3) { background: rgba(255, 221, 199, 0.62); color: #d94e00; }
+      .quick-chip:nth-child(4) { background: rgba(255, 237, 183, 0.68); color: #bd6b00; }
+      .quick-chip:nth-child(5) { background: rgba(199, 238, 221, 0.74); color: #00876a; }
+      .quick-chip:nth-child(6) { background: rgba(211, 225, 248, 0.8); color: #1f68e8; }
+
+      .my-tasks {
+        display: grid;
+        gap: 8px;
+        min-height: 0;
+      }
+
+      .task-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+      }
+
+      .task-mini {
+        display: grid;
+        gap: 5px;
+        padding: 11px;
+        border-radius: 22px;
+        background: rgba(255, 255, 255, 0.5);
+      }
+
+      .p {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 32px;
+        height: 20px;
+        border-radius: 999px;
+        background: rgba(255, 240, 223, 0.9);
+        color: #ff6b16;
+        font-size: 11px;
+        font-weight: 760;
+      }
+
+      .status {
+        color: var(--blue);
+        font-size: 10px;
+        font-weight: 720;
+      }
+
+      .right-dock {
+        display: grid;
+        align-content: center;
+        gap: 12px;
+        padding: 10px;
+        border-radius: 36px;
+      }
+
+      .dot-avatar {
+        position: relative;
+        width: 42px;
+        height: 42px;
+        margin: 0 auto;
+        border-radius: 18px;
+        background: linear-gradient(140deg, #eef2f4, #cfd8df);
+        box-shadow: inset 0 0 0 1px white, 0 10px 22px rgba(61, 72, 90, 0.12);
+      }
+
+      .dot-avatar::after {
+        position: absolute;
+        right: -2px;
+        bottom: -1px;
+        width: 10px;
+        height: 10px;
+        border: 2px solid white;
+        border-radius: 999px;
+        background: var(--green);
+        content: "";
+      }
+
+      .main {
+        min-width: 0;
+      }
+
+      .topbar {
+        display: grid;
+        grid-template-columns: 1fr auto 1fr;
+        align-items: center;
+        height: 46px;
+        margin-bottom: 12px;
+      }
+
+      .building-tabs {
+        display: inline-flex;
+        grid-column: 2;
+        gap: 4px;
+        padding: 4px;
+        border-radius: 24px;
+        background: rgba(255, 255, 255, 0.62);
+        box-shadow: 0 12px 30px rgba(58, 72, 94, 0.1), inset 0 1px 0 rgba(255, 255, 255, 0.8);
+        backdrop-filter: blur(18px);
+      }
+
+      .building-tabs span {
+        min-width: 72px;
+        padding: 9px 14px;
+        border-radius: 19px;
+        color: #2d3544;
+        font-size: 12px;
+        font-weight: 700;
+        text-align: center;
+      }
+
+      .building-tabs .active {
+        background: rgba(255, 255, 255, 0.96);
+        box-shadow: 0 8px 18px rgba(44, 55, 76, 0.11);
+      }
+
+      .admin {
+        justify-self: end;
+        padding: 10px 16px;
+        border-radius: 22px;
+        background: rgba(255, 255, 255, 0.58);
+        color: #243044;
+        font-size: 12px;
+        font-weight: 720;
+        backdrop-filter: blur(18px);
+      }
+
+      .center-stack {
+        display: grid;
+        grid-template-rows: 3fr 2fr;
+        gap: 14px;
+        height: calc(1000px - 18px * 2 - 46px - 12px);
+      }
+
+      .surface {
+        position: relative;
+        overflow: hidden;
+        border-radius: 48px;
+      }
+
+      .map {
+        min-height: 0;
+        background:
+          radial-gradient(circle at 18% 16%, rgba(255, 255, 255, 0.74), transparent 34%),
+          rgba(249, 252, 255, 0.5);
+      }
+
+      .map::before {
+        position: absolute;
+        inset: 0;
+        background-image:
+          linear-gradient(rgba(67, 82, 104, 0.05) 1px, transparent 1px),
+          linear-gradient(90deg, rgba(67, 82, 104, 0.05) 1px, transparent 1px);
+        background-size: 38px 38px;
+        content: "";
+      }
+
+      .floor-svg {
+        position: absolute;
+        inset: 6% 4% 4%;
+        width: 92%;
+        height: 88%;
+        opacity: 0.76;
+        filter: drop-shadow(0 22px 38px rgba(66, 77, 88, 0.14));
+      }
+
+      .marker {
+        position: absolute;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 42px;
+        height: 42px;
+        border-radius: 999px;
+        border: 3px solid var(--red);
+        background: linear-gradient(140deg, #ffe9df, #bac9d8);
+        color: #142235;
+        font-size: 12px;
+        font-weight: 780;
+        box-shadow: 0 0 0 19px rgba(238, 67, 82, 0.1), 0 9px 18px rgba(60, 70, 90, 0.16);
+      }
+
+      .marker.blue {
+        border-color: var(--blue);
+        box-shadow: 0 0 0 19px rgba(52, 120, 255, 0.1), 0 9px 18px rgba(60, 70, 90, 0.16);
+      }
+
+      .concept-title,
+      .mode-chip,
+      .map-legend {
+        position: absolute;
+        z-index: 2;
+        display: inline-flex;
+        align-items: center;
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.58);
+        backdrop-filter: blur(16px);
+      }
+
+      .concept-title {
+        top: 20px;
+        left: 24px;
+        gap: 9px;
+        padding: 9px 13px;
+        color: #263044;
+        font-size: 12px;
+        font-weight: 720;
+      }
+
+      .concept-title::before {
+        width: 9px;
+        height: 9px;
+        border-radius: 999px;
+        background: #58a6ff;
+        content: "";
+        box-shadow: 0 0 0 5px rgba(88, 166, 255, 0.13);
+      }
+
+      .mode-chip {
+        top: 20px;
+        right: 24px;
+        gap: 8px;
+        padding: 8px 12px;
+        background: rgba(21, 30, 44, 0.72);
+        color: rgba(255, 255, 255, 0.88);
+        font-size: 11px;
+        font-weight: 720;
+      }
+
+      .mode-chip::before {
+        width: 7px;
+        height: 7px;
+        border-radius: 999px;
+        background: #82d8ff;
+        content: "";
+      }
+
+      .map-legend {
+        right: 26px;
+        bottom: 18px;
+        gap: 15px;
+        padding: 10px 14px;
+        color: #435066;
+        font-size: 11px;
+        font-weight: 650;
+      }
+
+      .legend-dot {
+        display: inline-block;
+        width: 8px;
+        height: 8px;
+        margin-right: 5px;
+        border-radius: 999px;
+        background: var(--green);
+      }
+
+      .dashboard {
+        display: grid;
+        grid-template-columns: 36% 1fr;
+        gap: 26px;
+        padding: 20px 24px;
+        background: rgba(244, 248, 252, 0.48);
+      }
+
+      .queue-card {
+        padding: 18px;
+        border: 1px solid rgba(255, 255, 255, 0.74);
+        border-radius: 34px;
+        background: rgba(255, 255, 255, 0.58);
+        box-shadow: 0 18px 44px rgba(56, 68, 89, 0.08), inset 0 1px 0 rgba(255, 255, 255, 0.7);
+      }
+
+      .queue-list {
+        display: grid;
+        gap: 10px;
+        margin-top: 14px;
+      }
+
+      .queue-item {
+        padding: 11px 12px;
+        border-radius: 18px;
+        background: rgba(255, 255, 255, 0.42);
+      }
+
+      .queue-item strong {
+        font-size: 13px;
+        font-weight: 720;
+      }
+
+      .queue-note {
+        margin-top: 6px;
+        color: var(--red);
+        font-size: 10px;
+        font-weight: 680;
+      }
+
+      .data-zone {
+        min-width: 0;
+      }
+
+      .data-head {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        margin-bottom: 18px;
+      }
+
+      .data-title {
+        margin: 0;
+        font-size: 13px;
+        font-weight: 760;
+      }
+
+      .telemetry {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        border-top: 1px solid var(--line);
+        border-bottom: 1px solid var(--line);
+      }
+
+      .telemetry-cell {
+        min-height: 86px;
+        padding: 15px 18px;
+        border-right: 1px solid var(--line);
+      }
+
+      .telemetry-cell:last-child {
+        border-right: 0;
+      }
+
+      .label {
+        color: var(--muted);
+        font-size: 10px;
+        font-weight: 720;
+        text-transform: uppercase;
+      }
+
+      .value {
+        margin-top: 9px;
+        font-size: 30px;
+        font-weight: 760;
+        line-height: 1;
+      }
+
+      .unit {
+        color: var(--muted);
+        font-size: 12px;
+        font-weight: 620;
+      }
+
+      .lower-data {
+        display: grid;
+        grid-template-columns: 1.2fr 0.78fr 0.9fr;
+        gap: 26px;
+        margin-top: 19px;
+      }
+
+      .stat-line,
+      .rank-line {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+        min-height: 30px;
+        border-bottom: 1px solid rgba(81, 101, 130, 0.1);
+        font-size: 12px;
+        font-weight: 680;
+      }
+
+      .meter {
+        height: 6px;
+        margin-top: 11px;
+        border-radius: 999px;
+        background: rgba(33, 45, 65, 0.1);
+        overflow: hidden;
+      }
+
+      .meter i {
+        display: block;
+        height: 100%;
+        border-radius: inherit;
+        background: linear-gradient(90deg, #8fc9ff, #3478ff);
+      }
+
+      .donut {
+        width: 112px;
+        height: 112px;
+        margin-top: 10px;
+        border-radius: 999px;
+        background: conic-gradient(#3478ff 0 34%, #20c77a 34% 58%, #ff7a1a 58% 78%, #ef3f54 78% 100%);
+        mask: radial-gradient(circle, transparent 44%, #000 45%);
+      }
+
+      .control-disc {
+        position: relative;
+        width: 124px;
+        height: 124px;
+        margin-top: 4px;
+        border-radius: 999px;
+        background:
+          radial-gradient(circle, rgba(255, 255, 255, 0.18) 0 30%, transparent 31%),
+          conic-gradient(from -90deg, rgba(52, 120, 255, 0.28), rgba(32, 199, 122, 0.22), rgba(239, 63, 84, 0.2), rgba(52, 120, 255, 0.28));
+        box-shadow: inset 0 0 0 1px rgba(81, 101, 130, 0.16);
+      }
+
+      .control-disc::after {
+        position: absolute;
+        inset: 41px;
+        border-radius: 999px;
+        background: rgba(23, 32, 46, 0.12);
+        content: "";
+      }
+
+      .concept-b .surface,
+      .concept-b .left,
+      .concept-b .right-dock {
+        border-radius: 58px;
+      }
+
+      .concept-b .dashboard {
+        grid-template-columns: 39% 1fr;
+        padding: 18px 24px 20px;
+      }
+
+      .concept-b .telemetry {
+        grid-template-columns: 1.2fr 1fr 1fr;
+      }
+
+      .concept-b .telemetry-cell {
+        min-height: 100px;
+      }
+
+      .concept-b .lower-data {
+        grid-template-columns: 1fr 1fr 1fr;
+      }
+
+      .concept-c .dashboard {
+        grid-template-columns: 34% 1fr;
+        gap: 30px;
+      }
+
+      .concept-c .telemetry {
+        grid-template-columns: repeat(6, 1fr);
+      }
+
+      .concept-c .telemetry-cell {
+        min-height: 74px;
+        padding: 13px 14px;
+      }
+
+      .concept-c .value {
+        font-size: 25px;
+      }
+
+      .concept-c .lower-data {
+        grid-template-columns: 1.1fr 1.1fr 1fr;
+      }
+    </style>
+  </head>
+  <body data-view="a">
+    <main class="concept concept-a shell">
+      <div class="app">
+        <aside class="left glass">
+          <div class="profile">
+            <div class="avatar"></div>
+            <div>
+              <p class="name">刘军 - 管理</p>
+              <div class="role">摄影部</div>
+              <div class="location">南座四楼 · 实景棚</div>
+            </div>
+          </div>
+          <div class="quick">
+            <div class="section-title">快捷预约</div>
+            <div class="quick-chip">手持</div>
+            <div class="quick-chip">服装穿戴</div>
+            <div class="quick-chip">手工DIY</div>
+            <div class="quick-chip">熨烫</div>
+            <div class="quick-chip">其他</div>
+          </div>
+          <div class="my-tasks">
+            <div class="task-row"><span class="section-title">我的任务</span><span class="tiny">更多数据 →</span></div>
+            <div class="task-mini"><div class="task-row"><span><b class="p">P2</b> 服装穿戴</span><span class="status">队列中</span></div><div class="tiny">420室 · 待分配</div></div>
+            <div class="task-mini"><div class="task-row"><span><b class="p">P2</b> 手持</span><span class="status">待就位</span></div><div class="tiny">418室 · 已等待11小时</div></div>
+            <div class="task-mini"><div class="task-row"><span><b class="p">P2</b> 熨烫</span><span class="status">进行中</span></div><div class="tiny">402室 · 已超时48分钟</div></div>
+          </div>
+        </aside>
+        <section class="main">
+          <div class="topbar">
+            <div></div>
+            <div class="building-tabs"><span>A座</span><span>B座</span><span>北座</span><span>东座三楼</span><span class="active">南座四楼</span></div>
+            <div class="admin">后台管理</div>
+          </div>
+          <div class="center-stack">
+            <section class="surface map glass">
+              <div class="concept-title">二轮 A · 大圆角飞控</div>
+              <div class="mode-chip">Auto light / dark</div>
+              <svg class="floor-svg" viewBox="0 0 1000 470" aria-hidden="true">
+                <g fill="rgba(255,255,255,.66)" stroke="#66717e" stroke-width="5" stroke-linejoin="round">
+                  <path d="M60 160 230 40 470 168 394 238 260 170 156 236Z" />
+                  <path d="M430 177 895 270 845 374 380 286Z" />
+                  <path d="M150 260 310 332 260 430 92 354Z" />
+                  <path d="M610 280 930 344 888 430 565 366Z" />
+                </g>
+                <g stroke="#748091" stroke-width="3" opacity=".8">
+                  <path d="M178 88 338 174M236 53 407 140M470 168 545 183M550 194l-52 96M623 207l-52 96M696 222l-52 96M770 237l-52 96M845 252l-52 96M128 247l166 78M185 277l-53 105M240 302l-53 105M624 293l-42 86M690 307l-42 86M760 321l-42 86M830 335l-42 86" />
+                </g>
+              </svg>
+              <div class="marker blue" style="left: 20%; top: 58%;">李</div>
+              <div class="marker" style="left: 23%; top: 59%;">王</div>
+              <div class="marker" style="left: 54%; top: 65%;">赵</div>
+              <div class="marker" style="left: 68%; top: 75%;">陈</div>
+              <div class="map-legend"><span><i class="legend-dot"></i>空闲中</span><span><i class="legend-dot" style="background:var(--blue)"></i>待就位</span><span><i class="legend-dot" style="background:var(--orange)"></i>进行中</span><span><i class="legend-dot" style="background:var(--red)"></i>已超时</span></div>
+            </section>
+            <section class="surface dashboard glass">
+              <div class="queue-card">
+                <div class="task-row"><span class="section-title">公共队列</span><span class="tiny">18 单 · 6 超时</span></div>
+                <div class="queue-list">
+                  <div class="queue-item"><div class="task-row"><strong><b class="p">P1</b> 服装穿戴</strong><span class="status">等待 48m</span></div><div class="queue-note">当前摄影师已达到最大 2 条任务发布量</div></div>
+                  <div class="queue-item"><div class="task-row"><strong><b class="p">P2</b> 手工DIY</strong><span class="status">待就位</span></div><div class="tiny">431室 · 马婷婷</div></div>
+                  <div class="queue-item"><div class="task-row"><strong><b class="p">P3</b> 熨烫</strong><span class="status">进行中</span></div><div class="tiny">402室 · 协作 2人</div></div>
+                </div>
+              </div>
+              <div class="data-zone">
+                <div class="data-head"><h2 class="data-title">区域任务数据</h2><span class="tiny">South 4F · Live sync</span></div>
+                <div class="telemetry">
+                  <div class="telemetry-cell"><div class="label">Total tasks</div><div class="value">86</div><div class="unit">今日总单</div></div>
+                  <div class="telemetry-cell"><div class="label">Queue</div><div class="value">18</div><div class="unit">公共队列</div></div>
+                  <div class="telemetry-cell"><div class="label">In progress</div><div class="value">9</div><div class="unit">进行中</div></div>
+                  <div class="telemetry-cell"><div class="label">Over time</div><div class="value" style="color:var(--red)">6</div><div class="unit">已超时</div></div>
+                </div>
+                <div class="lower-data">
+                  <div><div class="section-title">助理排行</div><div class="rank-line">小雅 <span>8.6</span></div><div class="meter"><i style="width:86%"></i></div><div class="rank-line">晓明 <span>7.8</span></div><div class="meter"><i style="width:78%"></i></div></div>
+                  <div><div class="section-title">任务类型</div><div class="donut"></div></div>
+                  <div><div class="section-title">助理状态</div><div class="stat-line">空闲 <span>6</span></div><div class="stat-line">待就位 <span>4</span></div><div class="stat-line">忙碌 <span>9</span></div></div>
+                </div>
+              </div>
+            </section>
+          </div>
+        </section>
+        <aside class="right-dock glass"><div class="dot-avatar"></div><div class="dot-avatar"></div><div class="dot-avatar"></div><div class="dot-avatar"></div><div class="dot-avatar"></div><div class="dot-avatar"></div></aside>
+      </div>
+    </main>
+
+    <main class="concept concept-b shell">
+      <div class="app">
+        <aside class="left glass">
+          <div class="profile"><div class="avatar"></div><div><p class="name">刘军 - 管理</p><div class="role">摄影部</div><div class="location">南座四楼 · 实景棚</div></div></div>
+          <div class="quick"><div class="section-title">快捷预约</div><div class="quick-chip">手持</div><div class="quick-chip">服装穿戴</div><div class="quick-chip">手工DIY</div><div class="quick-chip">熨烫</div><div class="quick-chip">其他</div></div>
+          <div class="my-tasks"><div class="task-row"><span class="section-title">我的任务</span><span class="tiny">更多数据 →</span></div><div class="task-mini"><div class="task-row"><span><b class="p">P2</b> 服装穿戴</span><span class="status">队列中</span></div><div class="tiny">420室 · 待分配</div></div><div class="task-mini"><div class="task-row"><span><b class="p">P2</b> 手持</span><span class="status">待就位</span></div><div class="tiny">418室 · 已等待11小时</div></div></div>
+        </aside>
+        <section class="main">
+          <div class="topbar"><div></div><div class="building-tabs"><span>A座</span><span>B座</span><span>北座</span><span>东座三楼</span><span class="active">南座四楼</span></div><div class="admin">后台管理</div></div>
+          <div class="center-stack">
+            <section class="surface map glass">
+              <div class="concept-title">二轮 B · 透明胶囊中控</div><div class="mode-chip">Auto light / dark</div>
+              <svg class="floor-svg" viewBox="0 0 1000 470" aria-hidden="true"><g fill="rgba(255,255,255,.66)" stroke="#66717e" stroke-width="5" stroke-linejoin="round"><path d="M60 160 230 40 470 168 394 238 260 170 156 236Z" /><path d="M430 177 895 270 845 374 380 286Z" /><path d="M150 260 310 332 260 430 92 354Z" /><path d="M610 280 930 344 888 430 565 366Z" /></g><g stroke="#748091" stroke-width="3" opacity=".8"><path d="M178 88 338 174M236 53 407 140M470 168 545 183M550 194l-52 96M623 207l-52 96M696 222l-52 96M770 237l-52 96M845 252l-52 96M128 247l166 78M185 277l-53 105M240 302l-53 105M624 293l-42 86M690 307l-42 86M760 321l-42 86M830 335l-42 86" /></g></svg>
+              <div class="marker blue" style="left: 20%; top: 58%;">李</div><div class="marker" style="left: 54%; top: 65%;">赵</div><div class="marker" style="left: 68%; top: 75%;">陈</div>
+              <div class="map-legend"><span><i class="legend-dot"></i>空闲中</span><span><i class="legend-dot" style="background:var(--blue)"></i>待就位</span><span><i class="legend-dot" style="background:var(--orange)"></i>进行中</span><span><i class="legend-dot" style="background:var(--red)"></i>已超时</span></div>
+            </section>
+            <section class="surface dashboard glass">
+              <div class="queue-card"><div class="task-row"><span class="section-title">公共队列</span><span class="tiny">优先处理</span></div><div class="queue-list"><div class="queue-item"><div class="task-row"><strong><b class="p">P1</b> 服装穿戴</strong><span class="status">等待 48m</span></div><div class="queue-note">当前摄影师已达到最大 2 条任务发布量，待释放</div></div><div class="queue-item"><div class="task-row"><strong><b class="p">P2</b> 手工DIY</strong><span class="status">待就位</span></div></div><div class="queue-item"><div class="task-row"><strong><b class="p">P3</b> 熨烫</strong><span class="status">进行中</span></div></div></div></div>
+              <div class="data-zone">
+                <div class="data-head"><h2 class="data-title">Flight-like Metrics</h2><span class="tiny">无框参数矩阵</span></div>
+                <div class="telemetry">
+                  <div class="telemetry-cell"><div class="label">Demand</div><div class="value">18 <span class="unit">queue</span></div><div class="meter"><i style="width:62%"></i></div></div>
+                  <div class="telemetry-cell"><div class="label">Capacity</div><div class="value">12 <span class="unit">assistants</span></div><div class="meter"><i style="width:74%"></i></div></div>
+                  <div class="telemetry-cell"><div class="label">Risk</div><div class="value" style="color:var(--red)">6 <span class="unit">timeout</span></div><div class="meter"><i style="width:38%;background:linear-gradient(90deg,#ff9aa6,#ef3f54)"></i></div></div>
+                </div>
+                <div class="lower-data">
+                  <div><div class="section-title">排行</div><div class="rank-line">小雅 <span>8.6</span></div><div class="rank-line">晓明 <span>7.8</span></div><div class="rank-line">小林 <span>7.1</span></div></div>
+                  <div><div class="section-title">任务类型</div><div class="control-disc"></div></div>
+                  <div><div class="section-title">助理状态</div><div class="stat-line">空闲 <span>6</span></div><div class="stat-line">待就位 <span>4</span></div><div class="stat-line">进行中 <span>9</span></div></div>
+                </div>
+              </div>
+            </section>
+          </div>
+        </section>
+        <aside class="right-dock glass"><div class="dot-avatar"></div><div class="dot-avatar"></div><div class="dot-avatar"></div><div class="dot-avatar"></div><div class="dot-avatar"></div><div class="dot-avatar"></div></aside>
+      </div>
+    </main>
+
+    <main class="concept concept-c shell">
+      <div class="app">
+        <aside class="left glass">
+          <div class="profile"><div class="avatar"></div><div><p class="name">刘军 - 管理</p><div class="role">摄影部</div><div class="location">南座四楼 · 实景棚</div></div></div>
+          <div class="quick"><div class="section-title">快捷预约</div><div class="quick-chip">手持</div><div class="quick-chip">服装穿戴</div><div class="quick-chip">手工DIY</div><div class="quick-chip">熨烫</div><div class="quick-chip">其他</div></div>
+          <div class="my-tasks"><div class="task-row"><span class="section-title">我的任务</span><span class="tiny">更多数据 →</span></div><div class="task-mini"><div class="task-row"><span><b class="p">P2</b> 服装穿戴</span><span class="status">队列中</span></div><div class="tiny">420室 · 待分配</div></div><div class="task-mini"><div class="task-row"><span><b class="p">P2</b> 手持</span><span class="status">待就位</span></div><div class="tiny">418室 · 已等待11小时</div></div></div>
+        </aside>
+        <section class="main">
+          <div class="topbar"><div></div><div class="building-tabs"><span>A座</span><span>B座</span><span>北座</span><span>东座三楼</span><span class="active">南座四楼</span></div><div class="admin">后台管理</div></div>
+          <div class="center-stack">
+            <section class="surface map glass">
+              <div class="concept-title">二轮 C · 极简宽屏仪表</div><div class="mode-chip">Auto light / dark</div>
+              <svg class="floor-svg" viewBox="0 0 1000 470" aria-hidden="true"><g fill="rgba(255,255,255,.66)" stroke="#66717e" stroke-width="5" stroke-linejoin="round"><path d="M60 160 230 40 470 168 394 238 260 170 156 236Z" /><path d="M430 177 895 270 845 374 380 286Z" /><path d="M150 260 310 332 260 430 92 354Z" /><path d="M610 280 930 344 888 430 565 366Z" /></g><g stroke="#748091" stroke-width="3" opacity=".8"><path d="M178 88 338 174M236 53 407 140M470 168 545 183M550 194l-52 96M623 207l-52 96M696 222l-52 96M770 237l-52 96M845 252l-52 96M128 247l166 78M185 277l-53 105M240 302l-53 105M624 293l-42 86M690 307l-42 86M760 321l-42 86M830 335l-42 86" /></g></svg>
+              <div class="marker blue" style="left: 20%; top: 58%;">李</div><div class="marker" style="left: 54%; top: 65%;">赵</div><div class="marker" style="left: 68%; top: 75%;">陈</div>
+              <div class="map-legend"><span><i class="legend-dot"></i>空闲中</span><span><i class="legend-dot" style="background:var(--blue)"></i>待就位</span><span><i class="legend-dot" style="background:var(--orange)"></i>进行中</span><span><i class="legend-dot" style="background:var(--red)"></i>已超时</span></div>
+            </section>
+            <section class="surface dashboard glass">
+              <div class="queue-card"><div class="task-row"><span class="section-title">公共队列</span><span class="tiny">18 单</span></div><div class="queue-list"><div class="queue-item"><div class="task-row"><strong><b class="p">P1</b> 服装穿戴</strong><span class="status">等待 48m</span></div><div class="queue-note">当前摄影师已达到最大 2 条任务发布量</div></div><div class="queue-item"><div class="task-row"><strong><b class="p">P2</b> 手工DIY</strong><span class="status">待就位</span></div></div><div class="queue-item"><div class="task-row"><strong><b class="p">P3</b> 熨烫</strong><span class="status">进行中</span></div></div></div></div>
+              <div class="data-zone">
+                <div class="data-head"><h2 class="data-title">实时概览</h2><span class="tiny">Brief / no cards</span></div>
+                <div class="telemetry">
+                  <div class="telemetry-cell"><div class="label">Total</div><div class="value">86</div></div>
+                  <div class="telemetry-cell"><div class="label">Queue</div><div class="value">18</div></div>
+                  <div class="telemetry-cell"><div class="label">Ready</div><div class="value">4</div></div>
+                  <div class="telemetry-cell"><div class="label">Running</div><div class="value">9</div></div>
+                  <div class="telemetry-cell"><div class="label">Paused</div><div class="value">2</div></div>
+                  <div class="telemetry-cell"><div class="label">Over</div><div class="value" style="color:var(--red)">6</div></div>
+                </div>
+                <div class="lower-data">
+                  <div><div class="section-title">助理排行</div><div class="rank-line">小雅 <span>8.6</span></div><div class="rank-line">晓明 <span>7.8</span></div><div class="rank-line">小林 <span>7.1</span></div></div>
+                  <div><div class="section-title">任务类型</div><div class="stat-line">服装穿戴 <span>34%</span></div><div class="stat-line">手工DIY <span>24%</span></div><div class="stat-line">熨烫 <span>18%</span></div></div>
+                  <div><div class="section-title">助理状态</div><div class="stat-line">空闲 <span>6</span></div><div class="stat-line">待就位 <span>4</span></div><div class="stat-line">忙碌 <span>9</span></div></div>
+                </div>
+              </div>
+            </section>
+          </div>
+        </section>
+        <aside class="right-dock glass"><div class="dot-avatar"></div><div class="dot-avatar"></div><div class="dot-avatar"></div><div class="dot-avatar"></div><div class="dot-avatar"></div><div class="dot-avatar"></div></aside>
+      </div>
+    </main>
+
+    <script>
+      document.body.dataset.view = new URLSearchParams(location.search).get("view") || "a";
+    </script>
+  </body>
+</html>

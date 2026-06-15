@@ -191,6 +191,25 @@ export async function PATCH(request: NextRequest, { params }: RouteContext) {
           });
 
           if (task.assistantId) {
+            await tx.taskCollaborator.upsert({
+              where: { taskId_assistantId: { taskId: id, assistantId: task.assistantId } },
+              create: {
+                taskId: id,
+                assistantId: task.assistantId,
+                role: "primary",
+                status: newStatus,
+                startedAt: newStatus === "executing" ? (task.startedAt ?? new Date()) : null,
+                workSegmentStartedAt: newStatus === "executing" ? new Date() : null,
+              },
+              update: {
+                role: "primary",
+                status: newStatus,
+                leftAt: null,
+                startedAt: newStatus === "executing" ? (task.startedAt ?? new Date()) : undefined,
+                workSegmentStartedAt: newStatus === "executing" ? new Date() : null,
+              },
+            });
+
             const profileStatus =
               newStatus === "executing"
                 ? ProfileStatus.executing
@@ -242,9 +261,20 @@ export async function PATCH(request: NextRequest, { params }: RouteContext) {
         return Response.json(updated);
       }
 
+      case "updatePublisherFeedback": {
+        const { feedback } = body as { feedback?: string | null };
+        const normalizedFeedback =
+          feedback === "like" || feedback === "dislike" ? feedback : null;
+        const updated = await prisma.bookingTask.update({
+          where: { id },
+          data: { publisherFeedback: normalizedFeedback },
+        });
+        return Response.json(updated);
+      }
+
       default:
         return Response.json(
-          { error: "Invalid action. Use: start, pause, complete, extend, setStatus, updateNote" },
+          { error: "Invalid action. Use: start, pause, complete, extend, setStatus, updateNote, updatePublisherFeedback" },
           { status: 400 }
         );
     }

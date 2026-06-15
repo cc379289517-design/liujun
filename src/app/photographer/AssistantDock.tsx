@@ -2,11 +2,23 @@
 
 import { useState, useCallback, useRef } from "react";
 
+function fmtMin(min: number): string {
+  const m = Math.max(0, Math.round(Number(min) || 0));
+  if (m <= 60) return `${m}分钟`;
+  const h = m / 60;
+  const rounded = Math.round(h * 10) / 10;
+  return Number.isInteger(rounded) ? `${rounded}小时` : `${rounded.toFixed(1)}小时`;
+}
+
 export interface DockAssistant {
   id: string;
   name: string;
   status: string;
   onlineStatus: string;
+  subStatus?: string | null;
+  updatedAt?: string;
+  eatingStartedAt?: string | null;
+  eatingEndedAt?: string | null;
   currentRoom: string | null;   // 当前活跃任务的房间（主标记位置）
   avatar: string | null;
   group: string | null;
@@ -32,11 +44,16 @@ export interface DockAssistant {
   pausedOvertimeMin: number | null;
   /** 被让行的待就位任务超过时段上限（与 pausedOvertimeMin 互斥场景） */
   preemptedOvertimeMin: number | null;
+  /** 吃饭中已离开分钟数 */
+  eatingElapsedMin?: number | null;
+  /** 吃饭中超过后台阈值的分钟数 */
+  eatingOvertimeMin?: number | null;
 }
 
 /** 状态色（Dock 状态点 / 地图头像描边等与文档一致） */
 export const DOCK_DOT = {
   idle: "#22c55e",
+  eating: "#3b82f6",
   assigned: "#3b82f6",
   inProgress: "#f97316",
   overtime: "#dc2626",
@@ -47,6 +64,8 @@ export const DOCK_DOT = {
 export function assistantDockDotColor(a: DockAssistant): string {
   const isOffline = a.onlineStatus === "offline" || a.onlineStatus === "on_break";
   if (isOffline) return DOCK_DOT.offline;
+  if (a.subStatus === "eating" && a.eatingOvertimeMin != null) return DOCK_DOT.overtime;
+  if (a.subStatus === "eating") return DOCK_DOT.eating;
   if (a.executingOvertimeMin != null || a.pausedOvertimeMin != null || a.preemptedOvertimeMin != null) {
     return DOCK_DOT.overtime;
   }
@@ -80,7 +99,6 @@ const BASE = 50;
 const MAX = 84;
 const GAP = 10;
 const RANGE = 170;
-const LEGEND_H = 86;
 const RAIL_PAD = 14;
 
 function getSizes(count: number, mouseY: number): number[] {
@@ -111,7 +129,49 @@ export type NoteEditAnchor = {
   height: number;
 };
 
-export default function AssistantDock({ assistants, onNoteEdit }: { assistants: DockAssistant[]; onNoteEdit?: (taskId: string, note: string, anchor: NoteEditAnchor) => void }) {
+type DockRankingCrown = { rank: 1 | 2 | 3 };
+
+function dockCrownMeta(rank: 1 | 2 | 3, avatarSize: number): { color: string; size: number; left: number; top: number } {
+  if (rank === 1) return { color: "#fde047", size: avatarSize * 0.52, left: -avatarSize * 0.2, top: -avatarSize * 0.23 };
+  if (rank === 2) return { color: "#e2e8f0", size: avatarSize * 0.42, left: -avatarSize * 0.16, top: -avatarSize * 0.18 };
+  return { color: "#f59e0b", size: avatarSize * 0.34, left: -avatarSize * 0.12, top: -avatarSize * 0.14 };
+}
+
+function DockRankingCrownBadge({ rank, avatarSize }: { rank: 1 | 2 | 3; avatarSize: number }) {
+  const meta = dockCrownMeta(rank, avatarSize);
+  return (
+    <svg
+      className="pointer-events-none absolute z-20 -rotate-[22deg] overflow-visible"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke={meta.color}
+      strokeWidth="2.6"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      style={{
+        width: meta.size,
+        height: meta.size,
+        left: meta.left,
+        top: meta.top,
+        filter: "drop-shadow(0 0 2px rgba(255,255,255,0.95)) drop-shadow(0 1px 1px rgba(15,23,42,0.22))",
+      }}
+    >
+      <path d="m3 8 4.5 4L12 5l4.5 7L21 8l-2 10H5L3 8Z" />
+      <path d="M5 18h14" />
+    </svg>
+  );
+}
+
+export default function AssistantDock({
+  assistants,
+  onNoteEdit,
+  rankingCrownByAssistantId = {},
+}: {
+  assistants: DockAssistant[];
+  onNoteEdit?: (taskId: string, note: string, anchor: NoteEditAnchor) => void;
+  rankingCrownByAssistantId?: Record<string, DockRankingCrown>;
+}) {
   const [mouseY, setMouseY] = useState(-1);
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -149,7 +209,6 @@ export default function AssistantDock({ assistants, onNoteEdit }: { assistants: 
           borderRadius: 20,
           width: BASE + 14,
           padding: `${RAIL_PAD}px 0`,
-          paddingBottom: LEGEND_H + 10,
           overflow: "visible",
         }}
         onMouseMove={handleMouseMove}
@@ -168,9 +227,13 @@ export default function AssistantDock({ assistants, onNoteEdit }: { assistants: 
             const hovered = hoveredId === a.id;
             const dotSize = 8 + (size - BASE) / (MAX - BASE) * 4;
             const isOffline = a.onlineStatus === "offline" || a.onlineStatus === "on_break";
-            const dotColor = assistantDockDotColor(a);
-            const headerColor = isOffline
+            const isEating = !isOffline && a.subStatus === "eating";
+	            const dotColor = assistantDockDotColor(a);
+	            const rankingCrown = rankingCrownByAssistantId[a.id] ?? null;
+	            const headerColor = isOffline
               ? "#9ca3af"
+              : isEating
+                ? DOCK_DOT.eating
               : a.executingOvertimeMin != null || a.pausedOvertimeMin != null || a.preemptedOvertimeMin != null
                 ? DOCK_DOT.overtime
                 : cfg.color;
@@ -203,10 +266,27 @@ export default function AssistantDock({ assistants, onNoteEdit }: { assistants: 
                   <div className="px-3 py-1.5 rounded-xl glass text-right">
                     {(() => {
                       if (isOffline) {
-                        const offLabel = a.onlineStatus === "on_break" ? "休假" : "下线";
+                        const offLabel = a.onlineStatus === "on_break" ? "今天有事不在～休假/下班 /离线" : "离线";
                         return (
                           <>
                             <p className="text-xs font-semibold text-gray-400">{a.name} · {offLabel}</p>
+                            <p className="text-[10px] text-[--text-muted] mt-0.5">{formatRoomOrVenue(a.currentRoom)}</p>
+                          </>
+                        );
+                      }
+                      if (isEating) {
+                        const eatingOvertime = a.eatingOvertimeMin != null;
+                        const eatingOvertimeMin = a.eatingOvertimeMin ?? 0;
+                        return (
+                          <>
+                            <p className={`text-xs font-semibold ${eatingOvertime ? "text-red-600" : "text-blue-500"}`}>
+                              {a.name} · {eatingOvertime ? `吃饭超时${eatingOvertimeMin === 0 ? "" : fmtMin(eatingOvertimeMin)}` : "吃饭中～稍后回来"}
+                            </p>
+                            {a.eatingElapsedMin != null && (
+                              <p className={`text-[10px] mt-0.5 ${eatingOvertime ? "text-red-500" : "text-blue-500/70"}`}>
+                                已离开{fmtMin(a.eatingElapsedMin)}
+                              </p>
+                            )}
                             <p className="text-[10px] text-[--text-muted] mt-0.5">{formatRoomOrVenue(a.currentRoom)}</p>
                           </>
                         );
@@ -289,10 +369,13 @@ export default function AssistantDock({ assistants, onNoteEdit }: { assistants: 
                     >
                       {a.name[0]}
                     </div>
-                  )}
-                </div>
+	                  )}
+	                </div>
+	                {rankingCrown && (
+	                  <DockRankingCrownBadge rank={rankingCrown.rank} avatarSize={size} />
+	                )}
 
-                {/* Status dot */}
+	                {/* Status dot */}
                 <div
                   className="absolute z-10 rounded-full"
                   style={{
@@ -308,25 +391,6 @@ export default function AssistantDock({ assistants, onNoteEdit }: { assistants: 
               </div>
             );
           })}
-        </div>
-
-        {/* Legend */}
-        <div className="absolute bottom-2 left-0 right-0 flex flex-col items-center" style={{ paddingLeft: 4 }}>
-          <div className="w-10 border-t border-gray-300/40 mb-2.5" />
-          <div className="flex flex-col gap-2">
-            {[
-              { color: DOCK_DOT.idle, label: "空闲中" },
-              { color: DOCK_DOT.assigned, label: "待就位" },
-              { color: DOCK_DOT.inProgress, label: "进行中" },
-              { color: DOCK_DOT.overtime, label: "已超时" },
-              { color: DOCK_DOT.offline, label: "已下线" },
-            ].map((row) => (
-              <div key={row.label} className="flex items-center gap-2">
-                <span className="flex-shrink-0 rounded-full" style={{ width: 8, height: 8, backgroundColor: row.color }} />
-                <span className="text-[9px] text-[--text-muted] leading-none whitespace-nowrap">{row.label}</span>
-              </div>
-            ))}
-          </div>
         </div>
       </div>
     </div>
