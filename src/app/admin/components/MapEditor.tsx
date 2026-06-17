@@ -453,7 +453,7 @@ export default function MapEditor({ building, rooms, venues = [], cropMode: crop
 
   if (!building.floorPlanUrl) {
     return (
-      <div className="border-2 border-dashed border-gray-200 rounded-2xl p-12 text-center">
+      <div className="border-2 border-dashed border-white/70 bg-white/30 rounded-2xl p-12 text-center">
         <svg
           width="40"
           height="40"
@@ -506,7 +506,7 @@ export default function MapEditor({ building, rooms, venues = [], cropMode: crop
 
       <div
         ref={containerRef}
-        className="relative rounded-2xl overflow-hidden border border-gray-200 select-none"
+        className="relative rounded-2xl overflow-hidden border border-white/70 select-none shadow-[inset_0_1px_0_rgba(255,255,255,0.6)]"
         style={{
           cursor: cropMode
             ? cropDrawing ? "crosshair" : "crosshair"
@@ -721,7 +721,7 @@ export default function MapEditor({ building, rooms, venues = [], cropMode: crop
 
         {/* Vertical zoom control — right side overlay */}
         <div
-          className="absolute right-3 top-1/2 -translate-y-1/2 flex flex-col items-center gap-1.5 bg-white/90 backdrop-blur-sm rounded-xl shadow-lg border border-gray-200 p-1.5"
+          className="admin-glass-toolbar absolute right-3 top-1/2 -translate-y-1/2 flex flex-col items-center gap-1.5 bg-white/90 backdrop-blur-sm rounded-xl shadow-lg border border-gray-200 p-1.5"
           style={{ zIndex: 30 }}
           onMouseDown={(e) => e.stopPropagation()}
         >

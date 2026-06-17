@@ -255,7 +255,7 @@ export default function SpaceTab({ buildings: buildingsProp, config, onRefresh }
         />
         <div className="flex items-stretch gap-4">
           <div
-            className={`relative h-24 w-40 shrink-0 overflow-hidden rounded-2xl border border-gray-200 bg-gray-100 ${
+            className={`relative h-24 w-40 shrink-0 overflow-hidden rounded-xl border border-white/70 bg-white/45 ${
               backgroundUploading ? "ring-2 ring-orange-300" : ""
             }`}
             onDragOver={(e) => e.preventDefault()}
@@ -264,7 +264,7 @@ export default function SpaceTab({ buildings: buildingsProp, config, onRefresh }
             {pageBackgroundUrl ? (
               <img src={pageBackgroundUrl} alt="页面背景预览" className="h-full w-full object-cover" />
             ) : (
-              <div className="flex h-full w-full items-center justify-center bg-gradient-to-br from-gray-100 to-gray-200">
+              <div className="flex h-full w-full items-center justify-center bg-gradient-to-br from-white/70 to-slate-100/70">
                 <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="#9ca3af" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
                   <rect x="3" y="3" width="18" height="18" rx="2" />
                   <circle cx="8.5" cy="8.5" r="1.5" />
@@ -326,7 +326,7 @@ export default function SpaceTab({ buildings: buildingsProp, config, onRefresh }
               onClick={() => setSelectedBuildingId(b.id)}
               className={`card p-3 cursor-pointer transition-all ${
                 selectedBuildingId === b.id
-                  ? "ring-2 ring-purple-400 shadow-md"
+                  ? "ring-2 ring-indigo-300/80 shadow-md"
                   : "hover:shadow-md"
               }`}
             >
@@ -384,7 +384,7 @@ export default function SpaceTab({ buildings: buildingsProp, config, onRefresh }
             {!selectedBuilding.floorPlanUrl && (
               <div
                 className={`border-2 border-dashed rounded-2xl p-4 text-center cursor-pointer transition-colors ${
-                  uploading ? "border-purple-300 bg-purple-50" : "border-gray-200 hover:border-purple-300"
+                  uploading ? "border-purple-300 bg-purple-50/70" : "border-white/70 bg-white/30 hover:border-purple-300"
                 }`}
                 onClick={() => fileInputRef.current?.click()}
                 onDragOver={(e) => e.preventDefault()}
@@ -523,7 +523,7 @@ export default function SpaceTab({ buildings: buildingsProp, config, onRefresh }
                         {getExtraVenues(selectedBuilding).map((venue) => (
                           <div
                             key={venue.name}
-                            className={`flex items-center justify-between px-2 py-1 rounded-lg group ${venue.type === "无影棚" ? "bg-gray-50" : "bg-blue-50"}`}
+                            className={`admin-table-row flex items-center justify-between px-2 py-1 rounded-lg group ${venue.type === "无影棚" ? "bg-gray-50" : "bg-blue-50"}`}
                           >
                             <div className="flex items-center gap-1.5 min-w-0">
                               <div className={`w-2 h-2 rounded-sm shrink-0 ${venue.type === "无影棚" ? "bg-gray-400" : "bg-blue-500"}`} style={{ transform: "rotate(45deg)" }} />
@@ -555,7 +555,7 @@ export default function SpaceTab({ buildings: buildingsProp, config, onRefresh }
                   房间列表 ({selectedBuilding.rooms.length})
                 </h3>
                 <div className="space-y-1">
-                  <div className="grid grid-cols-6 gap-2 px-2 text-[10px] text-[--text-muted] font-medium uppercase tracking-wider">
+                  <div className="admin-table-head grid grid-cols-6 gap-2 px-2 py-1.5 rounded-xl text-[10px] text-[--text-muted] font-medium uppercase tracking-wider">
                     <span>房间号</span>
                     <span>楼层</span>
                     <span>围栏半径</span>
@@ -566,7 +566,7 @@ export default function SpaceTab({ buildings: buildingsProp, config, onRefresh }
                   {selectedBuilding.rooms.map((room) => (
                     <div
                       key={room.id}
-                      className="grid grid-cols-6 gap-2 px-2 py-2 rounded-xl bg-[--bg-base] hover:bg-gray-100 transition-colors items-center"
+                      className="admin-table-row grid grid-cols-6 gap-2 px-2 py-2 rounded-xl bg-[--bg-base] hover:bg-gray-100 transition-colors items-center"
                     >
                       <span className="text-xs font-medium text-[--text-primary]">{room.roomNumber}</span>
                       <span className="text-xs text-[--text-secondary]">{room.floor}F</span>
@@ -633,8 +633,8 @@ function BuildingModal({
   }
 
   return (
-    <div className="fixed inset-0 bg-black/30 backdrop-blur-sm flex items-center justify-center z-50" onClick={onClose}>
-      <div className="card p-5 w-full max-w-sm" onClick={(e) => e.stopPropagation()}>
+    <div className="admin-modal fixed inset-0 bg-black/30 backdrop-blur-sm flex items-center justify-center z-50" onClick={onClose}>
+      <div className="admin-dialog card p-5 w-full max-w-sm" onClick={(e) => e.stopPropagation()}>
         <h2 className="text-base font-bold text-[--text-primary] mb-4">添加楼座</h2>
         <form onSubmit={handleSubmit} className="space-y-3">
           <div>
@@ -688,8 +688,8 @@ function RoomModal({
   }
 
   return (
-    <div className="fixed inset-0 bg-black/30 backdrop-blur-sm flex items-center justify-center z-50" onClick={onClose}>
-      <div className="card p-5 w-full max-w-sm" onClick={(e) => e.stopPropagation()}>
+    <div className="admin-modal fixed inset-0 bg-black/30 backdrop-blur-sm flex items-center justify-center z-50" onClick={onClose}>
+      <div className="admin-dialog card p-5 w-full max-w-sm" onClick={(e) => e.stopPropagation()}>
         <h2 className="text-base font-bold text-[--text-primary] mb-4">添加房间</h2>
         <form onSubmit={handleSubmit} className="space-y-3">
           <div>

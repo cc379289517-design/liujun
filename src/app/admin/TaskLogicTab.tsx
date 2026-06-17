@@ -27,8 +27,8 @@ type P1DispatchUi = "priority_tier_rr" | "flat_round_robin";
 
 function ConfirmDialog({ message, onConfirm, onCancel }: { message: string; onConfirm: () => void; onCancel: () => void }) {
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30">
-      <div className="bg-white rounded-2xl shadow-xl px-7 py-6 w-72 flex flex-col items-center gap-4">
+    <div className="admin-modal fixed inset-0 z-50 flex items-center justify-center bg-black/30">
+      <div className="admin-dialog bg-white rounded-2xl shadow-xl px-7 py-6 w-72 flex flex-col items-center gap-4">
         <p className="text-sm text-[--text-primary] text-center font-medium">{message}</p>
         <div className="flex gap-3 w-full">
           <button onClick={onCancel} className="flex-1 py-1.5 rounded-xl bg-gray-100 text-gray-600 text-sm hover:bg-gray-200 transition-colors">取消</button>
@@ -481,11 +481,11 @@ export default function TaskLogicTab({ categories: initCategories, buildings, co
       <div className="min-w-0">
         <div className="flex items-center justify-between mb-3">
           <h3 className="text-sm font-semibold text-[--text-primary]">任务优先级设定</h3>
-          <div className="flex bg-gray-100 rounded-lg p-0.5">
+          <div className="admin-segment flex bg-gray-100 rounded-lg p-0.5">
             <button
               onClick={() => setViewByCategory(false)}
               className={`px-3 py-1 rounded-md text-xs font-medium transition-colors ${
-                !viewByCategory ? "bg-white text-[--text-primary] shadow-sm" : "text-[--text-muted] hover:text-[--text-secondary]"
+                !viewByCategory ? "bg-white/80 text-[--text-primary] shadow-sm" : "text-[--text-muted] hover:text-[--text-secondary]"
               }`}
             >
               按优先级排列
@@ -493,7 +493,7 @@ export default function TaskLogicTab({ categories: initCategories, buildings, co
             <button
               onClick={() => setViewByCategory(true)}
               className={`px-3 py-1 rounded-md text-xs font-medium transition-colors ${
-                viewByCategory ? "bg-white text-[--text-primary] shadow-sm" : "text-[--text-muted] hover:text-[--text-secondary]"
+                viewByCategory ? "bg-white/80 text-[--text-primary] shadow-sm" : "text-[--text-muted] hover:text-[--text-secondary]"
               }`}
             >
               按任务类型排列
@@ -515,7 +515,7 @@ export default function TaskLogicTab({ categories: initCategories, buildings, co
                       items.map((cat) => (
                         <div
                           key={cat.id}
-                          className="flex items-center justify-between px-3 py-2 rounded-lg bg-gray-50 border border-gray-200"
+                          className="admin-table-row flex items-center justify-between px-3 py-2 rounded-lg bg-gray-50 border border-gray-200"
                         >
                           <span className="text-[11px] text-[--text-secondary]">{durationLabel(cat.minDuration, cat.maxDuration)}</span>
                           <span className={`text-[10px] font-bold px-2 py-0.5 rounded-md cursor-default ${PRIORITY_BADGE[cat.priorityLevel]}`} title={PRIORITY_TIPS[cat.priorityLevel]}>P{cat.priorityLevel}</span>
@@ -701,7 +701,7 @@ export default function TaskLogicTab({ categories: initCategories, buildings, co
                   {photographerMaxActiveTasks} 个
                 </button>
                 <div className="absolute right-0 top-full z-30 hidden pt-2 group-focus-within:block group-hover:block">
-                  <div className="flex w-20 flex-col gap-1 rounded-xl border border-gray-100 bg-white p-1.5 shadow-xl shadow-gray-200/80">
+                  <div className="admin-popover flex w-20 flex-col gap-1 rounded-xl border border-gray-100 bg-white p-1.5 shadow-xl shadow-gray-200/80">
                     {PHOTOGRAPHER_MAX_ACTIVE_TASK_OPTIONS.map((value) => (
                       <button
                         key={value}
@@ -784,7 +784,7 @@ export default function TaskLogicTab({ categories: initCategories, buildings, co
                   const enabled = collaborationEnabledByBuilding[building.id] ?? true;
                   const maxParticipants = collaborationMaxByBuilding[building.id] ?? 3;
                   return (
-                    <div key={building.id} className="flex min-h-10 items-center justify-between gap-3 rounded-lg border border-gray-100 bg-gray-50/70 px-3 py-1.5">
+                    <div key={building.id} className="admin-table-row flex min-h-10 items-center justify-between gap-3 rounded-lg border border-gray-100 bg-gray-50/70 px-3 py-1.5">
                       <div className="flex min-w-0 items-center gap-3">
                         <p className="shrink-0 text-xs font-semibold text-[--text-secondary]">{building.name}</p>
                         <p className="truncate text-[10px] font-medium text-gray-600">
@@ -805,7 +805,7 @@ export default function TaskLogicTab({ categories: initCategories, buildings, co
                           </button>
                           {enabled && (
                             <div className="absolute right-0 top-full z-20 hidden pt-1 group-hover:block">
-                              <div className="flex w-14 flex-col gap-1 rounded-xl border border-gray-100 bg-white p-1.5 shadow-lg">
+                              <div className="admin-popover flex w-14 flex-col gap-1 rounded-xl border border-gray-100 bg-white p-1.5 shadow-lg">
                                 {[2, 3, 4].map((value) => (
                                   <button
                                     key={value}
@@ -849,7 +849,7 @@ export default function TaskLogicTab({ categories: initCategories, buildings, co
 	                  {collaborationQueueAutoCloseLimit}条
 	                </button>
 	                <div className="absolute left-0 bottom-full z-20 hidden pb-1 group-hover:block">
-	                  <div className="flex w-20 flex-col gap-1 rounded-xl border border-gray-100 bg-white p-1.5 shadow-lg">
+	                  <div className="admin-popover flex w-20 flex-col gap-1 rounded-xl border border-gray-100 bg-white p-1.5 shadow-lg">
 	                    {COLLABORATION_QUEUE_AUTO_CLOSE_LIMIT_OPTIONS.map((value) => (
 	                      <button
 	                        key={value}

@@ -1,11 +1,12 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, type CSSProperties } from "react";
 import ProfilesTab from "./ProfilesTab";
 import SpaceTab from "./SpaceTab";
 import TaskLogicTab from "./TaskLogicTab";
 import ApprovalTab from "./ApprovalTab";
 import StatsTab from "./StatsTab";
+import { WORKBENCH_PAGE_BACKGROUND_CONFIG_KEY } from "@/lib/workbenchBackground";
 
 type TabKey = "profiles" | "spaces" | "tasks" | "approvals" | "stats";
 
@@ -34,6 +35,8 @@ function ChromeTab({ fill }: { fill: string }) {
       <path
         d="M 0 40 L 0 40 C 4 40, 8 36, 12 10 C 14 2, 18 0, 24 0 L 176 0 C 182 0, 186 2, 188 10 C 192 36, 196 40, 200 40 L 200 40 Z"
         fill={fill}
+        stroke="rgba(255,255,255,0.72)"
+        strokeWidth="1"
       />
     </svg>
   );
@@ -46,6 +49,16 @@ export default function AdminPage() {
   const [categories, setCategories] = useState<Category[]>([]);
   const [config, setConfig] = useState<SystemConfigMap>({});
   const [loading, setLoading] = useState(true);
+  const adminPageBackground = String(config[WORKBENCH_PAGE_BACKGROUND_CONFIG_KEY]?.value ?? "");
+  const adminShellStyle: CSSProperties | undefined = adminPageBackground
+    ? {
+        backgroundColor: "#eef1f5",
+        backgroundImage: `linear-gradient(135deg, rgba(245, 247, 251, 0.76), rgba(237, 242, 247, 0.56) 48%, rgba(247, 243, 238, 0.7)), url("${adminPageBackground}")`,
+        backgroundSize: "auto, cover",
+        backgroundPosition: "center, center",
+        backgroundRepeat: "no-repeat, no-repeat",
+      }
+    : undefined;
 
   const fetchData = useCallback(async () => {
     setLoading(true);
@@ -73,13 +86,13 @@ export default function AdminPage() {
   useEffect(() => { fetchData(); }, [fetchData]);
 
   return (
-    <div className="h-screen overflow-y-scroll bg-gray-50/50 px-8 py-6">
-      <div className="flex flex-col max-w-[1200px] mx-auto">
+    <div className="admin-shell h-screen overflow-y-scroll px-8 py-6" style={adminShellStyle}>
+      <div className="relative z-10 flex flex-col max-w-[1200px] mx-auto">
         {/* Header */}
         <div className="flex items-center gap-4 mb-6">
-          <a href="/photographer" className="flex items-center gap-1.5 text-gray-500 hover:text-gray-700 transition-colors" title="返回工作台">
+          <a href="/photographer" className="admin-back-link flex items-center gap-1.5 rounded-full px-3 py-2 text-sm font-semibold transition-colors" title="返回工作台">
             <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M15 18l-6-6 6-6"/></svg>
-            <span className="text-sm font-semibold">返回工作台</span>
+            <span>返回工作台</span>
           </a>
         </div>
 
@@ -99,18 +112,19 @@ export default function AdminPage() {
                   key={t.key}
                   onClick={() => setTab(t.key)}
                   onMouseDown={(e) => e.preventDefault()}
-                  className="absolute bottom-0 cursor-pointer flex items-center justify-center"
+                  className="admin-tab absolute bottom-0 cursor-pointer flex items-center justify-center"
                   style={{
                     left,
                     width: TAB_WIDTH,
                     height: 72,
                     zIndex,
+                    "--tab-color": t.color,
                     transform: isActive ? "translateX(12px) scale(1.02)" : "translateX(0) scale(1)",
                     transition: "transform 0.4s cubic-bezier(0.34, 1.56, 0.64, 1), background 0.2s",
                     transformOrigin: "bottom center",
-                  }}
+                  } as CSSProperties}
                 >
-                  <ChromeTab fill={isActive ? "#ffffff" : t.bg} />
+                  <ChromeTab fill={isActive ? "rgba(255,255,255,0.66)" : t.bg} />
                   <span
                     className="relative z-10 font-extrabold select-none whitespace-nowrap"
                     style={{
@@ -128,7 +142,7 @@ export default function AdminPage() {
 
           {/* Content area */}
           <div
-            className="relative bg-white rounded-2xl shadow-sm p-6"
+            className="admin-surface relative p-6"
             style={{ minHeight: "calc(100vh - 200px)" }}
           >
             {loading ? (

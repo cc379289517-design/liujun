@@ -301,7 +301,7 @@ export default function StatsTab() {
           )}
         </div>
 
-        {/* 右：优先���分布 + 完成率 */}
+        {/* 右：优先级分布 + 完成率 */}
         <div className="flex flex-col gap-4">
           {/* 优先级分布 */}
           <div className="card p-5">
@@ -387,7 +387,7 @@ export default function StatsTab() {
               <div className="flex items-center text-[10px] text-[--text-muted] font-medium px-2 py-1">
                 <span className="w-[8%]">#</span>
                 <span className="w-[32%]">助理</span>
-                <span className="w-[20%] text-right">总��务</span>
+                <span className="w-[20%] text-right">总任务</span>
                 <span className="w-[20%] text-right">已完成</span>
                 <span className="w-[20%] text-right">完成率</span>
               </div>
@@ -471,7 +471,7 @@ export default function StatsTab() {
 
         <div className="space-y-1">
           {/* 表头：11列 = 勾选 + 优先级 房间 摄影师 助理 类型 任务时间 实际用时 创建时间 开始时间 状态 */}
-          <div className="grid gap-2 px-3 py-2.5 text-xs text-[--text-muted] font-semibold tracking-wider items-center bg-gray-50 rounded-xl" style={{ gridTemplateColumns: "28px 1fr 1fr 1fr 1fr 1fr 1fr 1fr 1fr 1fr 56px" }}>
+          <div className="admin-table-head grid gap-2 px-3 py-2.5 text-xs text-[--text-muted] font-semibold tracking-wider items-center bg-gray-50 rounded-xl" style={{ gridTemplateColumns: "28px 1fr 1fr 1fr 1fr 1fr 1fr 1fr 1fr 1fr 56px" }}>
             <span className="flex justify-center">
               <input
                 type="checkbox"
@@ -505,7 +505,7 @@ export default function StatsTab() {
               const pr = PRIORITY_LABEL[t.priority] || PRIORITY_LABEL[4];
               const groupedType = CATEGORY_GROUP[t.category.name] || "其他";
               return (
-                <div key={t.id} className="grid gap-2 px-3 py-2.5 rounded-xl bg-[--bg-base] hover:bg-gray-50 transition-colors items-center" style={{ gridTemplateColumns: "28px 1fr 1fr 1fr 1fr 1fr 1fr 1fr 1fr 1fr 56px" }}>
+                <div key={t.id} className="admin-table-row grid gap-2 px-3 py-2.5 rounded-xl bg-[--bg-base] hover:bg-gray-50 transition-colors items-center" style={{ gridTemplateColumns: "28px 1fr 1fr 1fr 1fr 1fr 1fr 1fr 1fr 1fr 56px" }}>
                   <span className="flex justify-center">
                     <input
                       type="checkbox"
@@ -528,7 +528,7 @@ export default function StatsTab() {
                       {st.label}
                     </span>
                     {updatingId !== t.id && (
-                      <div className="absolute left-1/2 -translate-x-1/2 top-full mt-0.5 z-20 hidden group-hover:flex flex-col bg-white rounded-lg shadow-lg border border-gray-200 py-1 min-w-[60px]">
+                      <div className="admin-popover absolute left-1/2 -translate-x-1/2 top-full mt-0.5 z-20 hidden group-hover:flex flex-col bg-white rounded-lg shadow-lg border border-gray-200 py-1 min-w-[60px]">
                         {STATUS_OPTIONS.filter((o) => o.value !== t.status).map((o) => {
                           const optSt = STATUS_STYLE[o.value];
                           return (

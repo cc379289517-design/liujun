@@ -268,7 +268,7 @@ export default function ProfilesTab({
       {/* Table */}
       <div className="card p-5">
         <div className="space-y-1.5">
-          <div className="grid grid-cols-9 gap-3 px-3 py-2.5 rounded-xl bg-gray-100 text-xs text-[--text-secondary] font-semibold tracking-wide">
+          <div className="admin-table-head grid grid-cols-9 gap-3 px-3 py-2.5 rounded-xl bg-gray-100 text-xs text-[--text-secondary] font-semibold tracking-wide">
             <span className="text-center">姓名</span><span className="text-center">工号</span><span className="text-center">角色</span><span className="text-center">部门</span><span className="text-center">小组</span><span className="text-center">所属楼座</span><span className="text-center">所属房间</span><span className="text-center">在线状态</span><span className="text-center">操作</span>
           </div>
           {filteredProfiles.length === 0 ? (
@@ -280,7 +280,7 @@ export default function ProfilesTab({
               const os = ONLINE_STATUS_MAP[p.onlineStatus || "offline"] || ONLINE_STATUS_MAP.offline;
               const inTask = p.status !== "idle" && p.status in TASK_STATUS_LABEL;
               return (
-                <div key={p.id} className="grid grid-cols-9 gap-3 px-3 py-2.5 rounded-xl bg-[--bg-base] hover:bg-gray-50 transition-colors items-center">
+                <div key={p.id} className="admin-table-row grid grid-cols-9 gap-3 px-3 py-2.5 rounded-xl bg-[--bg-base] hover:bg-gray-50 transition-colors items-center">
                   <span className="text-sm font-medium text-[--text-primary] text-center">{p.name}</span>
                   <span className="text-xs text-[--text-muted] font-mono text-center">{p.employeeId || "—"}</span>
                   <span className="flex justify-center"><span className={`text-[10px] font-bold px-2 py-0.5 rounded-md ${r.bg} ${r.color}`}>{r.label}</span></span>
@@ -298,7 +298,7 @@ export default function ProfilesTab({
                           {os.label}
                         </span>
                         {/* Hover dropdown for status switching */}
-                        <div className="absolute left-1/2 -translate-x-1/2 top-full mt-1 hidden group-hover:flex flex-col bg-white rounded-lg shadow-lg border border-gray-200 py-1 z-20 min-w-[64px]">
+                        <div className="admin-popover absolute left-1/2 -translate-x-1/2 top-full mt-1 hidden group-hover:flex flex-col bg-white rounded-lg shadow-lg border border-gray-200 py-1 z-20 min-w-[64px]">
                           {Object.entries(ONLINE_STATUS_MAP)
                             .filter(([key]) => key !== (p.onlineStatus || "offline"))
                             .map(([key, val]) => (
@@ -447,8 +447,8 @@ function ProfileModal({
   }
 
   return (
-    <div className="fixed inset-0 bg-black/30 backdrop-blur-sm flex items-center justify-center z-50" onClick={onClose}>
-      <div className="card p-6 w-full max-w-md" onClick={(e) => e.stopPropagation()}>
+    <div className="admin-modal fixed inset-0 bg-black/30 backdrop-blur-sm flex items-center justify-center z-50" onClick={onClose}>
+      <div className="admin-dialog card p-6 w-full max-w-md" onClick={(e) => e.stopPropagation()}>
         <h2 className="text-lg font-bold text-[--text-primary] mb-5">{profile ? "编辑人员" : "添加人员"}</h2>
         <form onSubmit={handleSubmit} className="space-y-4">
           <div>
@@ -707,8 +707,8 @@ function ImportModal({
   const errorCount = rows.filter((r) => r.error).length;
 
   return (
-    <div className="fixed inset-0 bg-black/30 backdrop-blur-sm flex items-center justify-center z-50" onClick={onClose}>
-      <div className="card p-6 w-full max-w-2xl max-h-[85vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
+    <div className="admin-modal fixed inset-0 bg-black/30 backdrop-blur-sm flex items-center justify-center z-50" onClick={onClose}>
+      <div className="admin-dialog card p-6 w-full max-w-2xl max-h-[85vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between mb-5">
           <h2 className="text-lg font-bold text-[--text-primary]">批量导入人员</h2>
           <button onClick={downloadTemplate} className="text-xs px-3 py-1.5 rounded-lg bg-blue-50 text-blue-600 font-medium hover:bg-blue-100 transition-colors">
@@ -754,11 +754,11 @@ function ImportModal({
             </div>
             <div className="flex-1 overflow-auto">
               <div className="space-y-1.5">
-                <div className="grid grid-cols-8 gap-3 px-3 text-[10px] text-[--text-muted] font-medium uppercase tracking-wider sticky top-0 bg-[--bg-card] py-1">
+                <div className="admin-table-head grid grid-cols-8 gap-3 px-3 text-[10px] text-[--text-muted] font-medium uppercase tracking-wider sticky top-0 bg-[--bg-card] py-1">
                   <span>#</span><span>工号</span><span>姓名</span><span>角色</span><span>部门</span><span>小组</span><span>楼座</span><span>房间</span>
                 </div>
                 {rows.map((r, i) => (
-                  <div key={i} className={`grid grid-cols-8 gap-3 px-3 py-2 rounded-xl items-center ${r.error ? "bg-red-50" : "bg-[--bg-base]"}`}>
+                  <div key={i} className={`admin-table-row grid grid-cols-8 gap-3 px-3 py-2 rounded-xl items-center ${r.error ? "bg-red-50" : "bg-[--bg-base]"}`}>
                     <span className="text-xs text-[--text-muted]">{i + 1}</span>
                     <span className="text-xs text-[--text-secondary] font-mono">{r.employeeId || "—"}</span>
                     <span className="text-xs font-medium text-[--text-primary]">{r.name || "—"}</span>
