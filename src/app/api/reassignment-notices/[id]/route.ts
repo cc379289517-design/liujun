@@ -17,6 +17,7 @@ export async function PATCH(request: NextRequest, { params }: RouteContext) {
         id: true,
         oldAssistantId: true,
         newAssistantId: true,
+        oldAssistantSetOffline: true,
       },
     });
     if (!notice) {
@@ -32,6 +33,14 @@ export async function PATCH(request: NextRequest, { params }: RouteContext) {
     }
 
     if (action === "acknowledgeOld") {
+      if (!notice.oldAssistantSetOffline) {
+        const updatedNotice = await prisma.standbyReassignmentNotice.update({
+          where: { id },
+          data: { oldAssistantAcknowledgedAt: new Date() },
+        });
+        return Response.json({ notice: updatedNotice });
+      }
+
       const [updatedNotice, updatedProfile] = await prisma.$transaction([
         prisma.standbyReassignmentNotice.update({
           where: { id },

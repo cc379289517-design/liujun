@@ -215,6 +215,11 @@ model StandbyReassignmentNotice {
   waitedMinutes            Int       @map("waited_minutes")
   thresholdMinutes         Int       @map("threshold_minutes")
   score                    Int
+  reason                   String    @default("standby_timeout_offline")
+  oldAssistantSetOffline   Boolean   @default(true) @map("old_assistant_set_offline")
+  oldAssistantActiveTaskRoomNumber String? @map("old_assistant_active_task_room_number")
+  oldAssistantActiveTaskCategoryName String? @map("old_assistant_active_task_category_name")
+  oldAssistantActiveTaskStatus String? @map("old_assistant_active_task_status")
   newAssistantAcknowledgedAt DateTime? @map("new_assistant_acknowledged_at")
   oldAssistantAcknowledgedAt DateTime? @map("old_assistant_acknowledged_at")
   createdAt                DateTime  @default(now()) @map("created_at")

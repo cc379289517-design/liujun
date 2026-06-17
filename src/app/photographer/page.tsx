@@ -242,6 +242,11 @@ type StandbyReassignmentNoticeFromAPI = {
   waitedMinutes: number;
   thresholdMinutes: number;
   score: number;
+  reason: string;
+  oldAssistantSetOffline: boolean;
+  oldAssistantActiveTaskRoomNumber: string | null;
+  oldAssistantActiveTaskCategoryName: string | null;
+  oldAssistantActiveTaskStatus: string | null;
   newAssistantAcknowledgedAt: string | null;
   oldAssistantAcknowledgedAt: string | null;
   createdAt: string;
@@ -340,6 +345,8 @@ type AreaMetricPerson = {
   name: string;
   avatar: string | null;
   count: number;
+  queueSortIndex?: number;
+  queueTaskTypes?: string[];
   breakdown?: AreaMetricBreakdown[];
 };
 type AreaMetricBaseCard = {
@@ -352,6 +359,7 @@ type AreaMetricDetailCard = AreaMetricBaseCard & {
   people: AreaMetricPerson[];
   unit: string;
   emptyText: string;
+  bubbleAnchorMode?: "card" | "value";
 };
 type AreaMetricCard = AreaMetricBaseCard | AreaMetricDetailCard;
 
@@ -934,6 +942,21 @@ function taskTypeGroupName(name: string | null | undefined): string {
   return TASK_CATEGORY_GROUP[name] || "其他";
 }
 
+function queueTaskTypeShortLabel(name: string | null | undefined): string {
+  const groupName = taskTypeGroupName(name);
+  if (groupName === "服装穿戴") return "穿戴";
+  if (groupName === "手工DIY") return "手工";
+  return groupName;
+}
+
+function polarPoint(cx: number, cy: number, radius: number, angleDeg: number) {
+  const angle = ((angleDeg - 90) * Math.PI) / 180;
+  return {
+    x: cx + radius * Math.cos(angle),
+    y: cy + radius * Math.sin(angle),
+  };
+}
+
 const PRIORITY_CLS: Record<number, string> = {
   1: "bg-red-500 text-white",
   2: "bg-orange-500 text-white",
@@ -1353,9 +1376,14 @@ export default function PhotographerPage() {
   const [statsHoveredDay, setStatsHoveredDay] = useState<number | null>(null);
   const [statsSelectedDay, setStatsSelectedDay] = useState<number | null>(null);
   const [statsWeekOffset, setStatsWeekOffset] = useState(0);
+  const [showAreaCompletedStatsModal, setShowAreaCompletedStatsModal] = useState(false);
+  const [areaCompletedStatsHoveredDay, setAreaCompletedStatsHoveredDay] = useState<number | null>(null);
+  const [areaCompletedStatsSelectedDay, setAreaCompletedStatsSelectedDay] = useState<number | null>(null);
+  const [areaCompletedStatsWeekOffset, setAreaCompletedStatsWeekOffset] = useState(0);
   const [publisherFeedbackSavingId, setPublisherFeedbackSavingId] = useState<string | null>(null);
   const statsScrollRef = useRef<HTMLDivElement>(null);
   const [weeklyTasks, setWeeklyTasks] = useState<TaskFromAPI[]>([]);
+  const [areaCompletedWeeklyTasks, setAreaCompletedWeeklyTasks] = useState<TaskFromAPI[]>([]);
   const [categories, setCategories] = useState<BuiltCategory[]>([]);
   const [endingAlertMin, setEndingAlertMin] = useState(2);
   const [upgradeThresholdMin, setUpgradeThresholdMin] = useState(25);
@@ -1398,6 +1426,7 @@ export default function PhotographerPage() {
   const [assistantScoreBubbleAnchor, setAssistantScoreBubbleAnchor] = useState<{ left: number; top: number; width: number } | null>(null);
   const [expandedTaskTypeDetailName, setExpandedTaskTypeDetailName] = useState<string | null>(null);
   const [taskTypeDetailBubbleAnchor, setTaskTypeDetailBubbleAnchor] = useState<{ left: number; top: number; width: number } | null>(null);
+  const [hoveredAreaTaskTypeName, setHoveredAreaTaskTypeName] = useState<string | null>(null);
   const [expandedAreaMetricKey, setExpandedAreaMetricKey] = useState<AreaMetricKey | null>(null);
   const [areaMetricBubbleAnchor, setAreaMetricBubbleAnchor] = useState<{ left: number; top: number; width: number } | null>(null);
   const [assistantRankingHelpOpen, setAssistantRankingHelpOpen] = useState<"center" | "legacy" | null>(null);
@@ -1407,6 +1436,16 @@ export default function PhotographerPage() {
   const publicQueuePromotionSignatureRef = useRef("");
   const publicQueuePromotionRunningRef = useRef(false);
   const pendingRawTaskRef = useRef<TaskFromAPI | null>(null);
+  const pollingProfileId = profile?.id ?? null;
+  const pollingProfileRole = profile?.role ?? null;
+  const pollingProfileBuildingId = profile?.buildingId ?? null;
+  const pollingProfile = useMemo(
+    () => {
+      if (!pollingProfileId || !pollingProfileRole || pollingProfileBuildingId == null) return null;
+      return { id: pollingProfileId, role: pollingProfileRole, buildingId: pollingProfileBuildingId };
+    },
+    [pollingProfileId, pollingProfileRole, pollingProfileBuildingId]
+  );
   useEffect(() => {
     pendingRawTaskRef.current = pendingRawTask;
   }, [pendingRawTask]);
@@ -1588,19 +1627,32 @@ export default function PhotographerPage() {
     );
   }, [resolvedTheme, taskTypeDetailBubbleAnchor]);
 
-  const showAreaMetricBubble = useCallback((key: AreaMetricKey, element: HTMLElement, peopleCount = 0) => {
-    const rect = element.getBoundingClientRect();
+  const showAreaMetricBubble = useCallback((
+    key: AreaMetricKey,
+    element: HTMLElement,
+    peopleCount = 0,
+    anchorMode: "card" | "value" = "card",
+  ) => {
+    const metricValue = anchorMode === "value"
+      ? element.querySelector<HTMLElement>("[data-area-metric-value]")
+      : null;
+    const elementRect = element.getBoundingClientRect();
+    const rect = (metricValue ?? element).getBoundingClientRect();
     const margin = 16;
-    const gap = 8;
+    const gap = anchorMode === "value" ? 10 : 8;
     const bubbleWidth = 224;
-    const estimatedHeight = 58 + Math.max(1, peopleCount) * 40;
+    const visibleRows = Math.max(1, peopleCount);
+    const rowGap = 6;
+    const estimatedHeight = 44 + visibleRows * 24 + Math.max(0, visibleRows - 1) * rowGap;
     const preferredLeft = rect.left + rect.width / 2 - bubbleWidth / 2;
     const left = Math.min(
       Math.max(margin, preferredLeft),
       Math.max(margin, window.innerWidth - bubbleWidth - margin),
     );
     const hasRoomBelow = window.innerHeight - rect.bottom - margin >= estimatedHeight;
-    const rawTop = hasRoomBelow ? rect.bottom + gap : rect.top - estimatedHeight - gap;
+    const rawTop = hasRoomBelow
+      ? rect.bottom + gap
+      : (anchorMode === "value" ? elementRect.top : rect.top) - estimatedHeight - gap;
     const top = Math.min(
       Math.max(margin, rawTop),
       Math.max(margin, window.innerHeight - Math.min(estimatedHeight, window.innerHeight - margin * 2) - margin),
@@ -1654,7 +1706,12 @@ export default function PhotographerPage() {
           {item.people.length > 0 ? (
             <div className="mt-2 space-y-1.5">
               {item.people.map((person) => (
-                <div key={`${item.key}-${person.id}`} className="flex min-w-0 items-center gap-2">
+                <div
+                  key={`${item.key}-${person.id}`}
+                  className={item.key === "queue" || item.key === "executing"
+                    ? "grid min-w-0 grid-cols-[24px_46px_minmax(0,1fr)_auto] items-center gap-x-1.5"
+                    : "flex min-w-0 items-center gap-2"}
+                >
                   <span className="flex h-6 w-6 shrink-0 items-center justify-center overflow-hidden rounded-full bg-slate-200 text-[9px] font-black text-white ring-1 ring-white/90">
                     {person.avatar ? (
                       <img src={person.avatar} alt={person.name} className="h-full w-full object-cover" />
@@ -1662,25 +1719,46 @@ export default function PhotographerPage() {
                       person.name.slice(0, 1)
                     )}
                   </span>
-                  <span className="min-w-0 flex-1 truncate text-[11px] font-bold text-[--text-primary]">{person.name}</span>
-                  {person.breakdown?.length ? (
-                    <span className="flex shrink-0 flex-wrap justify-end gap-1">
-                      {person.breakdown.map((detail) => (
-                        <span
-                          key={`${item.key}-${person.id}-${detail.label}`}
-                          className={`rounded-full px-1.5 py-0.5 text-[9px] font-extrabold leading-none ${
-                            detail.label === "吃饭超时"
-                              ? "bg-blue-500/12 text-blue-600"
-                              : "bg-red-500/12 text-red-600"
-                          }`}
-                        >
-                          {detail.label}{detail.count > 1 ? `${detail.count}${detail.unit}` : ""}
-                        </span>
-                      ))}
+                  <span className={`min-w-0 truncate text-[11px] font-bold text-[--text-primary] ${item.key === "queue" || item.key === "executing" ? "" : "flex-1"}`}>
+                    {person.name}
+                  </span>
+                  {(item.key === "queue" || item.key === "executing") && person.queueTaskTypes?.length ? (
+                    <span className="flex min-w-0 items-center gap-1 pl-1.5">
+                      <span className="h-3 w-px shrink-0 bg-slate-300/80" aria-hidden="true" />
+                      {person.queueTaskTypes.map((type) => {
+                        const fullType = type === "穿戴" ? "服装穿戴" : type === "手工" ? "手工DIY" : type;
+                        const style = CAT_STYLES[fullType] ?? CAT_STYLES["其他"];
+                        return (
+                          <span
+                            key={`${person.id}-${type}`}
+                            className={`rounded-md px-1.5 py-0.5 text-[9px] font-extrabold leading-none ${resolvedTheme === "dark" ? `${style.darkBg} ${style.darkText}` : `${style.bg} ${style.text}`}`}
+                          >
+                            {type}
+                          </span>
+                        );
+                      })}
                     </span>
-                  ) : (
-                    <span className="shrink-0 text-[11px] font-extrabold text-orange-500">{person.count}{item.unit}</span>
-                  )}
+                  ) : null}
+                  <span className={item.key === "queue" || item.key === "executing" ? "contents" : "contents"}>
+                    {person.breakdown?.length ? (
+                      <span className="flex shrink-0 flex-wrap justify-end gap-1">
+                        {person.breakdown.map((detail) => (
+                          <span
+                            key={`${item.key}-${person.id}-${detail.label}`}
+                            className={`rounded-full px-1.5 py-0.5 text-[9px] font-extrabold leading-none ${
+                              detail.label === "吃饭超时"
+                                ? "bg-blue-500/12 text-blue-600"
+                                : "bg-red-500/12 text-red-600"
+                            }`}
+                          >
+                            {detail.label}{detail.count > 1 ? `${detail.count}${detail.unit}` : ""}
+                          </span>
+                        ))}
+                      </span>
+                    ) : (
+                      <span className="shrink-0 text-[11px] font-extrabold text-orange-500">{person.count}{item.unit}</span>
+                    )}
+                  </span>
                 </div>
               ))}
             </div>
@@ -1997,6 +2075,12 @@ export default function PhotographerPage() {
     setStatsSelectedDay(dow === 0 ? 6 : dow - 1);
   }, [showStatsModal, statsSelectedDay]);
 
+  useEffect(() => {
+    if (!showAreaCompletedStatsModal || areaCompletedStatsSelectedDay !== null) return;
+    const dow = new Date().getDay();
+    setAreaCompletedStatsSelectedDay(dow === 0 ? 6 : dow - 1);
+  }, [showAreaCompletedStatsModal, areaCompletedStatsSelectedDay]);
+
   // Fetch weekly tasks when stats modal opens or the viewed week changes
   useEffect(() => {
     if (!showStatsModal) return;
@@ -2009,10 +2093,19 @@ export default function PhotographerPage() {
       .catch(() => setWeeklyTasks([]));
   }, [showStatsModal, profile, statsWeekOffset]);
 
+  useEffect(() => {
+    if (!showAreaCompletedStatsModal) return;
+    const params = new URLSearchParams({ weekOnly: "true", weekOffset: String(areaCompletedStatsWeekOffset) });
+    fetch(`/api/tasks?${params}`)
+      .then((r) => r.json())
+      .then((data: TaskFromAPI[]) => setAreaCompletedWeeklyTasks(Array.isArray(data) ? data : []))
+      .catch(() => setAreaCompletedWeeklyTasks([]));
+  }, [showAreaCompletedStatsModal, areaCompletedStatsWeekOffset]);
+
   // Fetch assistants + their active tasks for the active building
   const refreshAssistants = useCallback(() => {
     if (!activeBuildingId) return;
-    Promise.all([
+    return Promise.all([
       fetch(`/api/profiles?role=assistant&buildingId=${activeBuildingId}`, { cache: "no-store" }).then((r) => r.json()),
       fetch("/api/tasks?todayOnly=true", { cache: "no-store" }).then((r) => r.json()).catch(() => []),
     ]).then(async ([profilesData, tasksData]) => {
@@ -2377,7 +2470,11 @@ export default function PhotographerPage() {
           eatingOvertimeMin,
         };
       }));
-    }).catch(console.error);
+      return allTasks;
+    }).catch((error) => {
+      console.error(error);
+      return null;
+    });
   }, [activeBuildingId, eatingOvertimeAlertMin]);
 
   /** 任务类型/时段：后台改 min/max 后需重新拉取，否则快捷预约选项一直为首次进入时的快照 */
@@ -2411,33 +2508,40 @@ export default function PhotographerPage() {
 
   // 8秒轮询：用同一份任务数据同步所有视图
   useEffect(() => {
-    if (!profile) return;
-    const poll = () => {
+    if (!pollingProfile) return;
+    let cancelled = false;
+    let inFlight = false;
+    const poll = async () => {
+      if (cancelled || inFlight) return;
+      inFlight = true;
       // 刷新助理数据（状态栏 + 地图标记）
-      refreshAssistants();
+      const assistantTasksData = await refreshAssistants();
       Promise.all([
-        fetch(taskListUrlForProfile(profile), { cache: "no-store" }).then((r) => r.json()),
-        fetch("/api/tasks?todayOnly=true", { cache: "no-store" }).then((r) => r.json()).catch(() => []),
-        isAssistantRole(profile.role)
-          ? fetch(`/api/reassignment-notices?assistantId=${profile.id}`, { cache: "no-store" }).then((r) => r.json()).catch(() => [])
+        fetch(taskListUrlForProfile(pollingProfile), { cache: "no-store" }).then((r) => r.json()),
+        assistantTasksData
+          ? Promise.resolve(assistantTasksData)
+          : fetch("/api/tasks?todayOnly=true", { cache: "no-store" }).then((r) => r.json()).catch(() => []),
+        isAssistantRole(pollingProfile.role)
+          ? fetch(`/api/reassignment-notices?assistantId=${pollingProfile.id}`, { cache: "no-store" }).then((r) => r.json()).catch(() => [])
           : Promise.resolve([]),
       ])
         .then(([taskData, publicQueueData, noticeData]) => {
+          if (cancelled) return;
           if (Array.isArray(publicQueueData)) {
             setPublicQueueRaw(publicQueueData as TaskFromAPI[]);
           }
-          if (isAssistantRole(profile.role)) {
+          if (isAssistantRole(pollingProfile.role)) {
             setReassignmentNotices(Array.isArray(noticeData) ? noticeData as StandbyReassignmentNoticeFromAPI[] : []);
           } else {
             setReassignmentNotices([]);
           }
           if (Array.isArray(taskData)) {
-            const raw = visibleTasksForProfile(taskData as TaskFromAPI[], profile, activeBuildingId ?? profile.buildingId);
+            const raw = visibleTasksForProfile(taskData as TaskFromAPI[], pollingProfile, activeBuildingId ?? pollingProfile.buildingId);
             setTaskListRaw(raw);
-            setTasks(sortTasksByStatus(raw.map((t) => apiTaskToDisplay(t, isAssistantRole(profile.role) ? profile.id : undefined))));
-            if (isAssistantRole(profile.role)) {
+            setTasks(sortTasksByStatus(raw.map((t) => apiTaskToDisplay(t, isAssistantRole(pollingProfile.role) ? pollingProfile.id : undefined))));
+            if (isAssistantRole(pollingProfile.role)) {
               setAssistantRawTasks(raw);
-              const { current: active, paused, pending, deferredWaiting } = resolveAssistantTasks(raw, profile.id);
+              const { current: active, paused, pending, deferredWaiting } = resolveAssistantTasks(raw, pollingProfile.id);
               setCurrentRawTask(active);
               setPausedRawTask(paused);
               setPendingRawTask(pending);
@@ -2447,13 +2551,17 @@ export default function PhotographerPage() {
             }
           }
         })
-        .catch(console.error);
+        .catch(console.error)
+        .finally(() => { inFlight = false; });
     };
     // 首次立即执行一次，确保初始数据同步
     poll();
     const timer = setInterval(poll, 8000);
-    return () => clearInterval(timer);
-  }, [activeBuildingId, profile, refreshAssistants]);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [activeBuildingId, pollingProfile, refreshAssistants]);
 
   // Map pan handlers
   const handleMapPanDown = useCallback(
@@ -3710,6 +3818,29 @@ export default function PhotographerPage() {
       ? "old"
       : "new"
     : null;
+  const activeReassignmentKeepsOldOnline = activeReassignmentNotice?.oldAssistantSetOffline === false;
+  const activeReassignmentTaskLabel = activeReassignmentNotice
+    ? `${activeReassignmentNotice.taskRoomNumber}室 · ${activeReassignmentNotice.taskCategoryName} · P${activeReassignmentNotice.taskPriority}`
+    : "";
+  const activeReassignmentOldWorkLabel = activeReassignmentNotice
+    ? [
+        activeReassignmentNotice.oldAssistantActiveTaskRoomNumber
+          ? `${activeReassignmentNotice.oldAssistantActiveTaskRoomNumber}室`
+          : null,
+        activeReassignmentNotice.oldAssistantActiveTaskCategoryName,
+      ].filter(Boolean).join(" · ") || "上一项任务"
+    : "上一项任务";
+  const activeReassignmentOldWorkStatusLabel =
+    activeReassignmentNotice?.oldAssistantActiveTaskStatus === "paused" ? "暂停中" : "超时进行中";
+  const activeReassignmentMessage = activeReassignmentNotice
+    ? activeReassignmentNoticeRole === "old"
+      ? activeReassignmentKeepsOldOnline
+        ? `因你上一项任务「${activeReassignmentOldWorkLabel}」仍在${activeReassignmentOldWorkStatusLabel}，已将「${activeReassignmentTaskLabel}」转派给${activeReassignmentNotice.newAssistantName}。你的在线状态未改变。`
+        : "你因长时间未应答就位，现已将你状态切换为离线状态，点击下方确认窗口，状态切换为应接在线状态。"
+      : activeReassignmentKeepsOldOnline
+        ? `因${activeReassignmentNotice.oldAssistantName}上一项任务「${activeReassignmentOldWorkLabel}」仍在${activeReassignmentOldWorkStatusLabel}，现由你接替「${activeReassignmentTaskLabel}」。`
+        : `因${activeReassignmentNotice.oldAssistantName}长时间未应答就位，现由你接替派发任务。`
+    : "";
   const isAssistantProfile = isAssistantRole(profile?.role);
   const assistantPresence = assistantPresenceState(profile);
   const assistantPresenceInfo = assistantPresenceMeta(assistantPresence);
@@ -3926,10 +4057,7 @@ export default function PhotographerPage() {
         acc.total += 1;
         const participants = activeTaskParticipants(task);
         const hasAssignedPerson = !!task.assistantId || participants.length > 0;
-        const isOvertime =
-          task.status !== "completed" &&
-          task.estEndTime != null &&
-          new Date(task.estEndTime).getTime() < nowMs;
+        const isOvertime = overtimeMinutesBeyondSlot(task, nowMs) != null;
         if (isOvertime) acc.overtime += 1;
         if (task.status === "completed") acc.completed += 1;
         else if (task.status === "executing") acc.executing += 1;
@@ -4096,6 +4224,24 @@ export default function PhotographerPage() {
       };
     };
 
+    const addQueuePerson = (task: TaskFromAPI, index: number) => {
+      const person = taskPublisher(task);
+      const current = maps.queue.get(person.id) ?? {
+        id: person.id,
+        name: person.name || "未命名",
+        avatar: person.avatar ?? null,
+        count: 0,
+      };
+      current.count += 1;
+      if (!current.avatar && person.avatar) current.avatar = person.avatar;
+      current.queueSortIndex = Math.min(current.queueSortIndex ?? Number.POSITIVE_INFINITY, index);
+      const taskType = queueTaskTypeShortLabel(task.category?.name);
+      if (!current.queueTaskTypes?.includes(taskType)) {
+        current.queueTaskTypes = [...(current.queueTaskTypes ?? []), taskType];
+      }
+      maps.queue.set(person.id, current);
+    };
+
     const taskAssistantById = (assistantId: string, fallback?: { name?: string | null; avatar?: string | null }) => {
       const profileAssistant = profileById.get(assistantId);
       const dockAssistant = assistants.find((assistant) => assistant.id === assistantId);
@@ -4129,10 +4275,40 @@ export default function PhotographerPage() {
     const executingAssistants = assistants.filter((assistant) => assistant.status === "executing" || assistant.status === "busy");
     for (const assistant of executingAssistants) {
       if (useAssistantPeople) {
-        addPerson("executing", assistant);
+        const task = assistant.currentTaskId ? taskById.get(assistant.currentTaskId) : null;
+        const current = maps.executing.get(assistant.id) ?? {
+          id: assistant.id,
+          name: assistant.name || "未命名",
+          avatar: assistant.avatar ?? null,
+          count: 0,
+        };
+        current.count += 1;
+        if (!current.avatar && assistant.avatar) current.avatar = assistant.avatar;
+        if (task) {
+          const taskType = queueTaskTypeShortLabel(task.category?.name);
+          if (!current.queueTaskTypes?.includes(taskType)) {
+            current.queueTaskTypes = [...(current.queueTaskTypes ?? []), taskType];
+          }
+        }
+        maps.executing.set(assistant.id, current);
       } else {
         const task = assistant.currentTaskId ? taskById.get(assistant.currentTaskId) : null;
-        if (task) addPerson("executing", taskPublisher(task));
+        if (task) {
+          const person = taskPublisher(task);
+          const current = maps.executing.get(person.id) ?? {
+            id: person.id,
+            name: person.name || "未命名",
+            avatar: person.avatar ?? null,
+            count: 0,
+          };
+          current.count += 1;
+          if (!current.avatar && person.avatar) current.avatar = person.avatar;
+          const taskType = queueTaskTypeShortLabel(task.category?.name);
+          if (!current.queueTaskTypes?.includes(taskType)) {
+            current.queueTaskTypes = [...(current.queueTaskTypes ?? []), taskType];
+          }
+          maps.executing.set(person.id, current);
+        }
       }
     }
 
@@ -4147,10 +4323,7 @@ export default function PhotographerPage() {
     }
 
     const nowMs = now.getTime();
-    const isTaskOvertime = (task: TaskFromAPI) =>
-      task.status !== "completed" &&
-      task.estEndTime != null &&
-      new Date(task.estEndTime).getTime() < nowMs;
+    const isTaskOvertime = (task: TaskFromAPI) => overtimeMinutesBeyondSlot(task, nowMs) != null;
     if (useAssistantPeople) {
       for (const assistant of assistants) {
         const taskOvertimeCount = [
@@ -4178,8 +4351,8 @@ export default function PhotographerPage() {
       }
     }
 
-    for (const task of publicQueueTasks) {
-      addPerson("queue", taskPublisher(task));
+    for (const [index, task] of publicQueueDisplayTasks.entries()) {
+      addQueuePerson(task, index);
     }
 
     for (const assistant of assistants) {
@@ -4189,10 +4362,18 @@ export default function PhotographerPage() {
     return Object.fromEntries(
       (Object.keys(maps) as AreaMetricKey[]).map((key) => [
         key,
-        Array.from(maps[key].values()).sort((a, b) => b.count - a.count || a.name.localeCompare(b.name)),
+        Array.from(maps[key].values()).sort((a, b) => {
+          if (key === "queue") {
+            return (
+              (a.queueSortIndex ?? Number.POSITIVE_INFINITY) - (b.queueSortIndex ?? Number.POSITIVE_INFINITY) ||
+              a.name.localeCompare(b.name)
+            );
+          }
+          return b.count - a.count || a.name.localeCompare(b.name);
+        }),
       ]),
     ) as Record<AreaMetricKey, AreaMetricPerson[]>;
-  }, [allProfiles, areaTasks, assistants, now, profile?.role, publicQueueTasks]);
+  }, [allProfiles, areaTasks, assistants, now, profile?.role, publicQueueDisplayTasks]);
 		  const rankingCrownByAssistantId = useMemo(() => {
 		    const rows = assistantRankingRows.slice(0, 3);
 		    return rows.reduce<Record<string, { rank: 1 | 2 | 3 }>>((acc, row, index) => {
@@ -4281,6 +4462,51 @@ export default function PhotographerPage() {
     });
     return `conic-gradient(${stops.join(", ")})`;
   }, [areaPublishedTaskTypeBreakdown, areaPublishedTaskTypeTotal]);
+  const areaPublishedTaskTypeSlices = useMemo(() => {
+    if (areaPublishedTaskTypeTotal <= 0) return [];
+    let cursor = 0;
+    return areaPublishedTaskTypeBreakdown.map((item) => {
+      const angle = (item.count / areaPublishedTaskTypeTotal) * 360;
+      const start = cursor;
+      const end = cursor + angle;
+      cursor = end;
+      return {
+        ...item,
+        start,
+        end,
+        mid: start + angle / 2,
+        pct: Math.round((item.count / areaPublishedTaskTypeTotal) * 100),
+      };
+    });
+  }, [areaPublishedTaskTypeBreakdown, areaPublishedTaskTypeTotal]);
+  const handleAreaTaskTypePieMove = useCallback((event: React.MouseEvent<HTMLDivElement>) => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    const x = event.clientX - rect.left;
+    const y = event.clientY - rect.top;
+    const size = Math.min(rect.width, rect.height);
+    const cx = rect.width / 2;
+    const cy = rect.height / 2;
+    const dx = x - cx;
+    const dy = y - cy;
+    const distance = Math.sqrt(dx * dx + dy * dy);
+    const outerRadius = size / 2;
+    const innerRadius = outerRadius * 0.28;
+
+    if (distance < innerRadius || distance > outerRadius) {
+      if (hoveredAreaTaskTypeName !== null) setHoveredAreaTaskTypeName(null);
+      return;
+    }
+
+    const angle = (Math.atan2(dy, dx) * 180) / Math.PI;
+    const normalizedAngle = (angle + 450) % 360;
+    const nextSlice = areaPublishedTaskTypeSlices.find((slice) => (
+      normalizedAngle >= slice.start && normalizedAngle < slice.end
+    )) ?? areaPublishedTaskTypeSlices[areaPublishedTaskTypeSlices.length - 1] ?? null;
+    const nextName = nextSlice?.name ?? null;
+    if (nextName !== hoveredAreaTaskTypeName) {
+      setHoveredAreaTaskTypeName(nextName);
+    }
+  }, [areaPublishedTaskTypeSlices, hoveredAreaTaskTypeName]);
   const primaryTaskType = areaTaskTypeBreakdown[0] ?? null;
   useEffect(() => {
     if (!publicQueueInteractionVisible) {
@@ -5134,7 +5360,7 @@ export default function PhotographerPage() {
                           },
                           {
                             caption: "当前已超时",
-                            value: areaRealtimeStats.overtime,
+                            value: isAssistantRole(profile?.role) ? areaRealtimeStats.overtime : areaTaskStats.overtime,
                             span: "col-span-3",
                             detailKey: "overtime" as AreaMetricKey,
                             people: areaMetricPeopleByKey.overtime,
@@ -5149,6 +5375,7 @@ export default function PhotographerPage() {
                             people: areaMetricPeopleByKey.queue,
                             unit: "单",
                             emptyText: "暂无队列任务摄影师",
+                            bubbleAnchorMode: "value",
                           },
                           {
                             caption: "离线人员",
@@ -5160,19 +5387,19 @@ export default function PhotographerPage() {
                             emptyText: "暂无离线助理",
                           },
                         ] as AreaMetricCard[]).map((item) => (
-                          <div key={item.caption} className={`relative z-[1] min-w-0 ${item.span}`}>
+                          <div key={item.caption} className={`relative min-w-0 ${item.caption === "今日已完成" ? "z-[3]" : "z-[1]"} ${item.span}`}>
                             {hasAreaMetricDetail(item) ? (
                               <button
                                 type="button"
                                 className="relative mx-auto flex min-h-0 w-full max-w-[190px] flex-col items-center justify-center gap-1 rounded-2xl px-3 py-2 text-center outline-none transition-colors hover:bg-white/30 focus-visible:bg-white/36"
-                                onMouseEnter={(e) => showAreaMetricBubble(item.detailKey, e.currentTarget, item.people.length)}
-                                onFocus={(e) => showAreaMetricBubble(item.detailKey, e.currentTarget, item.people.length)}
+                                onMouseEnter={(e) => showAreaMetricBubble(item.detailKey, e.currentTarget, item.people.length, item.bubbleAnchorMode)}
+                                onFocus={(e) => showAreaMetricBubble(item.detailKey, e.currentTarget, item.people.length, item.bubbleAnchorMode)}
                                 onMouseLeave={hideAreaMetricBubble}
                                 onBlur={hideAreaMetricBubble}
                                 aria-expanded={expandedAreaMetricKey === item.detailKey}
                               >
                                 <span className="whitespace-nowrap text-[10px] font-bold text-[--text-muted] 2xl:text-[11px]">{item.caption}</span>
-                                <span className="text-[24px] font-extrabold leading-none tabular-nums text-[--text-primary] 2xl:text-[32px]">{item.value}</span>
+                                <span data-area-metric-value className="text-[24px] font-extrabold leading-none tabular-nums text-[--text-primary] 2xl:text-[32px]">{item.value}</span>
                                 {expandedAreaMetricKey === item.detailKey ? renderAreaMetricBubble({
                                   key: item.detailKey,
                                   caption: item.caption,
@@ -5184,7 +5411,24 @@ export default function PhotographerPage() {
                             ) : (
                               <div className="flex min-h-0 flex-col items-center justify-center gap-1 text-center">
                                 <span className="whitespace-nowrap text-[10px] font-bold text-[--text-muted] 2xl:text-[11px]">{item.caption}</span>
-                                <span className="text-[24px] font-extrabold leading-none tabular-nums text-[--text-primary] 2xl:text-[32px]">{item.value}</span>
+                                {item.caption === "今日已完成" ? (
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      const dow = new Date().getDay();
+                                      setAreaCompletedStatsWeekOffset(0);
+                                      setAreaCompletedStatsSelectedDay(dow === 0 ? 6 : dow - 1);
+                                      setAreaCompletedStatsHoveredDay(null);
+                                      setShowAreaCompletedStatsModal(true);
+                                    }}
+                                    className="rounded-xl px-2 text-[24px] font-extrabold leading-none tabular-nums text-[--text-primary] transition-colors hover:bg-white/34 focus-visible:bg-white/40 focus-visible:outline-none 2xl:text-[32px]"
+                                    aria-label="打开区域完成统计"
+                                  >
+                                    {item.value}
+                                  </button>
+                                ) : (
+                                  <span className="text-[24px] font-extrabold leading-none tabular-nums text-[--text-primary] 2xl:text-[32px]">{item.value}</span>
+                                )}
                               </div>
                             )}
                           </div>
@@ -5363,12 +5607,86 @@ export default function PhotographerPage() {
                         </div>
                       ) : (
                         <>
-                          <div className="relative flex min-h-0 items-center justify-center">
+                          <div
+                            className="relative flex min-h-0 items-center justify-center overflow-visible"
+                            onMouseLeave={() => setHoveredAreaTaskTypeName(null)}
+                          >
                             <div
-                              className="relative aspect-square h-[82%] max-h-[184px] min-h-[128px] rounded-full shadow-[inset_0_0_0_1px_rgba(81,101,130,0.16)]"
-                              style={{ background: areaTaskTypePieGradient }}
+                              className="relative aspect-square h-[82%] max-h-[184px] min-h-[128px] overflow-visible"
+                              onMouseMove={handleAreaTaskTypePieMove}
                             >
-                              <div className={`absolute inset-[28%] flex flex-col items-center justify-center rounded-full text-center ${
+                              <div
+                                className="absolute inset-0 rounded-full shadow-[inset_0_0_0_1px_rgba(81,101,130,0.16)]"
+                                style={{ background: areaTaskTypePieGradient }}
+                              />
+                              <svg className="pointer-events-none absolute inset-0 z-30 h-full w-full overflow-visible" viewBox="-24 -14 148 128" aria-hidden="true">
+                                {areaPublishedTaskTypeSlices.map((slice) => {
+                                  const circumference = 2 * Math.PI * 36;
+                                  const dash = Math.max(0.5, (slice.end - slice.start) / 360 * circumference);
+                                  const gap = Math.max(0, circumference - dash);
+                                  const startPoint = polarPoint(50, 50, 34, slice.mid);
+                                  const bendPoint = polarPoint(50, 50, 54, slice.mid);
+                                  const isLeftSide = slice.mid > 180;
+                                  const lineEndX = isLeftSide ? 10 : 90;
+                                  const active = hoveredAreaTaskTypeName === slice.name;
+                                  return (
+                                    <g key={`area-type-slice-${slice.name}`}>
+                                      <circle
+                                        cx="50"
+                                        cy="50"
+                                        r="36"
+                                        fill="none"
+                                        stroke="transparent"
+                                        strokeWidth="30"
+                                        strokeDasharray={`${dash} ${gap}`}
+                                        strokeDashoffset={-(slice.start / 360) * circumference}
+                                        transform="rotate(-90 50 50)"
+                                        className="pointer-events-none"
+                                      />
+                                      {active ? (
+                                        <>
+                                          <path
+                                            d={`M ${startPoint.x} ${startPoint.y} L ${bendPoint.x} ${bendPoint.y} L ${lineEndX} ${bendPoint.y}`}
+                                            fill="none"
+                                            stroke={slice.color}
+                                            strokeWidth="0.7"
+                                            strokeLinecap="round"
+                                            strokeLinejoin="round"
+                                            opacity="0.9"
+                                            className="pointer-events-none"
+                                          />
+                                          <circle cx={startPoint.x} cy={startPoint.y} r="1.1" fill={slice.color} className="pointer-events-none" />
+                                        </>
+                                      ) : null}
+                                    </g>
+                                  );
+                                })}
+                              </svg>
+                              {areaPublishedTaskTypeSlices.map((slice) => {
+                                const active = hoveredAreaTaskTypeName === slice.name;
+                                const isLeftSide = slice.mid > 180;
+                                const anchorPoint = polarPoint(50, 50, 54, slice.mid);
+                                const topPct = Math.min(76, Math.max(12, anchorPoint.y));
+                                return active ? (
+                                  <div
+                                    key={`area-type-label-${slice.name}`}
+                                    className={`pointer-events-none absolute z-50 w-[86px] rounded-[10px] px-2.5 py-2 text-left shadow-[0_10px_24px_rgba(15,23,42,0.16)] backdrop-blur-xl ${isLeftSide ? "right-[72%]" : "left-[72%]"}`}
+                                    style={{
+                                      top: `${topPct}%`,
+                                      transform: "translateY(-50%)",
+                                      color: slice.color,
+                                      background: resolvedTheme === "dark" ? "rgba(15,23,42,0.90)" : "rgba(255,255,255,0.94)",
+                                      border: `1px solid ${slice.color}55`,
+                                    }}
+                                  >
+                                    <div className="truncate text-[10px] font-black leading-none">{slice.name}</div>
+                                    <div className="mt-1.5 whitespace-nowrap text-[9px] font-extrabold leading-none opacity-80">
+                                      {slice.count}单，占比{slice.pct}%
+                                    </div>
+                                  </div>
+                                ) : null;
+                              })}
+                              <div className={`absolute inset-[28%] z-10 flex flex-col items-center justify-center rounded-full text-center ${
                                 resolvedTheme === "dark" ? "bg-slate-950/86" : "bg-white/92"
                               }`}>
 	                                <span className="text-[26px] font-extrabold leading-none text-[--text-primary]">{areaPublishedTaskTypeTotal}</span>
@@ -5381,8 +5699,11 @@ export default function PhotographerPage() {
                               <div className={`grid grid-cols-[1fr_52px] items-center gap-3 pb-0.5 text-[11px] font-extrabold ${
                                 resolvedTheme === "dark" ? "text-slate-200" : "text-slate-700"
                               }`}>
-	                                <span>已完成</span>
-	                                <span className="text-right text-[--text-primary]">{areaTaskTypeCompletedTotal}单</span>
+		                                <span>已完成</span>
+		                                <span className="flex items-center justify-end gap-0.5 tabular-nums text-[--text-primary]">
+		                                  <span className="min-w-[3ch] text-right">{areaTaskTypeCompletedTotal}</span>
+		                                  <span className="w-3 text-left">单</span>
+		                                </span>
                               </div>
                             {areaTaskTypeBreakdown.map((item) => (
                               <div key={`telemetry-type-${item.name}`} className="grid grid-cols-[1fr_52px] items-center gap-3 pb-0.5 text-[11px] font-bold text-[--text-primary]">
@@ -5393,14 +5714,15 @@ export default function PhotographerPage() {
                                 <span className="relative text-right">
                                   <button
                                     type="button"
-                                    className="rounded-md px-1 py-0.5 text-right text-[11px] font-extrabold leading-none text-[--text-primary] transition-colors hover:bg-orange-500/10 focus:bg-orange-500/10 focus:outline-none"
+                                    className="inline-flex items-center justify-end rounded-md px-1 py-0.5 text-right text-[11px] font-extrabold leading-none tabular-nums text-[--text-primary] transition-colors hover:bg-orange-500/10 focus:bg-orange-500/10 focus:outline-none"
                                     onMouseEnter={(e) => showTaskTypeDetailBubble(item.name, e.currentTarget, item.assistants.length)}
                                     onFocus={(e) => showTaskTypeDetailBubble(item.name, e.currentTarget, item.assistants.length)}
                                     onMouseLeave={hideTaskTypeDetailBubble}
                                     onBlur={hideTaskTypeDetailBubble}
                                     aria-expanded={expandedTaskTypeDetailName === item.name}
                                   >
-                                    {item.count}单
+                                    <span className="min-w-[3ch] text-right">{item.count}</span>
+                                    <span className="w-3 text-left">单</span>
                                   </button>
                                   {expandedTaskTypeDetailName === item.name ? renderTaskTypeDetailBubble(item) : null}
                                 </span>
@@ -5758,28 +6080,30 @@ export default function PhotographerPage() {
                     </svg>
                   )}
                 </div>
-                <div>
-                  <p className="text-[23px] font-bold leading-tight text-[--text-primary]">
-                    {activeReassignmentNoticeRole === "old" ? "待就位超时提醒" : "任务接替提醒"}
-                  </p>
-                  <p className="mt-1 text-[17px] leading-snug text-[--text-secondary]">
-                    {activeReassignmentNotice.taskRoomNumber}室 · {activeReassignmentNotice.taskCategoryName} · P{activeReassignmentNotice.taskPriority}
-                  </p>
-                </div>
-              </div>
-              <div className={`rounded-3xl border px-6 py-5 ${
-                activeReassignmentNoticeRole === "old"
-                  ? "border-red-100 bg-red-50/75"
-                  : "border-amber-100 bg-amber-50/75"
-              }`}>
-                <p className={`whitespace-pre-wrap break-words text-[21px] leading-relaxed ${
-                  activeReassignmentNoticeRole === "old" ? "text-red-900" : "text-amber-900"
-                }`}>
-                  {activeReassignmentNoticeRole === "old"
-                    ? "你因长时间未应答就位，现已将你状态切换为离线状态，点击下方确认窗口，状态切换为应接在线状态。"
-                    : `因${activeReassignmentNotice.oldAssistantName}长时间未应答就位，现由你接替派发任务。`}
-                </p>
-              </div>
+	                <div>
+	                  <p className="text-[23px] font-bold leading-tight text-[--text-primary]">
+	                    {activeReassignmentNoticeRole === "old"
+                        ? activeReassignmentKeepsOldOnline
+                          ? "任务转派提醒"
+                          : "待就位超时提醒"
+                        : "任务接替提醒"}
+	                  </p>
+	                  <p className="mt-1 text-[17px] leading-snug text-[--text-secondary]">
+	                    {activeReassignmentTaskLabel}
+	                  </p>
+	                </div>
+	              </div>
+	              <div className={`rounded-3xl border px-6 py-5 ${
+	                activeReassignmentNoticeRole === "old" && !activeReassignmentKeepsOldOnline
+	                  ? "border-red-100 bg-red-50/75"
+	                  : "border-amber-100 bg-amber-50/75"
+	              }`}>
+	                <p className={`whitespace-pre-wrap break-words text-[21px] leading-relaxed ${
+	                  activeReassignmentNoticeRole === "old" && !activeReassignmentKeepsOldOnline ? "text-red-900" : "text-amber-900"
+	                }`}>
+	                  {activeReassignmentMessage}
+	                </p>
+	              </div>
               <button
                 type="button"
                 disabled={reassignmentNoticeSavingId === activeReassignmentNotice.id}
@@ -5793,11 +6117,13 @@ export default function PhotographerPage() {
                   activeReassignmentNoticeRole === "old" ? "acknowledgeOld" : "acknowledgeNew"
                 )}
               >
-                {reassignmentNoticeSavingId === activeReassignmentNotice.id
-                  ? "确认中..."
-                  : activeReassignmentNoticeRole === "old"
-                    ? "确认并恢复在线"
-                    : "确认"}
+	                {reassignmentNoticeSavingId === activeReassignmentNotice.id
+	                  ? "确认中..."
+	                  : activeReassignmentNoticeRole === "old"
+	                    ? activeReassignmentKeepsOldOnline
+                        ? "知道了"
+                        : "确认并恢复在线"
+	                    : "确认"}
               </button>
             </div>
           </div>
@@ -6315,47 +6641,50 @@ export default function PhotographerPage() {
           {/* 面板2：快捷预约（摄影师） / 当前任务状态（助理） */}
           {isAssistantRole(profile?.role) ? (
             <div className={`rounded-2xl px-4 py-3 flex-1 min-h-0 flex flex-col ${glass}`}>
-              <h3 className="text-[12px] font-bold text-[--text-primary] tracking-wide mb-1.5">当前任务状态</h3>
-              <div className="flex-1 min-h-0 flex flex-col items-stretch justify-start gap-2 w-full pt-0.5">
-                {(() => {
-                  // 无任务 → 空闲
-                  if (!currentRawTask && !pausedRawTask) {
-                    if (assistantPresence === "eating") {
-                      return (
-                        <div className={`w-full flex-1 rounded-xl flex flex-col items-center justify-center gap-3 ${eatingIsOvertime ? "bg-red-400/15" : "bg-blue-400/15"}`}>
-                          <div className={`w-16 h-16 rounded-full flex items-center justify-center ${eatingIsOvertime ? "bg-red-500/15" : "bg-blue-500/15"}`}>
-                            <div className={`w-8 h-8 rounded-full animate-pulse ${eatingIsOvertime ? "bg-red-500" : "bg-blue-500"}`} />
-                          </div>
-                          <span className={`text-[30px] font-extrabold ${eatingIsOvertime ? "text-red-600" : "text-blue-600"}`}>
-                            {eatingIsOvertime ? "吃饭超时" : "吃饭中"}
-                          </span>
-                          <span className={`font-mono text-[24px] font-semibold leading-none tabular-nums ${eatingIsOvertime ? "text-red-600" : "text-blue-600"}`}>
-                            {formatSecondsAsHMS(eatingElapsedSeconds)}
-                          </span>
-                          <span className={`text-[11px] ${eatingIsOvertime ? "text-red-600/70" : "text-blue-600/70"}`}>
-                            {eatingIsOvertime
-                              ? `已超过提醒阈值 ${formatSecondsAsHMS(eatingOvertimeSeconds)}`
-                              : `超过 ${eatingOvertimeAlertMin} 分钟提醒`}
-                          </span>
-                          <button
-                            type="button"
-                            disabled={!profile}
-                            onClick={(e) => {
-                              e.preventDefault();
-                              e.stopPropagation();
-                              if (!profile) return;
-                              void updateAssistantPresenceStatus(profile.id, "online");
-                            }}
-                            className="mt-1 rounded-full bg-emerald-500 px-4 py-2 text-[12px] font-extrabold text-white shadow-lg shadow-emerald-500/20 transition-transform hover:scale-[1.03] active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50"
-                          >
-                            结束吃饭并恢复在线
-                          </button>
-                        </div>
-                      );
-                    }
-                    if (assistantPresence === "on_break") {
-                      return (
-                        <div className="w-full flex-1 rounded-xl bg-gray-400/15 flex flex-col items-center justify-center gap-3">
+	              <h3 className="text-[12px] font-bold text-[--text-primary] tracking-wide mb-1.5">当前任务状态</h3>
+	              <div className="flex-1 min-h-0 flex flex-col items-stretch justify-start gap-2 w-full pt-0.5">
+	                {(() => {
+	                  const renderEatingPresenceBlock = () => (
+	                    <div className={`w-full flex-1 rounded-xl flex flex-col items-center justify-center gap-3 ${eatingIsOvertime ? "bg-red-400/15" : "bg-blue-400/15"}`}>
+	                      <div className={`w-16 h-16 rounded-full flex items-center justify-center ${eatingIsOvertime ? "bg-red-500/15" : "bg-blue-500/15"}`}>
+	                        <div className={`w-8 h-8 rounded-full animate-pulse ${eatingIsOvertime ? "bg-red-500" : "bg-blue-500"}`} />
+	                      </div>
+	                      <span className={`text-[30px] font-extrabold ${eatingIsOvertime ? "text-red-600" : "text-blue-600"}`}>
+	                        {eatingIsOvertime ? "吃饭超时" : "吃饭中"}
+	                      </span>
+	                      <span className={`font-mono text-[24px] font-semibold leading-none tabular-nums ${eatingIsOvertime ? "text-red-600" : "text-blue-600"}`}>
+	                        {formatSecondsAsHMS(eatingElapsedSeconds)}
+	                      </span>
+	                      <span className={`text-[11px] ${eatingIsOvertime ? "text-red-600/70" : "text-blue-600/70"}`}>
+	                        {eatingIsOvertime
+	                          ? `已超过提醒阈值 ${formatSecondsAsHMS(eatingOvertimeSeconds)}`
+	                          : `超过 ${eatingOvertimeAlertMin} 分钟提醒`}
+	                      </span>
+	                      <button
+	                        type="button"
+	                        disabled={!profile}
+	                        onClick={(e) => {
+	                          e.preventDefault();
+	                          e.stopPropagation();
+	                          if (!profile) return;
+	                          void updateAssistantPresenceStatus(profile.id, "online");
+	                        }}
+	                        className="mt-1 rounded-full bg-emerald-500 px-4 py-2 text-[12px] font-extrabold text-white shadow-lg shadow-emerald-500/20 transition-transform hover:scale-[1.03] active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50"
+	                      >
+	                        结束吃饭并恢复在线
+	                      </button>
+	                    </div>
+	                  );
+
+	                  if (assistantPresence === "eating") {
+	                    return renderEatingPresenceBlock();
+	                  }
+
+	                  // 无任务 → 空闲
+	                  if (!currentRawTask && !pausedRawTask) {
+	                    if (assistantPresence === "on_break") {
+	                      return (
+	                        <div className="w-full flex-1 rounded-xl bg-gray-400/15 flex flex-col items-center justify-center gap-3">
                           <div className="w-16 h-16 rounded-full bg-gray-400/15 flex items-center justify-center">
                             <div className="w-8 h-8 rounded-full bg-gray-400" />
                           </div>
@@ -7636,6 +7965,323 @@ export default function PhotographerPage() {
             })()}
           </div>
         </div>
+      )}
+
+      {/* ====== AREA COMPLETED STATS MODAL ====== */}
+      {showAreaCompletedStatsModal && (
+        (() => {
+          const weekDays = ["周一","周二","周三","周四","周五","周六","周日"];
+          const todayStatsIdx = now.getDay() === 0 ? 6 : now.getDay() - 1;
+          const selectedStatsDay = areaCompletedStatsSelectedDay ?? todayStatsIdx;
+          const selectedStatsDate = statsDayDate(areaCompletedStatsWeekOffset, selectedStatsDay, now);
+          const selectedStatsDayStart = new Date(selectedStatsDate.getFullYear(), selectedStatsDate.getMonth(), selectedStatsDate.getDate());
+          const selectedStatsDayEnd = new Date(selectedStatsDayStart.getTime() + 24 * 60 * 60 * 1000);
+          const areaBuildingId = publicQueueBuildingId ?? activeBuildingId;
+          const areaCompletedTodayTasks = areaTasks.filter((task) => task.status === "completed");
+          const areaCompletedWeekTasks = areaCompletedWeeklyTasks.filter((task) => (
+            areaBuildingId != null &&
+            taskLocationBuildingId(task) === areaBuildingId &&
+            task.status === "completed"
+          ));
+          const selectedStatsRawTasks = areaCompletedWeekTasks.filter((task) => {
+            const created = new Date(task.createdAt);
+            return created >= selectedStatsDayStart && created < selectedStatsDayEnd;
+          });
+          const selectedStatsTasks = selectedStatsRawTasks.map((task) => apiTaskToDisplay(task));
+          const selectedStatsDateLabel = formatStatsDateLabel(selectedStatsDate);
+          const selectedStatsDayIsToday = areaCompletedStatsWeekOffset === 0 && selectedStatsDay === todayStatsIdx;
+          const statsWeekLabel = areaCompletedStatsWeekOffset === 0
+            ? "本周"
+            : areaCompletedStatsWeekOffset === -1
+              ? "上周"
+              : areaCompletedStatsWeekOffset === 1
+                ? "下周"
+                : `${selectedStatsDateLabel.slice(5)}所在周`;
+          const statsTitle = `${activeBuilding?.name ?? "当前"}区域 任务数据`;
+          const statsTrendTitle = `${statsWeekLabel}完成任务趋势`;
+          const statsDetailTitle = `${selectedStatsDayIsToday ? "今日" : `${weekDays[selectedStatsDay]} ${selectedStatsDateLabel}`}完成任务明细`;
+          return (
+            <div
+              className={`fixed inset-0 z-[82] flex items-center justify-center px-6 ${
+                resolvedTheme === "dark" ? "bg-slate-950/52" : "bg-slate-900/22"
+              }`}
+              onClick={() => setShowAreaCompletedStatsModal(false)}
+            >
+              <div
+                className={`relative w-full max-w-[min(92vw,826px)] max-h-[62vh] overflow-visible rounded-[32px] border p-5 shadow-2xl backdrop-blur-[30px] ring-1 ${
+                  resolvedTheme === "dark"
+                    ? "border-white/[0.12] bg-slate-950/62 shadow-black/45 ring-white/[0.06]"
+                    : "border-white/75 bg-white/62 shadow-[0_34px_100px_rgba(56,68,89,0.22)] ring-slate-900/[0.04]"
+                }`}
+                onClick={(e) => e.stopPropagation()}
+              >
+                <div
+                  className="pointer-events-none absolute inset-0 opacity-80"
+                  style={{
+                    background:
+                      resolvedTheme === "dark"
+                        ? "radial-gradient(circle at 16% 12%, rgba(96,165,250,0.16), transparent 32%), radial-gradient(circle at 84% 8%, rgba(34,211,238,0.10), transparent 30%)"
+                        : "radial-gradient(circle at 16% 12%, rgba(255,255,255,0.82), transparent 34%), radial-gradient(circle at 86% 8%, rgba(96,165,250,0.11), transparent 32%)",
+                  }}
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowAreaCompletedStatsModal(false)}
+                  className={`absolute -right-2 -top-2 z-[4] flex h-7 w-7 items-center justify-center rounded-full border text-[14px] font-black leading-none shadow-sm backdrop-blur-xl transition-colors ${
+                    resolvedTheme === "dark"
+                      ? "border-white/[0.10] bg-slate-900/70 text-slate-300 hover:bg-slate-800/85 hover:text-slate-100"
+                      : "border-white/80 bg-white/80 text-slate-400 hover:bg-white hover:text-slate-600"
+                  }`}
+                  aria-label={`关闭${statsTitle}`}
+                  title="关闭"
+                >
+                  x
+                </button>
+                <div className="relative z-[1] overflow-hidden rounded-[24px]">
+                  <div className="-mr-3 max-h-[calc(62vh-40px)] overflow-y-auto" style={{ scrollbarGutter: "stable" }}>
+                    <div className="pr-3">
+                      <div className="mb-6 flex items-center">
+                        <div className="pl-2">
+                          <h2 className="text-[16px] font-extrabold tracking-wide text-[--text-primary]">{statsTitle}</h2>
+                        </div>
+                      </div>
+
+                      <div className="mb-4 grid grid-cols-2 gap-4">
+                        <div className={`relative h-[236px] rounded-[34px] border px-8 py-3 backdrop-blur-2xl ${
+                          resolvedTheme === "dark"
+                            ? "border-white/[0.10] bg-white/[0.055]"
+                            : "border-white/70 bg-white/38 shadow-[0_18px_52px_rgba(56,68,89,0.07)]"
+                        }`}>
+                          <div className="mb-2 flex min-h-[22px] items-center justify-between gap-3">
+                            <h3 className="text-[14px] font-extrabold tracking-wide text-[--text-primary]">{statsTrendTitle}</h3>
+                            <span className={`shrink-0 rounded-full px-2.5 py-1 text-[10px] font-extrabold transition-opacity duration-150 ${
+                              resolvedTheme === "dark" ? "bg-orange-400/12 text-orange-200" : "bg-orange-500/10 text-orange-600"
+                            }`}>
+                              {weekDays[areaCompletedStatsHoveredDay ?? selectedStatsDay]} · {formatStatsDateLabel(statsDayDate(areaCompletedStatsWeekOffset, areaCompletedStatsHoveredDay ?? selectedStatsDay, now))}
+                            </span>
+                          </div>
+                          {(() => {
+                            const monday = statsWeekStart(areaCompletedStatsWeekOffset, now);
+                            const weekCounts = Array.from({ length: 7 }, (_, i) => {
+                              const dayStart = new Date(monday.getTime() + i * 24 * 60 * 60 * 1000);
+                              const dayEnd = new Date(dayStart.getTime() + 24 * 60 * 60 * 1000);
+                              return areaCompletedWeekTasks.filter((task) => {
+                                const created = new Date(task.createdAt);
+                                return created >= dayStart && created < dayEnd;
+                              }).length;
+                            });
+                            const wMax = Math.max(...weekCounts, 1);
+                            const previewIdx = areaCompletedStatsHoveredDay ?? selectedStatsDay;
+                            const weekArrowCls = `mb-[24px] flex h-9 w-5 items-center justify-center rounded-full transition-colors ${
+                              resolvedTheme === "dark"
+                                ? "text-slate-400/90 hover:bg-white/[0.045] hover:text-slate-200"
+                                : "text-slate-400 hover:bg-slate-900/[0.03] hover:text-slate-600"
+                            }`;
+                            return (
+                              <div className="grid h-40 grid-cols-[20px_repeat(7,minmax(0,1fr))_20px] items-end gap-2">
+                                <button
+                                  type="button"
+                                  onClick={() => setAreaCompletedStatsWeekOffset((value) => value - 1)}
+                                  className={weekArrowCls}
+                                  aria-label="查看上一周"
+                                  title="上一周"
+                                >
+                                  <svg width="10" height="18" viewBox="0 0 10 18" fill="none" aria-hidden="true">
+                                    <path d="M7 3L3 9L7 15" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+                                  </svg>
+                                </button>
+                                {weekDays.map((day, i) => {
+                                  const isSelected = i === selectedStatsDay;
+                                  const isHovered = i === previewIdx;
+                                  const barH = weekCounts[i] > 0 ? Math.max((weekCounts[i] / wMax) * 92, 6) : 0;
+                                  return (
+                                    <button
+                                      type="button"
+                                      key={day}
+                                      className={`flex h-full flex-1 flex-col items-center justify-end rounded-2xl px-1 transition-colors duration-200 ${
+                                        resolvedTheme === "dark" ? "hover:bg-white/[0.06]" : "hover:bg-white/20"
+                                      }`}
+                                      onMouseEnter={() => setAreaCompletedStatsHoveredDay(i)}
+                                      onMouseLeave={() => setAreaCompletedStatsHoveredDay(null)}
+                                      onClick={() => setAreaCompletedStatsSelectedDay(i)}
+                                      aria-pressed={isSelected}
+                                      aria-label={`查看${day}完成明细`}
+                                    >
+                                      <span className={`mb-2 text-[12px] font-extrabold tabular-nums ${isHovered || isSelected ? "text-orange-500" : "text-[--text-primary]"}`}>{weekCounts[i]}</span>
+                                      <div
+                                        className={`w-full max-w-[64px] rounded-t-[16px] transition-all duration-300 ${
+                                          isHovered || isSelected
+                                            ? "bg-gradient-to-t from-orange-600 to-orange-300 shadow-[0_10px_24px_rgba(249,115,22,0.26)]"
+                                            : resolvedTheme === "dark"
+                                              ? "bg-gradient-to-t from-orange-400/36 to-orange-200/20"
+                                              : "bg-gradient-to-t from-orange-400/42 to-orange-100/62"
+                                        }`}
+                                        style={{ height: `${barH}px`, minWidth: "18px" }}
+                                      />
+                                      <span className={`mt-2 text-[11px] ${isHovered || isSelected ? "font-extrabold text-orange-500" : "font-bold text-[--text-muted]"}`}>{day}</span>
+                                    </button>
+                                  );
+                                })}
+                                <button
+                                  type="button"
+                                  onClick={() => setAreaCompletedStatsWeekOffset((value) => value + 1)}
+                                  className={weekArrowCls}
+                                  aria-label="查看下一周"
+                                  title="下一周"
+                                >
+                                  <svg width="10" height="18" viewBox="0 0 10 18" fill="none" aria-hidden="true">
+                                    <path d="M3 3L7 9L3 15" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+                                  </svg>
+                                </button>
+                              </div>
+                            );
+                          })()}
+                        </div>
+
+                        {(() => {
+                          const typeCounts: Record<string, number> = {};
+                          for (const task of areaCompletedTodayTasks) {
+                            const group = taskTypeGroupName(task.category?.name);
+                            typeCounts[group] = (typeCounts[group] || 0) + 1;
+                          }
+                          const total = areaCompletedTodayTasks.length || 1;
+                          const typeBreakdown = CAT_ORDER
+                            .filter((name) => typeCounts[name])
+                            .map((name) => ({
+                              name,
+                              count: typeCounts[name],
+                              pct: Math.round((typeCounts[name] / total) * 100),
+                              color: CAT_SOLID_BG[name],
+                            }));
+                          return (
+                            <div className={`grid h-[236px] grid-cols-[minmax(0,2fr)_minmax(118px,1fr)] overflow-hidden rounded-[34px] border backdrop-blur-2xl ${
+                              resolvedTheme === "dark"
+                                ? "border-white/[0.10] bg-white/[0.055]"
+                                : "border-white/70 bg-white/38 shadow-[0_18px_52px_rgba(56,68,89,0.07)]"
+                            }`}>
+                              <div className="min-w-0 px-5 py-3">
+                                <h3 className="mb-3 text-[14px] font-extrabold tracking-wide text-[--text-primary]">任务类型占比</h3>
+                                {typeBreakdown.length === 0 ? (
+                                  <div className={`flex h-[160px] items-center justify-center rounded-[24px] text-[12px] font-semibold text-[--text-muted] ${
+                                    resolvedTheme === "dark" ? "border border-white/[0.08] bg-white/[0.04]" : "bg-white/34"
+                                  }`}>暂无数据</div>
+                                ) : (
+                                  <div className="space-y-2.5">
+                                    {typeBreakdown.map((item) => (
+                                      <div key={item.name}>
+                                        <div className="mb-1 flex items-center justify-between gap-3">
+                                          <span className="min-w-0 truncate text-[12px] font-extrabold text-[--text-primary]">{item.name}</span>
+                                          <span className="shrink-0 text-[11px] font-extrabold tabular-nums text-[--text-primary]">{item.count}单 · {item.pct}%</span>
+                                        </div>
+                                        <div className={`h-1.5 overflow-hidden rounded-full ${
+                                          resolvedTheme === "dark" ? "bg-white/[0.08]" : "bg-slate-900/[0.045]"
+                                        }`}>
+                                          <div className={`h-full rounded-full ${item.color} shadow-[0_0_18px_rgba(15,23,42,0.10)]`} style={{ width: `${item.pct}%` }} />
+                                        </div>
+                                      </div>
+                                    ))}
+                                  </div>
+                                )}
+                              </div>
+                              <div className={`flex min-w-0 flex-col items-center justify-center border-l px-4 py-4 text-center ${
+                                resolvedTheme === "dark" ? "border-white/[0.10]" : "border-slate-900/[0.06]"
+                              }`}>
+                                <p className="text-[13px] font-extrabold text-[--text-primary]">总完成任务</p>
+                                <div className="mt-5 flex items-end justify-center gap-1">
+                                  <span className="text-[38px] font-extrabold leading-none tabular-nums text-emerald-500">{areaTaskStats.completed}</span>
+                                  <span className="pb-1.5 text-[13px] font-bold text-[--text-primary]">单</span>
+                                </div>
+                              </div>
+                            </div>
+                          );
+                        })()}
+                      </div>
+
+                      <div className={`rounded-[34px] border backdrop-blur-2xl ${
+                        resolvedTheme === "dark"
+                          ? "border-white/[0.10] bg-white/[0.045]"
+                          : "border-white/70 bg-white/38 shadow-[0_20px_54px_rgba(56,68,89,0.08)]"
+                      }`}>
+                        <h3 className={`px-5 pb-3 pt-4 text-[14px] font-extrabold tracking-wide text-[--text-primary] ${
+                          resolvedTheme === "dark" ? "border-b border-white/[0.08]" : "border-b border-slate-900/[0.06]"
+                        }`}>{statsDetailTitle}</h3>
+                        <div>
+                          {selectedStatsTasks.length === 0 ? (
+                            <div className="py-10 text-center text-xs font-semibold text-[--text-muted]">暂无完成任务</div>
+                          ) : (
+                            <table className="w-full table-fixed border-collapse text-center text-[11px]">
+                              <colgroup>
+                                <col style={{ width: "13%" }} />
+                                <col style={{ width: "10%" }} />
+                                <col style={{ width: "13%" }} />
+                                <col style={{ width: "13%" }} />
+                                <col style={{ width: "14%" }} />
+                                <col style={{ width: "13%" }} />
+                                <col style={{ width: "13%" }} />
+                                <col style={{ width: "11%" }} />
+                              </colgroup>
+                              <thead className={`sticky top-0 z-20 backdrop-blur-2xl shadow-[0_10px_22px_rgba(15,23,42,0.06)] ${
+                                resolvedTheme === "dark" ? "bg-slate-950/88" : "bg-white/88"
+                              }`}>
+                                <tr className={`border-b ${
+                                  resolvedTheme === "dark" ? "border-white/[0.08] bg-white/[0.035]" : "border-slate-900/[0.06] bg-white/24"
+                                }`}>
+                                  <th className="px-3 py-3 text-[11px] font-extrabold text-[--text-muted] align-middle">日期时间</th>
+                                  <th className="px-3 py-3 text-[11px] font-extrabold text-[--text-muted] align-middle">房间</th>
+                                  <th className="px-3 py-3 text-[11px] font-extrabold text-[--text-muted] align-middle">摄影师</th>
+                                  <th className="px-3 py-3 text-[11px] font-extrabold text-[--text-muted] align-middle">助理</th>
+                                  <th className="px-3 py-3 text-[11px] font-extrabold text-[--text-muted] align-middle">类型</th>
+                                  <th className="px-3 py-3 text-[11px] font-extrabold text-[--text-muted] align-middle">预估时间</th>
+                                  <th className="px-3 py-3 text-[11px] font-extrabold text-[--text-muted] align-middle">实际用时</th>
+                                  <th className="px-3 py-3 text-[11px] font-extrabold text-[--text-muted] align-middle">状态</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {selectedStatsTasks.map((task) => {
+                                  const rawTask = selectedStatsRawTasks.find((raw) => raw.id === task.id);
+                                  return (
+                                    <tr key={task.id} className={`border-b transition-colors last:border-b-0 ${
+                                      resolvedTheme === "dark"
+                                        ? "border-white/[0.06] hover:bg-white/[0.06]"
+                                        : "border-slate-900/[0.045] hover:bg-white/50"
+                                    }`}>
+                                      <td className="px-3 py-3 tabular-nums text-[--text-muted] align-middle whitespace-nowrap">{formatTaskDetailDateTime(task.createdAt)}</td>
+                                      <td className="px-3 py-3 text-[--text-muted] align-middle tabular-nums">{task.room}室</td>
+                                      <td className="px-3 py-3 font-bold text-[--text-primary] align-middle min-w-0">
+                                        <span className="inline-block max-w-full truncate align-middle" title={task.photographerName || ""}>{task.photographerName || "—"}</span>
+                                      </td>
+                                      <td className="px-3 py-3 font-bold text-[--text-primary] align-middle min-w-0">
+                                        <span className="inline-block max-w-full truncate align-middle" title={task.assistantName || ""}>{task.assistantName || "—"}</span>
+                                      </td>
+                                      <td className="px-3 py-3 font-semibold text-[--text-primary] align-middle min-w-0">
+                                        <span className="inline-block max-w-full truncate align-middle" title={task.name}>{task.name}</span>
+                                      </td>
+                                      <td className="px-3 py-3 text-[--text-muted] align-middle min-w-0">
+                                        <span className="inline-block max-w-full truncate align-middle" title={task.durationSlotLabel}>{task.durationSlotLabel}</span>
+                                      </td>
+                                      <td className="px-3 py-3 text-[--text-muted] align-middle min-w-0 tabular-nums">
+                                        <span className="inline-block max-w-full truncate align-middle">
+                                          {taskListActualLine(task, rawTask, now.getTime(), false) ?? "—"}
+                                        </span>
+                                      </td>
+                                      <td className="px-3 py-3 align-middle">
+                                        <span className={`inline-block rounded-full px-2.5 py-1 text-[9px] font-extrabold whitespace-nowrap ${task.tagCls}`}>{task.statusLabel}</span>
+                                      </td>
+                                    </tr>
+                                  );
+                                })}
+                              </tbody>
+                            </table>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          );
+        })()
       )}
 
       {/* ====== STATS MODAL ====== */}

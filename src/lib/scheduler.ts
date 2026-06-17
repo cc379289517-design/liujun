@@ -809,7 +809,15 @@ export async function reassignOverdueStandbyTasks(): Promise<number> {
             status: { in: WORKING_PARTICIPANT_STATUSES },
             task: { status: { in: [TaskStatus.waiting, TaskStatus.executing, TaskStatus.paused] } },
           },
-          select: { status: true },
+          select: {
+            status: true,
+            task: {
+              select: {
+                roomNumber: true,
+                category: { select: { name: true } },
+              },
+            },
+          },
         }),
         tx.bookingTask.findMany({
           where: {
@@ -817,15 +825,26 @@ export async function reassignOverdueStandbyTasks(): Promise<number> {
             assistantId: oldAssistantId,
             status: { in: [TaskStatus.executing, TaskStatus.paused] },
           },
-          select: { status: true },
+          select: {
+            status: true,
+            roomNumber: true,
+            category: { select: { name: true } },
+          },
         }),
       ]);
+      const oldAssistantActiveWork =
+        oldAssistantOtherParticipants.find((participant) => participant.status === "executing") ||
+        oldAssistantOtherTasks.find((task) => task.status === TaskStatus.executing) ||
+        oldAssistantOtherParticipants.find((participant) => participant.status === "paused") ||
+        oldAssistantOtherTasks.find((task) => task.status === TaskStatus.paused) ||
+        null;
       const hasOtherExecutingWork =
         oldAssistantOtherParticipants.some((participant) => participant.status === "executing") ||
         oldAssistantOtherTasks.some((task) => task.status === TaskStatus.executing);
       const hasOtherPausedWork =
         oldAssistantOtherParticipants.some((participant) => participant.status === "paused") ||
         oldAssistantOtherTasks.some((task) => task.status === TaskStatus.paused);
+      const oldAssistantSetOffline = !hasOtherExecutingWork && !hasOtherPausedWork;
 
       if (hasOtherExecutingWork || hasOtherPausedWork) {
         await tx.profile.update({
@@ -855,6 +874,22 @@ export async function reassignOverdueStandbyTasks(): Promise<number> {
           waitedMinutes: candidate.waitedMinutes,
           thresholdMinutes,
           score: candidate.score,
+          reason: oldAssistantSetOffline
+            ? "standby_timeout_offline"
+            : hasOtherExecutingWork
+              ? "standby_timeout_old_assistant_executing"
+              : "standby_timeout_old_assistant_paused",
+          oldAssistantSetOffline,
+          oldAssistantActiveTaskRoomNumber:
+            oldAssistantActiveWork && "task" in oldAssistantActiveWork
+              ? oldAssistantActiveWork.task.roomNumber
+              : oldAssistantActiveWork?.roomNumber ?? null,
+          oldAssistantActiveTaskCategoryName:
+            oldAssistantActiveWork && "task" in oldAssistantActiveWork
+              ? oldAssistantActiveWork.task.category.name
+              : oldAssistantActiveWork?.category.name ?? null,
+          oldAssistantActiveTaskStatus:
+            oldAssistantActiveWork?.status ?? null,
         },
       });
     });
