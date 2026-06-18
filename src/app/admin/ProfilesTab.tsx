@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useCallback } from "react";
+import { useEffect, useState, useRef, useCallback } from "react";
 import { createPortal } from "react-dom";
 import * as XLSX from "xlsx";
 
@@ -53,6 +53,8 @@ export default function ProfilesTab({
   const [showProfileModal, setShowProfileModal] = useState(false);
   const [editingProfile, setEditingProfile] = useState<Profile | null>(null);
   const [showImportModal, setShowImportModal] = useState(false);
+  const [openOnlineStatusProfileId, setOpenOnlineStatusProfileId] = useState<string | null>(null);
+  const onlineStatusCloseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Sync when parent re-fetches
   const [prevProfiles, setPrevProfiles] = useState(initialProfiles);
@@ -62,6 +64,28 @@ export default function ProfilesTab({
   }
 
   const profiles = localProfiles;
+
+  const clearOnlineStatusCloseTimer = useCallback(() => {
+    if (onlineStatusCloseTimerRef.current) {
+      clearTimeout(onlineStatusCloseTimerRef.current);
+      onlineStatusCloseTimerRef.current = null;
+    }
+  }, []);
+
+  const openOnlineStatusMenu = useCallback((profileId: string) => {
+    clearOnlineStatusCloseTimer();
+    setOpenOnlineStatusProfileId(profileId);
+  }, [clearOnlineStatusCloseTimer]);
+
+  const scheduleCloseOnlineStatusMenu = useCallback(() => {
+    clearOnlineStatusCloseTimer();
+    onlineStatusCloseTimerRef.current = setTimeout(() => {
+      setOpenOnlineStatusProfileId(null);
+      onlineStatusCloseTimerRef.current = null;
+    }, 420);
+  }, [clearOnlineStatusCloseTimer]);
+
+  useEffect(() => () => clearOnlineStatusCloseTimer(), [clearOnlineStatusCloseTimer]);
 
   const departments = [...new Set(profiles.map((p) => p.department).filter(Boolean))] as string[];
 
@@ -288,9 +312,18 @@ export default function ProfilesTab({
                   <span className="text-xs text-[--text-secondary] text-center">{p.group || "—"}</span>
                   <span className="text-xs text-[--text-secondary] text-center">{p.building.name}</span>
                   <span className="text-xs text-[--text-secondary] text-center">{p.currentRoom || "—"}</span>
-                  <span className="flex justify-center">
-                    {isAssistantRole ? (
-                      <div className="relative group">
+	                  <span className="flex justify-center">
+	                    {isAssistantRole ? (
+                      <div
+                        className="relative"
+                        onMouseEnter={() => openOnlineStatusMenu(p.id)}
+                        onMouseLeave={scheduleCloseOnlineStatusMenu}
+                        onFocus={() => openOnlineStatusMenu(p.id)}
+                        onBlur={(e) => {
+                          if (e.currentTarget.contains(e.relatedTarget)) return;
+                          scheduleCloseOnlineStatusMenu();
+                        }}
+                      >
                         <span
                           className={`text-[10px] font-bold px-2 py-0.5 rounded-md cursor-default inline-block ${os.bg} ${os.color} ${inTask ? "opacity-60" : ""}`}
                           title={inTask ? `任务${TASK_STATUS_LABEL[p.status]}中，无法切换` : ""}
@@ -298,13 +331,21 @@ export default function ProfilesTab({
                           {os.label}
                         </span>
                         {/* Hover dropdown for status switching */}
-                        <div className="admin-popover absolute left-1/2 -translate-x-1/2 top-full mt-1 hidden group-hover:flex flex-col bg-white rounded-lg shadow-lg border border-gray-200 py-1 z-20 min-w-[64px]">
+                        <div
+                          className={`admin-popover absolute left-1/2 top-full z-20 mt-1 min-w-[64px] -translate-x-1/2 flex-col rounded-lg border border-gray-200 bg-white py-1 shadow-lg ${
+                            openOnlineStatusProfileId === p.id ? "flex" : "hidden"
+                          }`}
+                        >
                           {Object.entries(ONLINE_STATUS_MAP)
-                            .filter(([key]) => key !== (p.onlineStatus || "offline"))
+                            .filter(([key]) => key !== (p.onlineStatus || "offline") && key !== "offline")
                             .map(([key, val]) => (
                               <button
                                 key={key}
-                                onClick={() => changeOnlineStatus(p, key)}
+                                onClick={() => {
+                                  clearOnlineStatusCloseTimer();
+                                  setOpenOnlineStatusProfileId(null);
+                                  void changeOnlineStatus(p, key);
+                                }}
                                 className={`text-[10px] font-bold px-3 py-1 whitespace-nowrap text-left hover:bg-gray-50 transition-colors ${val.color} ${inTask ? "opacity-40 cursor-not-allowed" : "cursor-pointer"}`}
                               >
                                 {val.label}

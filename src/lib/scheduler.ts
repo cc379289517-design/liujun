@@ -1291,9 +1291,18 @@ export async function buildP1InterruptCandidateOrderFromFiltered<
   return orderP1InterruptCandidates(sortedByPriorityDesc, lastId);
 }
 
+function taskWaitingSinceForEscalation(task: {
+  createdAt: Date;
+  assistantId: string | null;
+  collaborators: { assistantId: string; joinedAt: Date }[];
+}): Date {
+  if (!task.assistantId) return task.createdAt;
+  return task.collaborators.find((participant) => participant.assistantId === task.assistantId)?.joinedAt ?? task.createdAt;
+}
+
 /**
  * 动态提权
- * 仅对未分配助理的队列任务生效；已派发待就位任务不参与普通队列提权。
+ * 等待中的任务超过阈值后自动升一级；未分配任务和已分配但尚未就位的任务都参与。
  * P2/P3/P4/P5 任务等待超过阈值后，优先级自动向上提一级。
  */
 export async function escalatePriorities(): Promise<number> {
@@ -1306,19 +1315,43 @@ export async function escalatePriorities(): Promise<number> {
   const tasksToEscalate = await prisma.bookingTask.findMany({
     where: {
       status: TaskStatus.waiting,
-      assistantId: null,
-      AND: [NOT_PHOTOGRAPHER_LIMIT_QUEUE_WHERE],
-      priority: { gte: PRIORITY.P2 }, // P2-P5
-      createdAt: { lte: threshold },
-      OR: [
-        { escalatedAt: null },
-        { escalatedAt: { lte: threshold } },
+      AND: [
+        NOT_PHOTOGRAPHER_LIMIT_QUEUE_WHERE,
+        {
+          OR: [
+            { createdAt: { lte: threshold } },
+            {
+              collaborators: {
+                some: {
+                  role: "primary",
+                  status: "waiting",
+                  joinedAt: { lte: threshold },
+                },
+              },
+            },
+          ],
+        },
+        {
+          OR: [
+            { escalatedAt: null },
+            { escalatedAt: { lte: threshold } },
+          ],
+        },
       ],
+      priority: { gte: PRIORITY.P2 }, // P2-P5
+      parentTaskId: null,
+    },
+    include: {
+      collaborators: {
+        where: { role: "primary", status: "waiting" },
+        select: { assistantId: true, joinedAt: true },
+      },
     },
   });
 
   let escalatedCount = 0;
   for (const task of tasksToEscalate) {
+    if (taskWaitingSinceForEscalation(task) > threshold) continue;
     if (task.priority > PRIORITY.P1) {
       await prisma.bookingTask.update({
         where: { id: task.id },

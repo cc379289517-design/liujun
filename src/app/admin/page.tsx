@@ -11,7 +11,8 @@ import { WORKBENCH_PAGE_BACKGROUND_CONFIG_KEY } from "@/lib/workbenchBackground"
 type TabKey = "profiles" | "spaces" | "tasks" | "approvals" | "stats";
 
 type Room = { id: number; buildingId: number; roomNumber: string; floor: number; xPosition: number; yPosition: number; fenceRadius: number };
-type Building = { id: number; name: string; floorPlanUrl: string | null; cropX?: number | null; cropY?: number | null; cropW?: number | null; cropH?: number | null; extraVenues: string | null; rooms: Room[] };
+type IroningMachine = { id: number; buildingId: number; name: string; status: "normal" | "maintenance"; xPosition: number; yPosition: number; sortRank: number };
+type Building = { id: number; name: string; floorPlanUrl: string | null; cropX?: number | null; cropY?: number | null; cropW?: number | null; cropH?: number | null; extraVenues: string | null; rooms: Room[]; ironingMachines: IroningMachine[] };
 type Profile = { id: string; employeeId: string | null; name: string; avatar: string | null; role: "photographer" | "assistant" | "assistant_leader" | "admin"; buildingId: number; currentRoom: string | null; status: string; onlineStatus: string; isOnline: boolean; department: string | null; group: string | null; building: { id: number; name: string } };
 type Category = { id: number; name: string; description: string | null; priorityLevel: number; minDuration: number; maxDuration: number; estDuration: number; hexColor: string; sortRank: number; canBeInterrupted: boolean; maxInterruptMinutes: number | null };
 type SystemConfigMap = Record<string, { value: string; label: string | null }>;
@@ -53,7 +54,7 @@ export default function AdminPage() {
   const adminShellStyle: CSSProperties | undefined = adminPageBackground
     ? {
         backgroundColor: "#eef1f5",
-        backgroundImage: `linear-gradient(135deg, rgba(245, 247, 251, 0.76), rgba(237, 242, 247, 0.56) 48%, rgba(247, 243, 238, 0.7)), url("${adminPageBackground}")`,
+        backgroundImage: `linear-gradient(135deg, rgba(255, 255, 255, 0.38), rgba(255, 255, 255, 0.18) 48%, rgba(255, 250, 244, 0.28)), url("${adminPageBackground}")`,
         backgroundSize: "auto, cover",
         backgroundPosition: "center, center",
         backgroundRepeat: "no-repeat, no-repeat",
@@ -86,7 +87,7 @@ export default function AdminPage() {
   useEffect(() => { fetchData(); }, [fetchData]);
 
   return (
-    <div className="admin-shell h-screen overflow-y-scroll px-8 py-6" style={adminShellStyle}>
+    <div className={`admin-shell ${adminPageBackground ? "admin-shell--custom-bg" : ""} h-screen overflow-y-scroll px-8 py-6`} style={adminShellStyle}>
       <div className="relative z-10 flex flex-col max-w-[1200px] mx-auto">
         {/* Header */}
         <div className="flex items-center gap-4 mb-6">

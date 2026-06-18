@@ -9,6 +9,7 @@ export async function GET() {
     const buildings = await prisma.building.findMany({
       include: {
         rooms: { orderBy: { roomNumber: "asc" } },
+        ironingMachines: { orderBy: [{ sortRank: "asc" }, { id: "asc" }] },
       },
       orderBy: { id: "asc" },
     });
@@ -34,7 +35,7 @@ export async function POST(request: NextRequest) {
 
     const building = await prisma.building.create({
       data: { name, floorPlanUrl: floorPlanUrl || null },
-      include: { rooms: true },
+      include: { rooms: true, ironingMachines: true },
     });
 
     return Response.json(building, { status: 201 });

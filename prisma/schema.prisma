@@ -20,10 +20,33 @@ model Building {
   cropH         Float?   @map("crop_h")
   extraVenues   String?  @map("extra_venues") // JSON array: ["化妆间","休息区"]
   rooms         Room[]
+  ironingMachines IroningMachine[]
   profiles      Profile[]
   createdAt     DateTime @default(now()) @map("created_at")
 
   @@map("buildings")
+}
+
+enum IroningMachineStatus {
+  normal
+  maintenance
+}
+
+model IroningMachine {
+  id          Int      @id @default(autoincrement())
+  buildingId  Int      @map("building_id")
+  name        String
+  status      IroningMachineStatus @default(normal)
+  xPosition   Float    @default(88) @map("x_position")
+  yPosition   Float    @default(14) @map("y_position")
+  sortRank    Int      @default(0) @map("sort_rank")
+  building    Building @relation(fields: [buildingId], references: [id], onDelete: Cascade)
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  @@unique([buildingId, name])
+  @@index([buildingId, sortRank])
+  @@map("ironing_machines")
 }
 
 // ============================================

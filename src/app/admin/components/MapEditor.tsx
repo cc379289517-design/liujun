@@ -3,6 +3,7 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 
 type CropData = { cropX: number; cropY: number; cropW: number; cropH: number };
+export type VenuePoint = { x: number; y: number };
 
 type Building = {
   id: number;
@@ -25,20 +26,37 @@ type Room = {
   fenceRadius: number;
 };
 
+export type IroningMachine = {
+  id: number;
+  buildingId: number;
+  name: string;
+  status: "normal" | "maintenance";
+  xPosition: number;
+  yPosition: number;
+  sortRank: number;
+};
+
 export type Venue = {
   name: string;
   x: number;
   y: number;
   type?: "实景棚" | "无影棚";
+  color?: string;
+  polygon?: VenuePoint[];
 };
 
 interface MapEditorProps {
   building: Building;
   rooms: Room[];
   venues?: Venue[];
+  ironingMachines?: IroningMachine[];
   cropMode?: boolean;
   onRoomUpdate: (roomId: number, xPosition: number, yPosition: number, fenceRadius: number) => void;
   onVenueUpdate?: (venueName: string, x: number, y: number) => void;
+  onIroningMachineUpdate?: (machineId: number, x: number, y: number) => void;
+  areaEditVenueName?: string | null;
+  onVenueAreaSave?: (venueName: string, polygon: VenuePoint[]) => void;
+  onVenueAreaCancel?: () => void;
   onCropUpdate?: (crop: CropData | null) => void;
   onCropModeChange?: (mode: boolean) => void;
   onCropSave?: () => void;
@@ -49,7 +67,19 @@ const MIN_ZOOM = 1;
 const MAX_ZOOM = 5;
 const ZOOM_STEP = 0.15;
 
-export default function MapEditor({ building, rooms, venues = [], cropMode: cropModeProp, onRoomUpdate, onVenueUpdate, onCropUpdate, onCropModeChange, onCropSave, onCropClear }: MapEditorProps) {
+function IroningMachineIcon({ muted = false }: { muted?: boolean }) {
+  const color = muted ? "#94a3b8" : "#f05b51";
+  return (
+    <svg width="22" height="22" viewBox="0 0 96 96" fill="none" aria-hidden="true">
+      <path d="M21 52c0-12 8-22 20-22h20c8 0 14 6 14 14v8" stroke={color} strokeWidth="7" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M19 55h58c4 0 7 3 7 7v4c0 5-4 9-9 9H24c-6 0-10-4-10-10v-3c0-4 2-7 5-7Z" stroke={color} strokeWidth="7" strokeLinejoin="round" />
+      <path d="M36 30V20h24c7 0 12 5 12 12" stroke={color} strokeWidth="7" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M33 62h30" stroke={color} strokeWidth="7" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+export default function MapEditor({ building, rooms, venues = [], ironingMachines = [], cropMode: cropModeProp, onRoomUpdate, onVenueUpdate, onIroningMachineUpdate, areaEditVenueName, onVenueAreaSave, onVenueAreaCancel, onCropUpdate, onCropModeChange, onCropSave, onCropClear }: MapEditorProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const innerRef = useRef<HTMLDivElement>(null);
 
@@ -74,6 +104,33 @@ export default function MapEditor({ building, rooms, venues = [], cropMode: crop
   } | null>(null);
   const [venueDragPos, setVenueDragPos] = useState<{ x: number; y: number } | null>(null);
   const [hoveredVenue, setHoveredVenue] = useState<string | null>(null);
+  const [areaDraft, setAreaDraft] = useState<VenuePoint[]>([]);
+  const [areaPointDragging, setAreaPointDragging] = useState<{
+    index: number;
+    startX: number;
+    startY: number;
+    origX: number;
+    origY: number;
+  } | null>(null);
+  const [areaCanvasAction, setAreaCanvasAction] = useState<{
+    startX: number;
+    startY: number;
+    origPanX: number;
+    origPanY: number;
+    moved: boolean;
+  } | null>(null);
+  const areaEditVenue = venues.find((venue) => venue.name === areaEditVenueName) ?? null;
+  const areaEditMode = !!areaEditVenue;
+
+  const [machineDragging, setMachineDragging] = useState<{
+    id: number;
+    startX: number;
+    startY: number;
+    origX: number;
+    origY: number;
+  } | null>(null);
+  const [machineDragPos, setMachineDragPos] = useState<{ x: number; y: number } | null>(null);
+  const [hoveredMachine, setHoveredMachine] = useState<number | null>(null);
 
   // Pan & zoom state
   const [zoom, setZoom] = useState(MIN_ZOOM);
@@ -112,6 +169,15 @@ export default function MapEditor({ building, rooms, venues = [], cropMode: crop
       setCropRect(null);
     }
   }, [building.cropX, building.cropY, building.cropW, building.cropH]);
+
+  useEffect(() => {
+    if (!areaEditVenueName) {
+      setAreaDraft([]);
+      return;
+    }
+    const nextVenue = venues.find((venue) => venue.name === areaEditVenueName);
+    setAreaDraft(Array.isArray(nextVenue?.polygon) ? nextVenue.polygon : []);
+  }, [areaEditVenueName]);
 
   const clampZoom = useCallback(
     (z: number) => Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, Math.round(z * 100) / 100)),
@@ -168,7 +234,7 @@ export default function MapEditor({ building, rooms, venues = [], cropMode: crop
   // --- Room drag handlers ---
   const handleRoomMouseDown = useCallback(
     (e: React.MouseEvent, room: Room) => {
-      if (cropMode) return;
+      if (cropMode || areaEditMode) return;
       e.preventDefault();
       e.stopPropagation();
       setDragging({
@@ -180,7 +246,7 @@ export default function MapEditor({ building, rooms, venues = [], cropMode: crop
       });
       setDragPos({ x: room.xPosition, y: room.yPosition });
     },
-    [cropMode]
+    [cropMode, areaEditMode]
   );
 
   useEffect(() => {
@@ -224,7 +290,7 @@ export default function MapEditor({ building, rooms, venues = [], cropMode: crop
   // --- Venue drag handlers ---
   const handleVenueMouseDown = useCallback(
     (e: React.MouseEvent, venue: Venue) => {
-      if (cropMode) return;
+      if (cropMode || areaEditMode) return;
       e.preventDefault();
       e.stopPropagation();
       setVenueDragging({
@@ -236,7 +302,7 @@ export default function MapEditor({ building, rooms, venues = [], cropMode: crop
       });
       setVenueDragPos({ x: venue.x, y: venue.y });
     },
-    [cropMode]
+    [cropMode, areaEditMode]
   );
 
   useEffect(() => {
@@ -273,10 +339,61 @@ export default function MapEditor({ building, rooms, venues = [], cropMode: crop
     };
   }, [venueDragging, venueDragPos, onVenueUpdate]);
 
+  const handleMachineMouseDown = useCallback(
+    (e: React.MouseEvent, machine: IroningMachine) => {
+      if (cropMode || areaEditMode) return;
+      e.preventDefault();
+      e.stopPropagation();
+      setMachineDragging({
+        id: machine.id,
+        startX: e.clientX,
+        startY: e.clientY,
+        origX: machine.xPosition,
+        origY: machine.yPosition,
+      });
+      setMachineDragPos({ x: machine.xPosition, y: machine.yPosition });
+    },
+    [cropMode, areaEditMode]
+  );
+
+  useEffect(() => {
+    if (!machineDragging) return;
+
+    const handleMove = (e: MouseEvent) => {
+      const inner = innerRef.current;
+      if (!inner) return;
+      const rect = inner.getBoundingClientRect();
+      const deltaXPct = ((e.clientX - machineDragging.startX) / rect.width) * 100;
+      const deltaYPct = ((e.clientY - machineDragging.startY) / rect.height) * 100;
+      const newX = Math.max(0, Math.min(100, machineDragging.origX + deltaXPct));
+      const newY = Math.max(0, Math.min(100, machineDragging.origY + deltaYPct));
+      setMachineDragPos({ x: newX, y: newY });
+    };
+
+    const handleUp = () => {
+      if (machineDragPos && onIroningMachineUpdate) {
+        onIroningMachineUpdate(
+          machineDragging.id,
+          Math.round(machineDragPos.x * 100) / 100,
+          Math.round(machineDragPos.y * 100) / 100
+        );
+      }
+      setMachineDragging(null);
+      setMachineDragPos(null);
+    };
+
+    window.addEventListener("mousemove", handleMove);
+    window.addEventListener("mouseup", handleUp);
+    return () => {
+      window.removeEventListener("mousemove", handleMove);
+      window.removeEventListener("mouseup", handleUp);
+    };
+  }, [machineDragging, machineDragPos, onIroningMachineUpdate]);
+
   // --- Pan handlers ---
   const handlePanMouseDown = useCallback(
     (e: React.MouseEvent) => {
-      if (dragging || venueDragging || cropMode) return;
+      if (dragging || venueDragging || cropMode || areaEditMode) return;
       e.preventDefault();
       setPanning({
         startX: e.clientX,
@@ -285,7 +402,7 @@ export default function MapEditor({ building, rooms, venues = [], cropMode: crop
         origPanY: pan.y,
       });
     },
-    [dragging, venueDragging, pan, cropMode]
+    [dragging, venueDragging, pan, cropMode, areaEditMode]
   );
 
   useEffect(() => {
@@ -451,6 +568,120 @@ export default function MapEditor({ building, rooms, venues = [], cropMode: crop
     onCropClear?.();
   }, [onCropUpdate, setCropMode, onCropClear]);
 
+  const addAreaPoint = useCallback(
+    (clientX: number, clientY: number) => {
+      if (!areaEditMode) return;
+      const { px, py } = clientToPercent(clientX, clientY);
+      setAreaDraft((prev) => [
+        ...prev,
+        { x: Math.round(px * 100) / 100, y: Math.round(py * 100) / 100 },
+      ]);
+    },
+    [areaEditMode, clientToPercent]
+  );
+
+  const handleAreaCanvasMouseDown = useCallback(
+    (e: React.MouseEvent) => {
+      if (!areaEditMode || areaPointDragging) return;
+      e.preventDefault();
+      e.stopPropagation();
+      setAreaCanvasAction({
+        startX: e.clientX,
+        startY: e.clientY,
+        origPanX: pan.x,
+        origPanY: pan.y,
+        moved: false,
+      });
+    },
+    [areaEditMode, areaPointDragging, pan.x, pan.y]
+  );
+
+  const handleAreaPointMouseDown = useCallback(
+    (e: React.MouseEvent, point: VenuePoint, index: number) => {
+      if (!areaEditMode) return;
+      e.preventDefault();
+      e.stopPropagation();
+      setAreaPointDragging({
+        index,
+        startX: e.clientX,
+        startY: e.clientY,
+        origX: point.x,
+        origY: point.y,
+      });
+    },
+    [areaEditMode]
+  );
+
+  useEffect(() => {
+    if (!areaPointDragging) return;
+
+    const handleMove = (e: MouseEvent) => {
+      const inner = innerRef.current;
+      if (!inner) return;
+      const rect = inner.getBoundingClientRect();
+      const deltaXPct = ((e.clientX - areaPointDragging.startX) / rect.width) * 100;
+      const deltaYPct = ((e.clientY - areaPointDragging.startY) / rect.height) * 100;
+      const nextX = Math.max(0, Math.min(100, areaPointDragging.origX + deltaXPct));
+      const nextY = Math.max(0, Math.min(100, areaPointDragging.origY + deltaYPct));
+      setAreaDraft((prev) =>
+        prev.map((point, index) =>
+          index === areaPointDragging.index
+            ? { x: Math.round(nextX * 100) / 100, y: Math.round(nextY * 100) / 100 }
+            : point
+        )
+      );
+    };
+
+    const handleUp = () => setAreaPointDragging(null);
+
+    window.addEventListener("mousemove", handleMove);
+    window.addEventListener("mouseup", handleUp);
+    return () => {
+      window.removeEventListener("mousemove", handleMove);
+      window.removeEventListener("mouseup", handleUp);
+    };
+  }, [areaPointDragging]);
+
+  useEffect(() => {
+    if (!areaCanvasAction) return;
+
+    const handleMove = (e: MouseEvent) => {
+      const dx = e.clientX - areaCanvasAction.startX;
+      const dy = e.clientY - areaCanvasAction.startY;
+      const moved = areaCanvasAction.moved || Math.abs(dx) > 4 || Math.abs(dy) > 4;
+      if (moved) {
+        setPan(clampPan(areaCanvasAction.origPanX + dx, areaCanvasAction.origPanY + dy, zoom));
+        if (!areaCanvasAction.moved) {
+          setAreaCanvasAction((prev) => (prev ? { ...prev, moved: true } : prev));
+        }
+      }
+    };
+
+    const handleUp = () => {
+      if (!areaCanvasAction.moved) {
+        addAreaPoint(areaCanvasAction.startX, areaCanvasAction.startY);
+      }
+      setAreaCanvasAction(null);
+    };
+
+    window.addEventListener("mousemove", handleMove);
+    window.addEventListener("mouseup", handleUp);
+    return () => {
+      window.removeEventListener("mousemove", handleMove);
+      window.removeEventListener("mouseup", handleUp);
+    };
+  }, [addAreaPoint, areaCanvasAction, clampPan, zoom]);
+
+  const saveVenueArea = useCallback(() => {
+    if (!areaEditVenue || areaDraft.length < 3 || !onVenueAreaSave) return;
+    onVenueAreaSave(areaEditVenue.name, areaDraft);
+  }, [areaDraft, areaEditVenue, onVenueAreaSave]);
+
+  const cancelVenueArea = useCallback(() => {
+    setAreaDraft([]);
+    onVenueAreaCancel?.();
+  }, [onVenueAreaCancel]);
+
   if (!building.floorPlanUrl) {
     return (
       <div className="border-2 border-dashed border-white/70 bg-white/30 rounded-2xl p-12 text-center">
@@ -483,6 +714,18 @@ export default function MapEditor({ building, rooms, venues = [], cropMode: crop
     bl: { left: "0%", top: "100%", transform: "translate(-50%, -50%)" },
     br: { left: "100%", top: "100%", transform: "translate(-50%, -50%)" },
   };
+  const polygonPoints = (points: VenuePoint[]) => points.map((point) => `${point.x},${point.y}`).join(" ");
+  const polygonCenter = (points: VenuePoint[]) => {
+    if (points.length === 0) return { x: 50, y: 50 };
+    return {
+      x: points.reduce((sum, point) => sum + point.x, 0) / points.length,
+      y: points.reduce((sum, point) => sum + point.y, 0) / points.length,
+    };
+  };
+  const areaHandleScale = Math.max(0.32, 1 / Math.pow(zoom, 1.35));
+  const areaLabelScale = Math.max(0.42, 1 / Math.pow(zoom, 1.08));
+  const areaStrokeWidth = Math.max(0.05, 0.18 / Math.pow(zoom, 1.1));
+  const areaDraftStrokeWidth = Math.max(0.05, 0.2 / Math.pow(zoom, 1.1));
 
   return (
     <div className="relative">
@@ -504,12 +747,52 @@ export default function MapEditor({ building, rooms, venues = [], cropMode: crop
         </div>
       )}
 
+      {areaEditVenue && (
+        <div className="mb-2 flex flex-wrap items-center gap-2 rounded-2xl border border-white/70 bg-white/72 px-3 py-2 text-xs shadow-sm backdrop-blur-xl">
+          <span className="font-extrabold text-slate-700">框选：{areaEditVenue.name}</span>
+          <span className="font-semibold text-slate-500">点击地图添加边界点，至少 3 个点</span>
+          <span className="rounded-full bg-slate-100 px-2 py-0.5 font-bold text-slate-500">{areaDraft.length} 点</span>
+          <button
+            type="button"
+            onClick={saveVenueArea}
+            disabled={areaDraft.length < 3}
+            className="rounded-xl bg-blue-500 px-3 py-1.5 font-bold text-white transition-colors hover:bg-blue-600 disabled:cursor-not-allowed disabled:bg-slate-300"
+          >
+            保存范围
+          </button>
+          <button
+            type="button"
+            onClick={() => setAreaDraft((prev) => prev.slice(0, -1))}
+            disabled={areaDraft.length === 0}
+            className="rounded-xl bg-slate-100 px-3 py-1.5 font-bold text-slate-600 transition-colors hover:bg-slate-200 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            撤销一点
+          </button>
+          <button
+            type="button"
+            onClick={() => setAreaDraft([])}
+            disabled={areaDraft.length === 0}
+            className="rounded-xl bg-slate-100 px-3 py-1.5 font-bold text-slate-600 transition-colors hover:bg-slate-200 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            清空
+          </button>
+          <button
+            type="button"
+            onClick={cancelVenueArea}
+            className="rounded-xl bg-red-50 px-3 py-1.5 font-bold text-red-600 transition-colors hover:bg-red-100"
+          >
+            取消
+          </button>
+        </div>
+      )}
+
       <div
         ref={containerRef}
         className="relative rounded-2xl overflow-hidden border border-white/70 select-none shadow-[inset_0_1px_0_rgba(255,255,255,0.6)]"
         style={{
           cursor: cropMode
             ? cropDrawing ? "crosshair" : "crosshair"
+            : areaEditMode ? "crosshair"
             : panning ? "grabbing" : dragging ? "default" : "grab",
         }}
         onMouseDown={cropMode ? undefined : handlePanMouseDown}
@@ -530,6 +813,92 @@ export default function MapEditor({ building, rooms, venues = [], cropMode: crop
             className="block w-full h-auto"
             draggable={false}
           />
+
+          {/* Public area polygons */}
+          <div className="pointer-events-none absolute inset-0" style={{ zIndex: 6 }}>
+            <svg className="absolute inset-0 h-full w-full" viewBox="0 0 100 100" preserveAspectRatio="none">
+              {venues.map((venue) => {
+                const points = areaEditVenue?.name === venue.name ? areaDraft : venue.polygon;
+                if (!Array.isArray(points) || points.length < 3) return null;
+                const color = venue.color || "#3b82f6";
+                return (
+                  <polygon
+                    key={venue.name}
+                    points={polygonPoints(points)}
+                    fill={color}
+                    fillOpacity={areaEditVenue?.name === venue.name ? 0.26 : 0.22}
+                    stroke={color}
+                    strokeOpacity={areaEditVenue?.name === venue.name ? 0.36 : 0.32}
+                    strokeWidth={areaEditVenue?.name === venue.name ? areaStrokeWidth : 0.18}
+                    strokeLinejoin="round"
+                  />
+                );
+              })}
+            </svg>
+            {venues.map((venue) => {
+              const points = areaEditVenue?.name === venue.name ? areaDraft : venue.polygon;
+              if (!Array.isArray(points) || points.length < 3) return null;
+              const center = polygonCenter(points);
+              const color = venue.color || "#3b82f6";
+              return (
+                <div
+                  key={`${venue.name}-label`}
+                  className="absolute -translate-x-1/2 -translate-y-1/2 rounded-full border border-white/80 px-2 py-0.5 text-[10px] font-extrabold text-white shadow-sm"
+                  style={{
+                    left: `${center.x}%`,
+                    top: `${center.y}%`,
+                    transform: `translate(-50%, -50%) scale(${areaLabelScale})`,
+                    backgroundColor: `${color}cc`,
+                    textShadow: "0 1px 2px rgba(0,0,0,0.32)",
+                  }}
+                >
+                  {venue.name}
+                </div>
+              );
+            })}
+          </div>
+
+          {areaEditVenue && areaDraft.length > 0 && (
+            <div className="pointer-events-none absolute inset-0" style={{ zIndex: 26 }}>
+              <svg className="absolute inset-0 h-full w-full" viewBox="0 0 100 100" preserveAspectRatio="none">
+                {areaDraft.length >= 2 && (
+                  <polyline
+                    points={polygonPoints(areaDraft)}
+                    fill="none"
+                    stroke={areaEditVenue.color || "#3b82f6"}
+                    strokeDasharray="0.9 1.05"
+                    strokeOpacity={0.55}
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth={areaDraftStrokeWidth}
+                  />
+                )}
+              </svg>
+              {areaDraft.map((point, index) => (
+                <div
+                  key={`${point.x}-${point.y}-${index}`}
+                  className="pointer-events-auto absolute flex h-3.5 w-3.5 cursor-grab items-center justify-center rounded-full border border-white/80 text-[7px] font-black text-white/90 shadow-sm active:cursor-grabbing"
+                  style={{
+                    left: `${point.x}%`,
+                    top: `${point.y}%`,
+                    transform: `translate(-50%, -50%) scale(${areaHandleScale})`,
+                    backgroundColor: areaEditVenue.color || "#3b82f6",
+                  }}
+                  onMouseDown={(e) => handleAreaPointMouseDown(e, point, index)}
+                >
+                  {index + 1}
+                </div>
+              ))}
+            </div>
+          )}
+
+          {areaEditMode && (
+            <div
+              className="absolute inset-0"
+              style={{ zIndex: 25, cursor: areaCanvasAction?.moved ? "grabbing" : "crosshair" }}
+              onMouseDown={handleAreaCanvasMouseDown}
+            />
+          )}
 
           {/* Crop overlay & rectangle */}
           {cropMode && cropRect && cropRect.w > 0 && cropRect.h > 0 && (
@@ -634,7 +1003,7 @@ export default function MapEditor({ building, rooms, venues = [], cropMode: crop
                   top: `${y}%`,
                   transform: "translate(-50%, -50%)",
                   zIndex: isDragging ? 50 : isHovered ? 40 : 10,
-                  cursor: cropMode ? "default" : isDragging ? "grabbing" : "grab",
+                  cursor: cropMode || areaEditMode ? "default" : isDragging ? "grabbing" : "grab",
                 }}
                 onMouseDown={(e) => handleRoomMouseDown(e, room)}
                 onMouseEnter={() => setHoveredRoom(room.id)}
@@ -683,7 +1052,7 @@ export default function MapEditor({ building, rooms, venues = [], cropMode: crop
                   top: `${vy}%`,
                   transform: "translate(-50%, -50%)",
                   zIndex: isDraggingVenue ? 50 : isVenueHovered ? 40 : 10,
-                  cursor: cropMode ? "default" : isDraggingVenue ? "grabbing" : "grab",
+                  cursor: cropMode || areaEditMode ? "default" : isDraggingVenue ? "grabbing" : "grab",
                 }}
                 onMouseDown={(e) => handleVenueMouseDown(e, venue)}
                 onMouseEnter={() => setHoveredVenue(venue.name)}
@@ -713,6 +1082,59 @@ export default function MapEditor({ building, rooms, venues = [], cropMode: crop
                   }}
                 >
                   {venue.name}
+                </span>
+              </div>
+            );
+          })}
+
+          {/* Ironing machine markers */}
+          {ironingMachines.map((machine) => {
+            const isDraggingMachine = machineDragging?.id === machine.id;
+            const mx = isDraggingMachine && machineDragPos ? machineDragPos.x : machine.xPosition;
+            const my = isDraggingMachine && machineDragPos ? machineDragPos.y : machine.yPosition;
+            const isMachineHovered = hoveredMachine === machine.id;
+            const isMaintenance = machine.status === "maintenance";
+
+            return (
+              <div
+                key={machine.id}
+                className="absolute flex flex-col items-center"
+                style={{
+                  left: `${mx}%`,
+                  top: `${my}%`,
+                  transform: "translate(-50%, -50%)",
+                  zIndex: isDraggingMachine ? 54 : isMachineHovered ? 44 : 14,
+                  cursor: cropMode || areaEditMode ? "default" : isDraggingMachine ? "grabbing" : "grab",
+                  opacity: isMaintenance ? 0.58 : 1,
+                  filter: isMaintenance ? "grayscale(1)" : "none",
+                }}
+                onMouseDown={(e) => handleMachineMouseDown(e, machine)}
+                onMouseEnter={() => setHoveredMachine(machine.id)}
+                onMouseLeave={() => setHoveredMachine(null)}
+              >
+                <div
+                  className="grid place-items-center rounded-lg border-2 bg-white/92 shadow-sm transition-all duration-150"
+                  style={{
+                    width: isDraggingMachine ? 34 : isMachineHovered ? 32 : 30,
+                    height: isDraggingMachine ? 34 : isMachineHovered ? 32 : 30,
+                    borderColor: isMaintenance ? "#94a3b8" : "#f05b51",
+                    boxShadow: isDraggingMachine
+                      ? "0 0 0 4px rgba(240,91,81,0.22), 0 2px 8px rgba(0,0,0,0.18)"
+                      : isMachineHovered
+                      ? "0 0 0 3px rgba(240,91,81,0.16), 0 2px 6px rgba(0,0,0,0.14)"
+                      : "0 1px 3px rgba(0,0,0,0.18)",
+                  }}
+                >
+                  <IroningMachineIcon muted={isMaintenance} />
+                </div>
+                <span
+                  className="mt-1 whitespace-nowrap rounded px-1.5 py-0.5 text-[10px] font-bold text-white"
+                  style={{
+                    backgroundColor: isMaintenance ? "rgba(100,116,139,0.76)" : "rgba(240,91,81,0.82)",
+                    lineHeight: 1.2,
+                  }}
+                >
+                  {machine.name}{isMaintenance ? " · 维修" : ""}
                 </span>
               </div>
             );

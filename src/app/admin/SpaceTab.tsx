@@ -2,7 +2,7 @@
 
 import { useState, useRef, useEffect } from "react";
 import MapEditor from "./components/MapEditor";
-import type { Venue } from "./components/MapEditor";
+import type { IroningMachine, Venue, VenuePoint } from "./components/MapEditor";
 import { WORKBENCH_PAGE_BACKGROUND_CONFIG_KEY } from "@/lib/workbenchBackground";
 
 type Building = {
@@ -15,6 +15,7 @@ type Building = {
   cropH?: number | null;
   extraVenues: string | null;
   rooms: Room[];
+  ironingMachines: IroningMachine[];
 };
 
 type Room = {
@@ -43,9 +44,12 @@ export default function SpaceTab({ buildings: buildingsProp, config, onRefresh }
   const [pageBackgroundUrl, setPageBackgroundUrl] = useState(config[WORKBENCH_PAGE_BACKGROUND_CONFIG_KEY]?.value ?? "");
   const [newVenue, setNewVenue] = useState("");
   const [newVenueType, setNewVenueType] = useState<"实景棚" | "无影棚">("实景棚");
+  const [newMachineCount, setNewMachineCount] = useState("1");
   const [cropMode, setCropMode] = useState(false);
+  const [areaEditVenueName, setAreaEditVenueName] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const backgroundInputRef = useRef<HTMLInputElement>(null);
+  const venuePalette = ["#3b82f6", "#14b8a6", "#f97316", "#a855f7", "#22c55e", "#ec4899", "#06b6d4", "#f59e0b"];
 
   // Sync from parent when prop changes (e.g. initial load or tab switch)
   useEffect(() => {
@@ -63,12 +67,26 @@ export default function SpaceTab({ buildings: buildingsProp, config, onRefresh }
     }
   }, [localBuildings, selectedBuildingId]);
 
+  useEffect(() => {
+    setAreaEditVenueName(null);
+  }, [selectedBuildingId]);
+
   const selectedBuilding = localBuildings.find((b) => b.id === selectedBuildingId) || null;
 
   // Helper to update a single building's rooms locally
   function updateBuildingRooms(buildingId: number, updater: (rooms: Room[]) => Room[]) {
     setLocalBuildings((prev) =>
       prev.map((b) => (b.id === buildingId ? { ...b, rooms: updater(b.rooms) } : b))
+    );
+  }
+
+  function updateBuildingMachines(buildingId: number, updater: (machines: IroningMachine[]) => IroningMachine[]) {
+    setLocalBuildings((prev) =>
+      prev.map((b) =>
+        b.id === buildingId
+          ? { ...b, ironingMachines: updater(b.ironingMachines ?? []) }
+          : b
+      )
     );
   }
 
@@ -122,6 +140,45 @@ export default function SpaceTab({ buildings: buildingsProp, config, onRefresh }
     });
   }
 
+  async function createIroningMachines(buildingId: number, count: number) {
+    const safeCount = Math.min(20, Math.max(1, Math.round(count) || 1));
+    const res = await fetch(`/api/buildings/${buildingId}/ironing-machines`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ count: safeCount }),
+    });
+    if (res.ok) {
+      const data = await res.json();
+      const machines = Array.isArray(data) ? data : [data];
+      updateBuildingMachines(buildingId, (prev) => [...prev, ...machines]);
+    }
+  }
+
+  async function updateIroningMachine(
+    buildingId: number,
+    machineId: number,
+    patch: Partial<Pick<IroningMachine, "name" | "status" | "xPosition" | "yPosition" | "sortRank">>
+  ) {
+    updateBuildingMachines(buildingId, (machines) =>
+      machines.map((machine) => (machine.id === machineId ? { ...machine, ...patch } : machine))
+    );
+    await fetch(`/api/buildings/${buildingId}/ironing-machines`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ machineId, ...patch }),
+    });
+  }
+
+  async function deleteIroningMachine(buildingId: number, machineId: number) {
+    if (!confirm("确定删除这台熨烫机？")) return;
+    const res = await fetch(`/api/buildings/${buildingId}/ironing-machines?machineId=${machineId}`, {
+      method: "DELETE",
+    });
+    if (res.ok) {
+      updateBuildingMachines(buildingId, (machines) => machines.filter((machine) => machine.id !== machineId));
+    }
+  }
+
   async function updateBuildingCrop(buildingId: number, crop: { cropX: number; cropY: number; cropW: number; cropH: number } | null) {
     const data = crop || { cropX: null, cropY: null, cropW: null, cropH: null };
     // Optimistic local update
@@ -141,10 +198,40 @@ export default function SpaceTab({ buildings: buildingsProp, config, onRefresh }
       const parsed = JSON.parse(building.extraVenues);
       // Backward compat: old format was string[], new format is {name,x,y}[]
       if (Array.isArray(parsed) && parsed.length > 0 && typeof parsed[0] === "string") {
-        return (parsed as string[]).map((name) => ({ name, x: 50, y: 50 }));
+        return (parsed as string[]).map((name, index) => ({ name, x: 50, y: 50, color: venuePalette[index % venuePalette.length] }));
       }
-      return parsed as Venue[];
+      if (!Array.isArray(parsed)) return [];
+      return parsed
+        .map((item, index): Venue | null => {
+          if (!item || typeof item !== "object" || !("name" in item)) return null;
+          const raw = item as Partial<Venue>;
+          const name = String(raw.name ?? "");
+          if (!name) return null;
+          return {
+            name,
+            x: Number.isFinite(Number(raw.x)) ? Number(raw.x) : 50,
+            y: Number.isFinite(Number(raw.y)) ? Number(raw.y) : 50,
+            type: raw.type,
+            color: raw.color || venuePalette[index % venuePalette.length],
+            polygon: Array.isArray(raw.polygon)
+              ? raw.polygon
+                  .map((point) => ({ x: Number(point.x), y: Number(point.y) }))
+                  .filter((point) => Number.isFinite(point.x) && Number.isFinite(point.y))
+              : undefined,
+          };
+        })
+        .filter((venue): venue is Venue => venue !== null);
     } catch { return []; }
+  }
+
+  function makeVenue(name: string, type: "实景棚" | "无影棚", existingCount: number): Venue {
+    return {
+      name,
+      x: 50,
+      y: 50,
+      type,
+      color: venuePalette[existingCount % venuePalette.length],
+    };
   }
 
   async function updateExtraVenues(buildingId: number, venues: Venue[]) {
@@ -157,6 +244,28 @@ export default function SpaceTab({ buildings: buildingsProp, config, onRefresh }
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ extraVenues }),
     });
+  }
+
+  function saveVenueArea(building: Building, venueName: string, polygon: VenuePoint[]) {
+    const venues = getExtraVenues(building);
+    void updateExtraVenues(
+      building.id,
+      venues.map((venue) => (venue.name === venueName ? { ...venue, polygon } : venue))
+    );
+    setAreaEditVenueName(null);
+  }
+
+  function clearVenueArea(building: Building, venueName: string) {
+    const venues = getExtraVenues(building);
+    void updateExtraVenues(
+      building.id,
+      venues.map((venue) => {
+        if (venue.name !== venueName) return venue;
+        const { polygon: _polygon, ...rest } = venue;
+        return rest;
+      })
+    );
+    if (areaEditVenueName === venueName) setAreaEditVenueName(null);
   }
 
   async function uploadFloorPlan(buildingId: number, file: File) {
@@ -243,6 +352,58 @@ export default function SpaceTab({ buildings: buildingsProp, config, onRefresh }
     if (file) uploadFloorPlan(selectedBuilding.id, file);
   }
 
+  const buildingListPanel = (
+    <div className="card p-4">
+      <div className="mb-3 flex items-center justify-between gap-3">
+        <h3 className="text-xs font-semibold text-[--text-primary]">
+          楼座列表 ({localBuildings.length})
+        </h3>
+        <button
+          onClick={() => setShowBuildingModal(true)}
+          className="rounded-xl bg-gradient-to-r from-purple-500 to-purple-600 px-3 py-1.5 text-xs font-semibold text-white shadow-sm shadow-purple-200 transition-all hover:shadow-purple-300 active:scale-[0.98]"
+        >
+          + 添加楼座
+        </button>
+      </div>
+
+      <div className="max-h-[420px] space-y-1.5 overflow-y-auto pr-1 task-scroll">
+        {localBuildings.map((b) => (
+          <div
+            key={b.id}
+            onClick={() => setSelectedBuildingId(b.id)}
+            className={`rounded-2xl border p-3 cursor-pointer transition-all ${
+              selectedBuildingId === b.id
+                ? "border-indigo-200 bg-white/82 ring-2 ring-indigo-300/80 shadow-md"
+                : "border-white/60 bg-white/56 hover:bg-white/76 hover:shadow-md"
+            }`}
+          >
+            <div className="flex items-center justify-between gap-3">
+              <div className="flex min-w-0 items-center gap-2">
+                <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-blue-50">
+                  <span className="text-xs font-bold text-blue-600">{b.name[0]}</span>
+                </div>
+                <div className="min-w-0">
+                  <p className="truncate text-xs font-semibold text-[--text-primary]">{b.name}</p>
+                  <p className="text-[10px] text-[--text-muted]">{b.rooms.length} 个房间</p>
+                </div>
+              </div>
+              <button
+                onClick={(e) => { e.stopPropagation(); deleteBuilding(b.id); }}
+                className="rounded-lg bg-red-50 px-2 py-1 text-[10px] font-medium text-red-600 transition-colors hover:bg-red-100"
+              >
+                删除
+              </button>
+            </div>
+          </div>
+        ))}
+
+        {localBuildings.length === 0 && (
+          <div className="py-12 text-center text-sm text-[--text-muted]">暂无楼座</div>
+        )}
+      </div>
+    </div>
+  );
+
   return (
     <div className="space-y-3">
       <div className="card overflow-hidden p-4">
@@ -304,60 +465,7 @@ export default function SpaceTab({ buildings: buildingsProp, config, onRefresh }
         </div>
       </div>
 
-    <div className="flex gap-3">
-      {/* Left Panel: Building List */}
-      <div className="w-60 shrink-0 flex flex-col gap-2">
-        <div className="flex items-center justify-between">
-          <h3 className="text-xs font-semibold text-[--text-primary]">
-            楼座列表 ({localBuildings.length})
-          </h3>
-          <button
-            onClick={() => setShowBuildingModal(true)}
-            className="px-3 py-1.5 rounded-xl bg-gradient-to-r from-purple-500 to-purple-600 text-white text-xs font-semibold shadow-sm shadow-purple-200 hover:shadow-purple-300 transition-all active:scale-[0.98]"
-          >
-            + 添加楼座
-          </button>
-        </div>
-
-        <div className="flex-1 overflow-y-auto space-y-1.5 task-scroll">
-          {localBuildings.map((b) => (
-            <div
-              key={b.id}
-              onClick={() => setSelectedBuildingId(b.id)}
-              className={`card p-3 cursor-pointer transition-all ${
-                selectedBuildingId === b.id
-                  ? "ring-2 ring-indigo-300/80 shadow-md"
-                  : "hover:shadow-md"
-              }`}
-            >
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <div className="w-8 h-8 rounded-lg bg-blue-50 flex items-center justify-center">
-                    <span className="text-blue-600 text-xs font-bold">{b.name[0]}</span>
-                  </div>
-                  <div>
-                    <p className="text-xs font-semibold text-[--text-primary]">{b.name}</p>
-                    <p className="text-[10px] text-[--text-muted]">{b.rooms.length} 个房间</p>
-                  </div>
-                </div>
-                <button
-                  onClick={(e) => { e.stopPropagation(); deleteBuilding(b.id); }}
-                  className="text-[10px] px-2 py-1 rounded-lg bg-red-50 text-red-600 font-medium hover:bg-red-100 transition-colors"
-                >
-                  删除
-                </button>
-              </div>
-            </div>
-          ))}
-
-          {localBuildings.length === 0 && (
-            <div className="text-center py-12 text-[--text-muted] text-sm">暂无楼座</div>
-          )}
-        </div>
-      </div>
-
-      {/* Right Panel: Building Detail */}
-      <div className="flex-1 overflow-hidden">
+      <div className="overflow-hidden">
         {!selectedBuilding ? (
           <div className="flex items-center justify-center h-full text-[--text-muted] text-sm">
             请从左侧选择一栋楼座
@@ -407,13 +515,14 @@ export default function SpaceTab({ buildings: buildingsProp, config, onRefresh }
 
             {/* Map + Right Sidebar */}
             {selectedBuilding.floorPlanUrl && (
-              <div className="flex gap-3 items-start">
+              <div className="grid items-stretch gap-3 xl:grid-cols-[minmax(0,1fr)_280px] lg:grid-cols-[minmax(0,1fr)_260px]">
                 {/* Map Editor — takes remaining space */}
-                <div className="flex-1 min-w-0">
+                <div className="min-w-0">
                   <MapEditor
                     building={selectedBuilding}
                     rooms={selectedBuilding.rooms}
                     venues={getExtraVenues(selectedBuilding)}
+                    ironingMachines={selectedBuilding.ironingMachines ?? []}
                     cropMode={cropMode}
                     onRoomUpdate={(roomId, x, y, fenceRadius) =>
                       updateRoomCoords(selectedBuilding.id, roomId, x, y, fenceRadius)
@@ -424,13 +533,19 @@ export default function SpaceTab({ buildings: buildingsProp, config, onRefresh }
                       );
                       updateExtraVenues(selectedBuilding.id, venues);
                     }}
+                    onIroningMachineUpdate={(machineId, x, y) =>
+                      updateIroningMachine(selectedBuilding.id, machineId, { xPosition: x, yPosition: y })
+                    }
+                    areaEditVenueName={areaEditVenueName}
+                    onVenueAreaSave={(venueName, polygon) => saveVenueArea(selectedBuilding, venueName, polygon)}
+                    onVenueAreaCancel={() => setAreaEditVenueName(null)}
                     onCropUpdate={(crop) => updateBuildingCrop(selectedBuilding.id, crop)}
                     onCropModeChange={setCropMode}
                   />
                 </div>
 
                 {/* Right Sidebar — all actions */}
-                <div className="w-48 shrink-0 space-y-2">
+                <div className="flex min-h-full flex-col gap-2">
                   {/* 1. 框选主体范围 */}
                   <div className="card p-3">
                     <button
@@ -447,6 +562,11 @@ export default function SpaceTab({ buildings: buildingsProp, config, onRefresh }
                       </svg>
                       {cropMode ? "正在框选…" : "框选主体范围"}
                     </button>
+                    {areaEditVenueName && (
+                      <p className="mt-2 text-[10px] font-semibold leading-relaxed text-blue-600">
+                        正在编辑公共区域范围
+                      </p>
+                    )}
                   </div>
 
                   {/* 2. 更换平面图 */}
@@ -478,8 +598,89 @@ export default function SpaceTab({ buildings: buildingsProp, config, onRefresh }
                     </button>
                   </div>
 
-                  {/* 4. 添加额外场地 */}
+                  {/* 4. 熨烫机管理 */}
                   <div className="card p-3">
+                    <div className="mb-2 flex items-center justify-between gap-2">
+                      <h3 className="text-xs font-semibold text-[--text-primary]">
+                        熨烫机管理 ({(selectedBuilding.ironingMachines ?? []).length})
+                      </h3>
+                      <span className="rounded-full bg-red-50 px-2 py-0.5 text-[9px] font-bold text-red-500">
+                        可拖拽定位
+                      </span>
+                    </div>
+                    <div className="mb-2 flex gap-1.5">
+                      <input
+                        type="number"
+                        min={1}
+                        max={20}
+                        value={newMachineCount}
+                        onChange={(e) => setNewMachineCount(e.target.value)}
+                        className="min-w-0 flex-1 rounded-lg border border-gray-200 bg-[--bg-base] px-2 py-1.5 text-[11px] outline-none transition-colors focus:border-red-400"
+                        placeholder="新增台数"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => {
+                          createIroningMachines(selectedBuilding.id, Number(newMachineCount));
+                          setNewMachineCount("1");
+                        }}
+                        className="shrink-0 rounded-lg bg-red-500 px-2.5 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-red-600"
+                      >
+                        添加
+                      </button>
+                    </div>
+                    {(selectedBuilding.ironingMachines ?? []).length > 0 ? (
+                      <div className="max-h-36 space-y-1 overflow-y-auto pr-1 task-scroll">
+                        {(selectedBuilding.ironingMachines ?? []).map((machine) => (
+                          <div
+                            key={machine.id}
+                            className="admin-table-row flex items-center gap-1.5 rounded-lg px-2 py-1.5"
+                          >
+                            <div className="grid h-6 w-6 shrink-0 place-items-center rounded-md border border-red-200 bg-white/80">
+                              <svg width="16" height="16" viewBox="0 0 96 96" fill="none" aria-hidden="true">
+                                <path d="M21 52c0-12 8-22 20-22h20c8 0 14 6 14 14v8" stroke={machine.status === "maintenance" ? "#94a3b8" : "#f05b51"} strokeWidth="8" strokeLinecap="round" strokeLinejoin="round" />
+                                <path d="M19 55h58c4 0 7 3 7 7v4c0 5-4 9-9 9H24c-6 0-10-4-10-10v-3c0-4 2-7 5-7Z" stroke={machine.status === "maintenance" ? "#94a3b8" : "#f05b51"} strokeWidth="8" strokeLinejoin="round" />
+                                <path d="M36 30V20h24c7 0 12 5 12 12" stroke={machine.status === "maintenance" ? "#94a3b8" : "#f05b51"} strokeWidth="8" strokeLinecap="round" strokeLinejoin="round" />
+                              </svg>
+                            </div>
+                            <div className="min-w-0 flex-1">
+                              <p className="truncate text-[11px] font-bold text-slate-700">{machine.name}</p>
+                              <p className="text-[9px] font-semibold text-gray-400">
+                                X {machine.xPosition.toFixed(1)}% · Y {machine.yPosition.toFixed(1)}%
+                              </p>
+                            </div>
+                            <select
+                              value={machine.status}
+                              onChange={(e) =>
+                                updateIroningMachine(selectedBuilding.id, machine.id, {
+                                  status: e.target.value as IroningMachine["status"],
+                                })
+                              }
+                              className="rounded-lg border border-gray-200 bg-white/70 px-1.5 py-1 text-[10px] font-bold text-slate-600 outline-none"
+                            >
+                              <option value="normal">正常运行</option>
+                              <option value="maintenance">维修不可用</option>
+                            </select>
+                            <button
+                              type="button"
+                              onClick={() => deleteIroningMachine(selectedBuilding.id, machine.id)}
+                              className="shrink-0 text-sm leading-none text-red-300 transition-colors hover:text-red-500"
+                              aria-label={`删除${machine.name}`}
+                            >
+                              ×
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="rounded-lg bg-gray-50/80 px-2 py-2 text-center text-[10px] font-semibold text-[--text-muted]">
+                        暂无熨烫机
+                      </p>
+                    )}
+                  </div>
+
+                  {/* 5. 添加额外场地 */}
+                  <div className="card flex min-h-0 flex-1 flex-col p-3">
                     <div className="flex gap-1.5 mb-2">
                       <input
                         value={newVenue}
@@ -488,7 +689,7 @@ export default function SpaceTab({ buildings: buildingsProp, config, onRefresh }
                           if (e.key === "Enter" && newVenue.trim()) {
                             const venues = getExtraVenues(selectedBuilding);
                             if (!venues.some((v) => v.name === newVenue.trim())) {
-                              updateExtraVenues(selectedBuilding.id, [...venues, { name: newVenue.trim(), x: 50, y: 50, type: newVenueType }]);
+                              updateExtraVenues(selectedBuilding.id, [...venues, makeVenue(newVenue.trim(), newVenueType, venues.length)]);
                             }
                             setNewVenue("");
                           }
@@ -509,7 +710,7 @@ export default function SpaceTab({ buildings: buildingsProp, config, onRefresh }
                           if (!newVenue.trim()) return;
                           const venues = getExtraVenues(selectedBuilding);
                           if (!venues.some((v) => v.name === newVenue.trim())) {
-                            updateExtraVenues(selectedBuilding.id, [...venues, { name: newVenue.trim(), x: 50, y: 50, type: newVenueType }]);
+                            updateExtraVenues(selectedBuilding.id, [...venues, makeVenue(newVenue.trim(), newVenueType, venues.length)]);
                           }
                           setNewVenue("");
                         }}
@@ -519,26 +720,58 @@ export default function SpaceTab({ buildings: buildingsProp, config, onRefresh }
                       </button>
                     </div>
                     {getExtraVenues(selectedBuilding).length > 0 && (
-                      <div className="space-y-1 max-h-32 overflow-y-auto task-scroll">
+                      <div className="min-h-0 flex-1 space-y-1 overflow-y-auto pr-1 task-scroll">
                         {getExtraVenues(selectedBuilding).map((venue) => (
                           <div
                             key={venue.name}
-                            className={`admin-table-row flex items-center justify-between px-2 py-1 rounded-lg group ${venue.type === "无影棚" ? "bg-gray-50" : "bg-blue-50"}`}
+                            className={`admin-table-row flex flex-col gap-1 px-2 py-1.5 rounded-lg group ${areaEditVenueName === venue.name ? "ring-2 ring-blue-300" : ""}`}
                           >
-                            <div className="flex items-center gap-1.5 min-w-0">
-                              <div className={`w-2 h-2 rounded-sm shrink-0 ${venue.type === "无影棚" ? "bg-gray-400" : "bg-blue-500"}`} style={{ transform: "rotate(45deg)" }} />
-                              <span className={`text-[11px] font-medium truncate ${venue.type === "无影棚" ? "text-gray-600" : "text-blue-700"}`}>{venue.name}</span>
-                              <span className="text-[9px] text-gray-400">{venue.type || "实景棚"}</span>
+                            <div className="flex items-center justify-between gap-1.5">
+                              <div className="flex min-w-0 items-center gap-1.5">
+                                <div className="h-2 w-2 shrink-0 rounded-sm" style={{ backgroundColor: venue.color || "#3b82f6", transform: "rotate(45deg)" }} />
+                                <span className="truncate text-[11px] font-bold text-slate-700">{venue.name}</span>
+                                <span className="shrink-0 text-[9px] font-semibold text-gray-400">{venue.type || "实景棚"}</span>
+                              </div>
+                              <button
+                                onClick={() => {
+                                  const venues = getExtraVenues(selectedBuilding).filter((v) => v.name !== venue.name);
+                                  updateExtraVenues(selectedBuilding.id, venues);
+                                }}
+                                className="shrink-0 text-sm leading-none text-blue-300 opacity-0 transition-colors hover:text-red-500 group-hover:opacity-100"
+                              >
+                                ×
+                              </button>
                             </div>
-                            <button
-                              onClick={() => {
-                                const venues = getExtraVenues(selectedBuilding).filter((v) => v.name !== venue.name);
-                                updateExtraVenues(selectedBuilding.id, venues);
-                              }}
-                              className="text-blue-300 hover:text-red-500 transition-colors text-sm leading-none ml-1 shrink-0 opacity-0 group-hover:opacity-100"
-                            >
-                              ×
-                            </button>
+                            <div className="flex items-center gap-1">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setCropMode(false);
+                                  setAreaEditVenueName((prev) => (prev === venue.name ? null : venue.name));
+                                }}
+                                className={`rounded-lg px-2 py-1 text-[10px] font-bold transition-colors ${
+                                  areaEditVenueName === venue.name
+                                    ? "bg-blue-500 text-white"
+                                    : "bg-blue-50 text-blue-600 hover:bg-blue-100"
+                                }`}
+                              >
+                                {venue.polygon && venue.polygon.length >= 3 ? "重画范围" : "框选范围"}
+                              </button>
+                              {venue.polygon && venue.polygon.length >= 3 && (
+                                <button
+                                  type="button"
+                                  onClick={() => clearVenueArea(selectedBuilding, venue.name)}
+                                  className="rounded-lg bg-red-50 px-2 py-1 text-[10px] font-bold text-red-500 transition-colors hover:bg-red-100"
+                                >
+                                  清除
+                                </button>
+                              )}
+                              {venue.polygon && venue.polygon.length >= 3 && (
+                                <span className="ml-auto shrink-0 rounded-full bg-green-50 px-1.5 py-0.5 text-[9px] font-bold text-green-600">
+                                  {venue.polygon.length}点
+                                </span>
+                              )}
+                            </div>
                           </div>
                         ))}
                       </div>
@@ -548,46 +781,54 @@ export default function SpaceTab({ buildings: buildingsProp, config, onRefresh }
               </div>
             )}
 
-            {/* Room List — below the map */}
-            {selectedBuilding.rooms.length > 0 && (
+            <div className="grid grid-cols-[320px_minmax(0,1fr)] items-start gap-3">
+              {buildingListPanel}
+
+              {/* Room List — below the map */}
               <div className="card p-4">
-                <h3 className="text-xs font-semibold text-[--text-primary] mb-2">
+                <h3 className="mb-2 text-xs font-semibold text-[--text-primary]">
                   房间列表 ({selectedBuilding.rooms.length})
                 </h3>
-                <div className="space-y-1">
-                  <div className="admin-table-head grid grid-cols-6 gap-2 px-2 py-1.5 rounded-xl text-[10px] text-[--text-muted] font-medium uppercase tracking-wider">
-                    <span>房间号</span>
-                    <span>楼层</span>
-                    <span>围栏半径</span>
-                    <span>X 坐标</span>
-                    <span>Y 坐标</span>
-                    <span>操作</span>
-                  </div>
-                  {selectedBuilding.rooms.map((room) => (
-                    <div
-                      key={room.id}
-                      className="admin-table-row grid grid-cols-6 gap-2 px-2 py-2 rounded-xl bg-[--bg-base] hover:bg-gray-100 transition-colors items-center"
-                    >
-                      <span className="text-xs font-medium text-[--text-primary]">{room.roomNumber}</span>
-                      <span className="text-xs text-[--text-secondary]">{room.floor}F</span>
-                      <span className="text-xs text-[--text-secondary]">{room.fenceRadius}m</span>
-                      <span className="text-xs text-[--text-muted] font-mono">
-                        {room.xPosition ? `${room.xPosition.toFixed(1)}%` : "—"}
-                      </span>
-                      <span className="text-xs text-[--text-muted] font-mono">
-                        {room.yPosition ? `${room.yPosition.toFixed(1)}%` : "—"}
-                      </span>
-                      <button
-                        onClick={() => deleteRoom(selectedBuilding.id, room.id)}
-                        className="text-[10px] px-2 py-1 rounded-lg bg-red-50 text-red-600 font-medium hover:bg-red-100 transition-colors w-fit"
-                      >
-                        删除
-                      </button>
+                {selectedBuilding.rooms.length > 0 ? (
+                  <div className="space-y-1">
+                    <div className="admin-table-head grid grid-cols-6 gap-2 px-2 py-1.5 rounded-xl text-[10px] text-[--text-muted] font-medium uppercase tracking-wider">
+                      <span>房间号</span>
+                      <span>楼层</span>
+                      <span>围栏半径</span>
+                      <span>X 坐标</span>
+                      <span>Y 坐标</span>
+                      <span>操作</span>
                     </div>
-                  ))}
-                </div>
+                    {selectedBuilding.rooms.map((room) => (
+                      <div
+                        key={room.id}
+                        className="admin-table-row grid grid-cols-6 gap-2 px-2 py-2 rounded-xl bg-[--bg-base] hover:bg-gray-100 transition-colors items-center"
+                      >
+                        <span className="text-xs font-medium text-[--text-primary]">{room.roomNumber}</span>
+                        <span className="text-xs text-[--text-secondary]">{room.floor}F</span>
+                        <span className="text-xs text-[--text-secondary]">{room.fenceRadius}m</span>
+                        <span className="text-xs text-[--text-muted] font-mono">
+                          {room.xPosition ? `${room.xPosition.toFixed(1)}%` : "—"}
+                        </span>
+                        <span className="text-xs text-[--text-muted] font-mono">
+                          {room.yPosition ? `${room.yPosition.toFixed(1)}%` : "—"}
+                        </span>
+                        <button
+                          onClick={() => deleteRoom(selectedBuilding.id, room.id)}
+                          className="text-[10px] px-2 py-1 rounded-lg bg-red-50 text-red-600 font-medium hover:bg-red-100 transition-colors w-fit"
+                        >
+                          删除
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="rounded-2xl border border-dashed border-white/70 bg-white/40 py-10 text-center text-sm font-semibold text-[--text-muted]">
+                    当前楼座暂无房间
+                  </div>
+                )}
               </div>
-            )}
+            </div>
           </div>
         )}
       </div>
@@ -611,8 +852,6 @@ export default function SpaceTab({ buildings: buildingsProp, config, onRefresh }
         />
       )}
     </div>
-
-      </div>
   );
 }
 

@@ -1,0 +1,464 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>熨烫机图标方案</title>
+  <style>
+    :root {
+      --ink: #263241;
+      --muted: #718096;
+      --line: #f05b51;
+      --line-soft: rgba(240, 91, 81, 0.16);
+      --paper: #f7fafc;
+      --panel: rgba(255,255,255,0.78);
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 12% 8%, rgba(240,91,81,0.12), transparent 28%),
+        linear-gradient(135deg, #f3f6f8 0%, #edf2f7 58%, #e6edf2 100%);
+      padding: 36px;
+    }
+
+    .wrap {
+      max-width: 1180px;
+      margin: 0 auto;
+    }
+
+    header {
+      margin-bottom: 22px;
+    }
+
+    h1 {
+      margin: 0 0 8px;
+      font-size: 24px;
+      line-height: 1.2;
+      letter-spacing: 0;
+    }
+
+    .intro {
+      margin: 0;
+      max-width: 760px;
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.7;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 18px;
+    }
+
+    .card {
+      overflow: hidden;
+      border: 1px solid rgba(148,163,184,0.32);
+      border-radius: 8px;
+      background: var(--panel);
+      box-shadow: 0 18px 46px rgba(49,68,88,0.13), inset 0 1px 0 rgba(255,255,255,0.78);
+      backdrop-filter: blur(18px);
+    }
+
+    .top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 14px 15px 12px;
+      border-bottom: 1px solid rgba(148,163,184,0.18);
+    }
+
+    h2 {
+      margin: 0;
+      font-size: 15px;
+      letter-spacing: 0;
+    }
+
+    .tag {
+      border-radius: 999px;
+      background: var(--line-soft);
+      color: #d94b43;
+      padding: 4px 9px;
+      font-size: 11px;
+      font-weight: 800;
+      white-space: nowrap;
+    }
+
+    .preview {
+      display: grid;
+      grid-template-columns: 124px minmax(0, 1fr);
+      gap: 14px;
+      align-items: center;
+      padding: 16px;
+    }
+
+    .icon-box {
+      display: grid;
+      place-items: center;
+      aspect-ratio: 1;
+      border: 1px solid rgba(240,91,81,0.25);
+      border-radius: 8px;
+      background:
+        linear-gradient(135deg, rgba(255,255,255,0.76), rgba(255,255,255,0.42)),
+        linear-gradient(45deg, rgba(240,91,81,0.08) 25%, transparent 25%, transparent 50%, rgba(240,91,81,0.08) 50%, rgba(240,91,81,0.08) 75%, transparent 75%);
+      background-size: auto, 18px 18px;
+    }
+
+    svg {
+      display: block;
+    }
+
+    .notes {
+      min-width: 0;
+    }
+
+    .notes p {
+      margin: 0 0 8px;
+      color: #526173;
+      font-size: 12px;
+      line-height: 1.55;
+    }
+
+    .mini {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-top: 12px;
+    }
+
+    .mini-icon {
+      display: grid;
+      place-items: center;
+      width: 38px;
+      height: 38px;
+      border-radius: 8px;
+      border: 2px solid var(--line);
+      background: rgba(255,255,255,0.88);
+      box-shadow: 0 8px 18px rgba(240,91,81,0.15);
+    }
+
+    .mini-icon svg {
+      width: 26px;
+      height: 26px;
+    }
+
+    .count {
+      min-width: 26px;
+      height: 26px;
+      border-radius: 999px;
+      background: var(--line);
+      color: white;
+      display: grid;
+      place-items: center;
+      font-size: 13px;
+      font-weight: 900;
+      box-shadow: 0 8px 18px rgba(240,91,81,0.22);
+    }
+
+    .map-row {
+      position: relative;
+      min-height: 174px;
+      margin: 0 16px 16px;
+      overflow: hidden;
+      border-radius: 8px;
+      border: 1px solid rgba(148,163,184,0.26);
+      background:
+        linear-gradient(120deg, rgba(255,255,255,0.86), rgba(248,250,252,0.78)),
+        linear-gradient(24deg, transparent 0 42%, rgba(148,163,184,0.28) 42.4% 43.2%, transparent 43.6% 100%),
+        linear-gradient(98deg, transparent 0 56%, rgba(148,163,184,0.2) 56.3% 57.1%, transparent 57.5% 100%);
+    }
+
+    .machine-cluster {
+      position: absolute;
+      top: 16px;
+      right: 18px;
+      display: grid;
+      gap: 8px;
+    }
+
+    .machine-item {
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 7px;
+    }
+
+    .bubble {
+      min-width: 154px;
+      border: 2px solid var(--line);
+      border-radius: 8px;
+      background: rgba(255,255,255,0.9);
+      color: #ed554c;
+      padding: 6px 9px;
+      box-shadow: 0 10px 22px rgba(89, 107, 126, 0.16);
+    }
+
+    .bubble strong,
+    .bubble span {
+      display: block;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .bubble strong {
+      font-size: 13px;
+      line-height: 1.25;
+    }
+
+    .bubble span {
+      margin-top: 2px;
+      font-size: 10px;
+      font-weight: 800;
+      color: #f06a60;
+    }
+
+    .avatar {
+      width: 32px;
+      height: 32px;
+      border-radius: 999px;
+      overflow: hidden;
+      border: 2px solid rgba(255,255,255,0.95);
+      background:
+        radial-gradient(circle at 46% 35%, #f5c3a5 0 18%, transparent 19%),
+        radial-gradient(circle at 50% 115%, #31445b 0 40%, transparent 41%),
+        #a9b5c3;
+      box-shadow: 0 8px 18px rgba(34,45,58,0.18);
+    }
+
+    .pin {
+      position: absolute;
+      left: 40px;
+      bottom: 32px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      opacity: 0.54;
+      filter: grayscale(1);
+    }
+
+    .pin .avatar {
+      width: 42px;
+      height: 42px;
+      border-color: #d1d5db;
+    }
+
+    .pin-label {
+      border-radius: 999px;
+      background: rgba(71,85,105,0.12);
+      padding: 6px 9px;
+      color: #5f6b7a;
+      font-size: 11px;
+      font-weight: 900;
+    }
+
+    .repair {
+      opacity: 0.42;
+      filter: grayscale(1);
+    }
+
+    .repair .bubble {
+      border-color: #a0a8b4;
+      color: #64748b;
+    }
+
+    @media (max-width: 960px) {
+      body { padding: 20px; }
+      .grid { grid-template-columns: 1fr; }
+      .preview { grid-template-columns: 100px minmax(0, 1fr); }
+    }
+  </style>
+</head>
+<body>
+  <main class="wrap">
+    <header>
+      <h1>熨烫机图标 3 款候选</h1>
+      <p class="intro">这是一张确认用预览，暂不接入系统。三款都按地图角标尺寸设计：红色线框、可放大缩小、能和助理头像及任务气泡组合。</p>
+    </header>
+
+    <section class="grid" aria-label="图标方案">
+      <article class="card">
+        <div class="top">
+          <h2>A. 经典熨斗</h2>
+          <span class="tag">识别最快</span>
+        </div>
+        <div class="preview">
+          <div class="icon-box">
+            <svg width="86" height="86" viewBox="0 0 96 96" fill="none" aria-hidden="true">
+              <path d="M21 52c0-12 8-22 20-22h20c8 0 14 6 14 14v8" stroke="#f05b51" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+              <path d="M19 55h58c4 0 7 3 7 7v4c0 5-4 9-9 9H24c-6 0-10-4-10-10v-3c0-4 2-7 5-7Z" stroke="#f05b51" stroke-width="5" stroke-linejoin="round"/>
+              <path d="M36 30V20h24c7 0 12 5 12 12" stroke="#f05b51" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+              <path d="M33 62h30" stroke="#f05b51" stroke-width="5" stroke-linecap="round"/>
+            </svg>
+          </div>
+          <div class="notes">
+            <p>更像“熨烫设备”的通用符号，放到小尺寸也好认。</p>
+            <div class="mini">
+              <span class="mini-icon">
+                <svg viewBox="0 0 96 96" fill="none" aria-hidden="true">
+                  <path d="M21 52c0-12 8-22 20-22h20c8 0 14 6 14 14v8" stroke="#f05b51" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>
+                  <path d="M19 55h58c4 0 7 3 7 7v4c0 5-4 9-9 9H24c-6 0-10-4-10-10v-3c0-4 2-7 5-7Z" stroke="#f05b51" stroke-width="7" stroke-linejoin="round"/>
+                  <path d="M36 30V20h24c7 0 12 5 12 12" stroke="#f05b51" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+              </span>
+              <span class="count">2</span>
+            </div>
+          </div>
+        </div>
+        <div class="map-row">
+          <div class="machine-cluster">
+            <div class="machine-item">
+              <div class="bubble"><strong>熨烫任务</strong><span>15分钟 · 已进行8分钟</span></div>
+              <div class="avatar"></div>
+              <span class="mini-icon">
+                <svg viewBox="0 0 96 96" fill="none" aria-hidden="true">
+                  <path d="M21 52c0-12 8-22 20-22h20c8 0 14 6 14 14v8" stroke="#f05b51" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>
+                  <path d="M19 55h58c4 0 7 3 7 7v4c0 5-4 9-9 9H24c-6 0-10-4-10-10v-3c0-4 2-7 5-7Z" stroke="#f05b51" stroke-width="7" stroke-linejoin="round"/>
+                  <path d="M36 30V20h24c7 0 12 5 12 12" stroke="#f05b51" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+              </span>
+            </div>
+            <div class="machine-item repair">
+              <div class="bubble"><strong>熨烫机B</strong><span>维修不可用</span></div>
+              <span class="mini-icon">
+                <svg viewBox="0 0 96 96" fill="none" aria-hidden="true">
+                  <path d="M21 52c0-12 8-22 20-22h20c8 0 14 6 14 14v8" stroke="#f05b51" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>
+                  <path d="M19 55h58c4 0 7 3 7 7v4c0 5-4 9-9 9H24c-6 0-10-4-10-10v-3c0-4 2-7 5-7Z" stroke="#f05b51" stroke-width="7" stroke-linejoin="round"/>
+                  <path d="M36 30V20h24c7 0 12 5 12 12" stroke="#f05b51" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+              </span>
+            </div>
+          </div>
+          <div class="pin"><div class="avatar"></div><div class="pin-label">熨烫中已进行8分钟</div></div>
+        </div>
+      </article>
+
+      <article class="card">
+        <div class="top">
+          <h2>B. 蒸汽立式机</h2>
+          <span class="tag">更像设备</span>
+        </div>
+        <div class="preview">
+          <div class="icon-box">
+            <svg width="86" height="86" viewBox="0 0 96 96" fill="none" aria-hidden="true">
+              <path d="M48 22v48" stroke="#f05b51" stroke-width="5" stroke-linecap="round"/>
+              <path d="M33 75h30" stroke="#f05b51" stroke-width="5" stroke-linecap="round"/>
+              <path d="M38 22c0-6 4-10 10-10s10 4 10 10v8H38v-8Z" stroke="#f05b51" stroke-width="5" stroke-linejoin="round"/>
+              <path d="M34 44h28c5 0 9 4 9 9v3c0 5-4 9-9 9H34c-5 0-9-4-9-9v-3c0-5 4-9 9-9Z" stroke="#f05b51" stroke-width="5" stroke-linejoin="round"/>
+              <path d="M30 36c-4-6 0-12 7-12M66 36c4-6 0-12-7-12" stroke="#f05b51" stroke-width="5" stroke-linecap="round"/>
+            </svg>
+          </div>
+          <div class="notes">
+            <p>更接近“立式蒸汽熨烫机”，适合强调这是一台后台管理的设备。</p>
+            <div class="mini">
+              <span class="mini-icon">
+                <svg viewBox="0 0 96 96" fill="none" aria-hidden="true">
+                  <path d="M48 22v48" stroke="#f05b51" stroke-width="7" stroke-linecap="round"/>
+                  <path d="M33 75h30" stroke="#f05b51" stroke-width="7" stroke-linecap="round"/>
+                  <path d="M38 22c0-6 4-10 10-10s10 4 10 10v8H38v-8Z" stroke="#f05b51" stroke-width="7" stroke-linejoin="round"/>
+                  <path d="M34 44h28c5 0 9 4 9 9v3c0 5-4 9-9 9H34c-5 0-9-4-9-9v-3c0-5 4-9 9-9Z" stroke="#f05b51" stroke-width="7" stroke-linejoin="round"/>
+                </svg>
+              </span>
+              <span class="count">2</span>
+            </div>
+          </div>
+        </div>
+        <div class="map-row">
+          <div class="machine-cluster">
+            <div class="machine-item">
+              <div class="bubble"><strong>熨烫任务</strong><span>15分钟 · 已进行8分钟</span></div>
+              <div class="avatar"></div>
+              <span class="mini-icon">
+                <svg viewBox="0 0 96 96" fill="none" aria-hidden="true">
+                  <path d="M48 22v48" stroke="#f05b51" stroke-width="7" stroke-linecap="round"/>
+                  <path d="M33 75h30" stroke="#f05b51" stroke-width="7" stroke-linecap="round"/>
+                  <path d="M38 22c0-6 4-10 10-10s10 4 10 10v8H38v-8Z" stroke="#f05b51" stroke-width="7" stroke-linejoin="round"/>
+                  <path d="M34 44h28c5 0 9 4 9 9v3c0 5-4 9-9 9H34c-5 0-9-4-9-9v-3c0-5 4-9 9-9Z" stroke="#f05b51" stroke-width="7" stroke-linejoin="round"/>
+                </svg>
+              </span>
+            </div>
+            <div class="machine-item repair">
+              <div class="bubble"><strong>熨烫机B</strong><span>维修不可用</span></div>
+              <span class="mini-icon">
+                <svg viewBox="0 0 96 96" fill="none" aria-hidden="true">
+                  <path d="M48 22v48" stroke="#f05b51" stroke-width="7" stroke-linecap="round"/>
+                  <path d="M33 75h30" stroke="#f05b51" stroke-width="7" stroke-linecap="round"/>
+                  <path d="M38 22c0-6 4-10 10-10s10 4 10 10v8H38v-8Z" stroke="#f05b51" stroke-width="7" stroke-linejoin="round"/>
+                  <path d="M34 44h28c5 0 9 4 9 9v3c0 5-4 9-9 9H34c-5 0-9-4-9-9v-3c0-5 4-9 9-9Z" stroke="#f05b51" stroke-width="7" stroke-linejoin="round"/>
+                </svg>
+              </span>
+            </div>
+          </div>
+          <div class="pin"><div class="avatar"></div><div class="pin-label">熨烫中已进行8分钟</div></div>
+        </div>
+      </article>
+
+      <article class="card">
+        <div class="top">
+          <h2>C. 工作台设备</h2>
+          <span class="tag">更稳重</span>
+        </div>
+        <div class="preview">
+          <div class="icon-box">
+            <svg width="86" height="86" viewBox="0 0 96 96" fill="none" aria-hidden="true">
+              <path d="M20 66h56" stroke="#f05b51" stroke-width="5" stroke-linecap="round"/>
+              <path d="M28 66l-6 14M68 66l6 14" stroke="#f05b51" stroke-width="5" stroke-linecap="round"/>
+              <path d="M29 55h38c6 0 11-5 11-11v-2c0-7-6-13-13-13H48c-12 0-22 8-24 20-.5 3 2 6 5 6Z" stroke="#f05b51" stroke-width="5" stroke-linejoin="round"/>
+              <path d="M42 29V18h21c6 0 11 5 11 11" stroke="#f05b51" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+              <path d="M38 43h21" stroke="#f05b51" stroke-width="5" stroke-linecap="round"/>
+            </svg>
+          </div>
+          <div class="notes">
+            <p>像设备/工作台组合，视觉更稳，但小尺寸识别度略低于 A。</p>
+            <div class="mini">
+              <span class="mini-icon">
+                <svg viewBox="0 0 96 96" fill="none" aria-hidden="true">
+                  <path d="M20 66h56" stroke="#f05b51" stroke-width="7" stroke-linecap="round"/>
+                  <path d="M28 66l-6 14M68 66l6 14" stroke="#f05b51" stroke-width="7" stroke-linecap="round"/>
+                  <path d="M29 55h38c6 0 11-5 11-11v-2c0-7-6-13-13-13H48c-12 0-22 8-24 20-.5 3 2 6 5 6Z" stroke="#f05b51" stroke-width="7" stroke-linejoin="round"/>
+                  <path d="M42 29V18h21c6 0 11 5 11 11" stroke="#f05b51" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+              </span>
+              <span class="count">2</span>
+            </div>
+          </div>
+        </div>
+        <div class="map-row">
+          <div class="machine-cluster">
+            <div class="machine-item">
+              <div class="bubble"><strong>熨烫任务</strong><span>15分钟 · 已进行8分钟</span></div>
+              <div class="avatar"></div>
+              <span class="mini-icon">
+                <svg viewBox="0 0 96 96" fill="none" aria-hidden="true">
+                  <path d="M20 66h56" stroke="#f05b51" stroke-width="7" stroke-linecap="round"/>
+                  <path d="M28 66l-6 14M68 66l6 14" stroke="#f05b51" stroke-width="7" stroke-linecap="round"/>
+                  <path d="M29 55h38c6 0 11-5 11-11v-2c0-7-6-13-13-13H48c-12 0-22 8-24 20-.5 3 2 6 5 6Z" stroke="#f05b51" stroke-width="7" stroke-linejoin="round"/>
+                  <path d="M42 29V18h21c6 0 11 5 11 11" stroke="#f05b51" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+              </span>
+            </div>
+            <div class="machine-item repair">
+              <div class="bubble"><strong>熨烫机B</strong><span>维修不可用</span></div>
+              <span class="mini-icon">
+                <svg viewBox="0 0 96 96" fill="none" aria-hidden="true">
+                  <path d="M20 66h56" stroke="#f05b51" stroke-width="7" stroke-linecap="round"/>
+                  <path d="M28 66l-6 14M68 66l6 14" stroke="#f05b51" stroke-width="7" stroke-linecap="round"/>
+                  <path d="M29 55h38c6 0 11-5 11-11v-2c0-7-6-13-13-13H48c-12 0-22 8-24 20-.5 3 2 6 5 6Z" stroke="#f05b51" stroke-width="7" stroke-linejoin="round"/>
+                  <path d="M42 29V18h21c6 0 11 5 11 11" stroke="#f05b51" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+              </span>
+            </div>
+          </div>
+          <div class="pin"><div class="avatar"></div><div class="pin-label">熨烫中已进行8分钟</div></div>
+        </div>
+      </article>
+    </section>
+  </main>
+</body>
+</html>
