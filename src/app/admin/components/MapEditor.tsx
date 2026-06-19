@@ -49,11 +49,9 @@ interface MapEditorProps {
   building: Building;
   rooms: Room[];
   venues?: Venue[];
-  ironingMachines?: IroningMachine[];
   cropMode?: boolean;
   onRoomUpdate: (roomId: number, xPosition: number, yPosition: number, fenceRadius: number) => void;
   onVenueUpdate?: (venueName: string, x: number, y: number) => void;
-  onIroningMachineUpdate?: (machineId: number, x: number, y: number) => void;
   areaEditVenueName?: string | null;
   onVenueAreaSave?: (venueName: string, polygon: VenuePoint[]) => void;
   onVenueAreaCancel?: () => void;
@@ -67,19 +65,7 @@ const MIN_ZOOM = 1;
 const MAX_ZOOM = 5;
 const ZOOM_STEP = 0.15;
 
-function IroningMachineIcon({ muted = false }: { muted?: boolean }) {
-  const color = muted ? "#94a3b8" : "#f05b51";
-  return (
-    <svg width="22" height="22" viewBox="0 0 96 96" fill="none" aria-hidden="true">
-      <path d="M21 52c0-12 8-22 20-22h20c8 0 14 6 14 14v8" stroke={color} strokeWidth="7" strokeLinecap="round" strokeLinejoin="round" />
-      <path d="M19 55h58c4 0 7 3 7 7v4c0 5-4 9-9 9H24c-6 0-10-4-10-10v-3c0-4 2-7 5-7Z" stroke={color} strokeWidth="7" strokeLinejoin="round" />
-      <path d="M36 30V20h24c7 0 12 5 12 12" stroke={color} strokeWidth="7" strokeLinecap="round" strokeLinejoin="round" />
-      <path d="M33 62h30" stroke={color} strokeWidth="7" strokeLinecap="round" />
-    </svg>
-  );
-}
-
-export default function MapEditor({ building, rooms, venues = [], ironingMachines = [], cropMode: cropModeProp, onRoomUpdate, onVenueUpdate, onIroningMachineUpdate, areaEditVenueName, onVenueAreaSave, onVenueAreaCancel, onCropUpdate, onCropModeChange, onCropSave, onCropClear }: MapEditorProps) {
+export default function MapEditor({ building, rooms, venues = [], cropMode: cropModeProp, onRoomUpdate, onVenueUpdate, areaEditVenueName, onVenueAreaSave, onVenueAreaCancel, onCropUpdate, onCropModeChange, onCropSave, onCropClear }: MapEditorProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const innerRef = useRef<HTMLDivElement>(null);
 
@@ -121,16 +107,6 @@ export default function MapEditor({ building, rooms, venues = [], ironingMachine
   } | null>(null);
   const areaEditVenue = venues.find((venue) => venue.name === areaEditVenueName) ?? null;
   const areaEditMode = !!areaEditVenue;
-
-  const [machineDragging, setMachineDragging] = useState<{
-    id: number;
-    startX: number;
-    startY: number;
-    origX: number;
-    origY: number;
-  } | null>(null);
-  const [machineDragPos, setMachineDragPos] = useState<{ x: number; y: number } | null>(null);
-  const [hoveredMachine, setHoveredMachine] = useState<number | null>(null);
 
   // Pan & zoom state
   const [zoom, setZoom] = useState(MIN_ZOOM);
@@ -338,57 +314,6 @@ export default function MapEditor({ building, rooms, venues = [], ironingMachine
       window.removeEventListener("mouseup", handleUp);
     };
   }, [venueDragging, venueDragPos, onVenueUpdate]);
-
-  const handleMachineMouseDown = useCallback(
-    (e: React.MouseEvent, machine: IroningMachine) => {
-      if (cropMode || areaEditMode) return;
-      e.preventDefault();
-      e.stopPropagation();
-      setMachineDragging({
-        id: machine.id,
-        startX: e.clientX,
-        startY: e.clientY,
-        origX: machine.xPosition,
-        origY: machine.yPosition,
-      });
-      setMachineDragPos({ x: machine.xPosition, y: machine.yPosition });
-    },
-    [cropMode, areaEditMode]
-  );
-
-  useEffect(() => {
-    if (!machineDragging) return;
-
-    const handleMove = (e: MouseEvent) => {
-      const inner = innerRef.current;
-      if (!inner) return;
-      const rect = inner.getBoundingClientRect();
-      const deltaXPct = ((e.clientX - machineDragging.startX) / rect.width) * 100;
-      const deltaYPct = ((e.clientY - machineDragging.startY) / rect.height) * 100;
-      const newX = Math.max(0, Math.min(100, machineDragging.origX + deltaXPct));
-      const newY = Math.max(0, Math.min(100, machineDragging.origY + deltaYPct));
-      setMachineDragPos({ x: newX, y: newY });
-    };
-
-    const handleUp = () => {
-      if (machineDragPos && onIroningMachineUpdate) {
-        onIroningMachineUpdate(
-          machineDragging.id,
-          Math.round(machineDragPos.x * 100) / 100,
-          Math.round(machineDragPos.y * 100) / 100
-        );
-      }
-      setMachineDragging(null);
-      setMachineDragPos(null);
-    };
-
-    window.addEventListener("mousemove", handleMove);
-    window.addEventListener("mouseup", handleUp);
-    return () => {
-      window.removeEventListener("mousemove", handleMove);
-      window.removeEventListener("mouseup", handleUp);
-    };
-  }, [machineDragging, machineDragPos, onIroningMachineUpdate]);
 
   // --- Pan handlers ---
   const handlePanMouseDown = useCallback(
@@ -1087,58 +1012,6 @@ export default function MapEditor({ building, rooms, venues = [], ironingMachine
             );
           })}
 
-          {/* Ironing machine markers */}
-          {ironingMachines.map((machine) => {
-            const isDraggingMachine = machineDragging?.id === machine.id;
-            const mx = isDraggingMachine && machineDragPos ? machineDragPos.x : machine.xPosition;
-            const my = isDraggingMachine && machineDragPos ? machineDragPos.y : machine.yPosition;
-            const isMachineHovered = hoveredMachine === machine.id;
-            const isMaintenance = machine.status === "maintenance";
-
-            return (
-              <div
-                key={machine.id}
-                className="absolute flex flex-col items-center"
-                style={{
-                  left: `${mx}%`,
-                  top: `${my}%`,
-                  transform: "translate(-50%, -50%)",
-                  zIndex: isDraggingMachine ? 54 : isMachineHovered ? 44 : 14,
-                  cursor: cropMode || areaEditMode ? "default" : isDraggingMachine ? "grabbing" : "grab",
-                  opacity: isMaintenance ? 0.58 : 1,
-                  filter: isMaintenance ? "grayscale(1)" : "none",
-                }}
-                onMouseDown={(e) => handleMachineMouseDown(e, machine)}
-                onMouseEnter={() => setHoveredMachine(machine.id)}
-                onMouseLeave={() => setHoveredMachine(null)}
-              >
-                <div
-                  className="grid place-items-center rounded-lg border-2 bg-white/92 shadow-sm transition-all duration-150"
-                  style={{
-                    width: isDraggingMachine ? 34 : isMachineHovered ? 32 : 30,
-                    height: isDraggingMachine ? 34 : isMachineHovered ? 32 : 30,
-                    borderColor: isMaintenance ? "#94a3b8" : "#f05b51",
-                    boxShadow: isDraggingMachine
-                      ? "0 0 0 4px rgba(240,91,81,0.22), 0 2px 8px rgba(0,0,0,0.18)"
-                      : isMachineHovered
-                      ? "0 0 0 3px rgba(240,91,81,0.16), 0 2px 6px rgba(0,0,0,0.14)"
-                      : "0 1px 3px rgba(0,0,0,0.18)",
-                  }}
-                >
-                  <IroningMachineIcon muted={isMaintenance} />
-                </div>
-                <span
-                  className="mt-1 whitespace-nowrap rounded px-1.5 py-0.5 text-[10px] font-bold text-white"
-                  style={{
-                    backgroundColor: isMaintenance ? "rgba(100,116,139,0.76)" : "rgba(240,91,81,0.82)",
-                    lineHeight: 1.2,
-                  }}
-                >
-                  {machine.name}{isMaintenance ? " · 维修" : ""}
-                </span>
-              </div>
-            );
-          })}
         </div>
 
         {/* Vertical zoom control — right side overlay */}

@@ -141,6 +141,13 @@ enum TaskStatus {
   completed  // 已完成
 }
 
+enum IroningTaskStage {
+  none
+  waiting_machine
+  notified
+  using
+}
+
 // ============================================
 // 任务类型配置表
 // ============================================
@@ -190,6 +197,7 @@ model BookingTask {
   isSpecified     Boolean     @default(false) @map("is_specified")
   estEndTime      DateTime?   @map("est_end_time")
   status          TaskStatus  @default(waiting)
+  ironingStage    IroningTaskStage @default(none) @map("ironing_stage")
   note            String?     // 特殊备注（带小推车、工具等）
   publisherFeedback String?   @map("publisher_feedback") // 摄影师任务发布明细反馈：like / dislike
 
@@ -201,6 +209,9 @@ model BookingTask {
   pausedAt        DateTime?   @map("paused_at")  // 被插单暂停的时间点
   escalatedAt     DateTime?   @map("escalated_at") // 最后一次提权时间
   escalatedFromPriority Int?  @map("escalated_from_priority") // 第一次提权前的原始优先级
+  ironingQueuedAt DateTime?   @map("ironing_queued_at") // 进入熨烫机等待队列时间
+  ironingNotifiedAt DateTime? @map("ironing_notified_at") // 通知助理准备/确认时间
+  ironingStartedAt DateTime?  @map("ironing_started_at") // 实际占用熨烫机开始时间
 
   // 有效执行时长：仅统计 executing 片段；暂停/待就位/插单间隔不计入
   effectiveWorkSeconds Int       @default(0) @map("effective_work_seconds")
@@ -219,6 +230,7 @@ model BookingTask {
   category        TaskCategory @relation(fields: [categoryId], references: [id])
 
   @@index([status, priority])
+  @@index([ironingStage, status])
   @@index([assistantId, status])
   @@index([photographerId])
   @@index([locationBuildingId])

@@ -44,7 +44,6 @@ export default function SpaceTab({ buildings: buildingsProp, config, onRefresh }
   const [pageBackgroundUrl, setPageBackgroundUrl] = useState(config[WORKBENCH_PAGE_BACKGROUND_CONFIG_KEY]?.value ?? "");
   const [newVenue, setNewVenue] = useState("");
   const [newVenueType, setNewVenueType] = useState<"实景棚" | "无影棚">("实景棚");
-  const [newMachineCount, setNewMachineCount] = useState("1");
   const [cropMode, setCropMode] = useState(false);
   const [areaEditVenueName, setAreaEditVenueName] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -140,7 +139,7 @@ export default function SpaceTab({ buildings: buildingsProp, config, onRefresh }
     });
   }
 
-  async function createIroningMachines(buildingId: number, count: number) {
+  async function createIroningMachines(buildingId: number, count = 1) {
     const safeCount = Math.min(20, Math.max(1, Math.round(count) || 1));
     const res = await fetch(`/api/buildings/${buildingId}/ironing-machines`, {
       method: "POST",
@@ -518,11 +517,52 @@ export default function SpaceTab({ buildings: buildingsProp, config, onRefresh }
               <div className="grid items-stretch gap-3 xl:grid-cols-[minmax(0,1fr)_280px] lg:grid-cols-[minmax(0,1fr)_260px]">
                 {/* Map Editor — takes remaining space */}
                 <div className="min-w-0">
+                  <div className="mb-2 grid grid-cols-1 gap-2 md:grid-cols-3">
+                    <button
+                      onClick={() => fileInputRef.current?.click()}
+                      className="flex h-11 items-center justify-center gap-1.5 rounded-2xl bg-purple-50/90 px-3 text-xs font-bold text-purple-600 shadow-sm ring-1 ring-purple-100 transition-colors hover:bg-purple-100"
+                    >
+                      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                        <polyline points="17 8 12 3 7 8" />
+                        <line x1="12" y1="3" x2="12" y2="15" />
+                      </svg>
+                      {uploading ? "上传中..." : "更换平面图"}
+                    </button>
+                    <button
+                      onClick={() => setShowRoomModal(true)}
+                      className="flex h-11 items-center justify-center gap-1.5 rounded-2xl bg-green-50/90 px-3 text-xs font-bold text-green-600 shadow-sm ring-1 ring-green-100 transition-colors hover:bg-green-100"
+                    >
+                      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                        <line x1="12" y1="5" x2="12" y2="19" />
+                        <line x1="5" y1="12" x2="19" y2="12" />
+                      </svg>
+                      添加房间
+                    </button>
+                    <button
+                      onClick={() => setCropMode(!cropMode)}
+                      className={`flex h-11 items-center justify-center gap-1.5 rounded-2xl px-3 text-xs font-bold shadow-sm ring-1 transition-colors ${
+                        cropMode
+                          ? "bg-orange-100 text-orange-700 ring-orange-300"
+                          : "bg-white/80 text-slate-600 ring-slate-200 hover:bg-white"
+                      }`}
+                    >
+                      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                        <path d="M6 2v14a2 2 0 0 0 2 2h14" />
+                        <path d="M18 22V8a2 2 0 0 0-2-2H2" />
+                      </svg>
+                      {cropMode ? "正在框选…" : "框选主体"}
+                    </button>
+                  </div>
+                  {areaEditVenueName && (
+                    <p className="mb-2 rounded-xl bg-blue-50/90 px-3 py-2 text-[10px] font-semibold leading-relaxed text-blue-600 ring-1 ring-blue-100">
+                      正在编辑公共区域范围
+                    </p>
+                  )}
                   <MapEditor
                     building={selectedBuilding}
                     rooms={selectedBuilding.rooms}
                     venues={getExtraVenues(selectedBuilding)}
-                    ironingMachines={selectedBuilding.ironingMachines ?? []}
                     cropMode={cropMode}
                     onRoomUpdate={(roomId, x, y, fenceRadius) =>
                       updateRoomCoords(selectedBuilding.id, roomId, x, y, fenceRadius)
@@ -533,9 +573,6 @@ export default function SpaceTab({ buildings: buildingsProp, config, onRefresh }
                       );
                       updateExtraVenues(selectedBuilding.id, venues);
                     }}
-                    onIroningMachineUpdate={(machineId, x, y) =>
-                      updateIroningMachine(selectedBuilding.id, machineId, { xPosition: x, yPosition: y })
-                    }
                     areaEditVenueName={areaEditVenueName}
                     onVenueAreaSave={(venueName, polygon) => saveVenueArea(selectedBuilding, venueName, polygon)}
                     onVenueAreaCancel={() => setAreaEditVenueName(null)}
@@ -545,143 +582,11 @@ export default function SpaceTab({ buildings: buildingsProp, config, onRefresh }
                 </div>
 
                 {/* Right Sidebar — all actions */}
-                <div className="flex min-h-full flex-col gap-2">
-                  {/* 1. 框选主体范围 */}
-                  <div className="card p-3">
-                    <button
-                      onClick={() => setCropMode(!cropMode)}
-                      className={`w-full flex items-center gap-1.5 px-2.5 py-2 rounded-lg text-xs font-medium transition-colors ${
-                        cropMode
-                          ? "bg-orange-100 text-orange-700 ring-2 ring-orange-400"
-                          : "bg-gray-50 text-gray-600 hover:bg-gray-100"
-                      }`}
-                    >
-                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                        <path d="M6 2v14a2 2 0 0 0 2 2h14" />
-                        <path d="M18 22V8a2 2 0 0 0-2-2H2" />
-                      </svg>
-                      {cropMode ? "正在框选…" : "框选主体范围"}
-                    </button>
-                    {areaEditVenueName && (
-                      <p className="mt-2 text-[10px] font-semibold leading-relaxed text-blue-600">
-                        正在编辑公共区域范围
-                      </p>
-                    )}
-                  </div>
-
-                  {/* 2. 更换平面图 */}
-                  <div className="card p-3">
-                    <button
-                      onClick={() => fileInputRef.current?.click()}
-                      className="w-full flex items-center gap-1.5 px-2.5 py-2 rounded-lg bg-purple-50 text-purple-600 text-xs font-medium hover:bg-purple-100 transition-colors"
-                    >
-                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-                        <polyline points="17 8 12 3 7 8" />
-                        <line x1="12" y1="3" x2="12" y2="15" />
-                      </svg>
-                      {uploading ? "上传中..." : "更换平面图"}
-                    </button>
-                  </div>
-
-                  {/* 3. 添加房间 */}
-                  <div className="card p-3">
-                    <button
-                      onClick={() => setShowRoomModal(true)}
-                      className="w-full flex items-center gap-1.5 px-2.5 py-2 rounded-lg bg-green-50 text-green-600 text-xs font-medium hover:bg-green-100 transition-colors"
-                    >
-                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                        <line x1="12" y1="5" x2="12" y2="19" />
-                        <line x1="5" y1="12" x2="19" y2="12" />
-                      </svg>
-                      添加房间
-                    </button>
-                  </div>
-
-                  {/* 4. 熨烫机管理 */}
-                  <div className="card p-3">
-                    <div className="mb-2 flex items-center justify-between gap-2">
-                      <h3 className="text-xs font-semibold text-[--text-primary]">
-                        熨烫机管理 ({(selectedBuilding.ironingMachines ?? []).length})
-                      </h3>
-                      <span className="rounded-full bg-red-50 px-2 py-0.5 text-[9px] font-bold text-red-500">
-                        可拖拽定位
-                      </span>
-                    </div>
-                    <div className="mb-2 flex gap-1.5">
-                      <input
-                        type="number"
-                        min={1}
-                        max={20}
-                        value={newMachineCount}
-                        onChange={(e) => setNewMachineCount(e.target.value)}
-                        className="min-w-0 flex-1 rounded-lg border border-gray-200 bg-[--bg-base] px-2 py-1.5 text-[11px] outline-none transition-colors focus:border-red-400"
-                        placeholder="新增台数"
-                      />
-                      <button
-                        type="button"
-                        onClick={() => {
-                          createIroningMachines(selectedBuilding.id, Number(newMachineCount));
-                          setNewMachineCount("1");
-                        }}
-                        className="shrink-0 rounded-lg bg-red-500 px-2.5 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-red-600"
-                      >
-                        添加
-                      </button>
-                    </div>
-                    {(selectedBuilding.ironingMachines ?? []).length > 0 ? (
-                      <div className="max-h-36 space-y-1 overflow-y-auto pr-1 task-scroll">
-                        {(selectedBuilding.ironingMachines ?? []).map((machine) => (
-                          <div
-                            key={machine.id}
-                            className="admin-table-row flex items-center gap-1.5 rounded-lg px-2 py-1.5"
-                          >
-                            <div className="grid h-6 w-6 shrink-0 place-items-center rounded-md border border-red-200 bg-white/80">
-                              <svg width="16" height="16" viewBox="0 0 96 96" fill="none" aria-hidden="true">
-                                <path d="M21 52c0-12 8-22 20-22h20c8 0 14 6 14 14v8" stroke={machine.status === "maintenance" ? "#94a3b8" : "#f05b51"} strokeWidth="8" strokeLinecap="round" strokeLinejoin="round" />
-                                <path d="M19 55h58c4 0 7 3 7 7v4c0 5-4 9-9 9H24c-6 0-10-4-10-10v-3c0-4 2-7 5-7Z" stroke={machine.status === "maintenance" ? "#94a3b8" : "#f05b51"} strokeWidth="8" strokeLinejoin="round" />
-                                <path d="M36 30V20h24c7 0 12 5 12 12" stroke={machine.status === "maintenance" ? "#94a3b8" : "#f05b51"} strokeWidth="8" strokeLinecap="round" strokeLinejoin="round" />
-                              </svg>
-                            </div>
-                            <div className="min-w-0 flex-1">
-                              <p className="truncate text-[11px] font-bold text-slate-700">{machine.name}</p>
-                              <p className="text-[9px] font-semibold text-gray-400">
-                                X {machine.xPosition.toFixed(1)}% · Y {machine.yPosition.toFixed(1)}%
-                              </p>
-                            </div>
-                            <select
-                              value={machine.status}
-                              onChange={(e) =>
-                                updateIroningMachine(selectedBuilding.id, machine.id, {
-                                  status: e.target.value as IroningMachine["status"],
-                                })
-                              }
-                              className="rounded-lg border border-gray-200 bg-white/70 px-1.5 py-1 text-[10px] font-bold text-slate-600 outline-none"
-                            >
-                              <option value="normal">正常运行</option>
-                              <option value="maintenance">维修不可用</option>
-                            </select>
-                            <button
-                              type="button"
-                              onClick={() => deleteIroningMachine(selectedBuilding.id, machine.id)}
-                              className="shrink-0 text-sm leading-none text-red-300 transition-colors hover:text-red-500"
-                              aria-label={`删除${machine.name}`}
-                            >
-                              ×
-                            </button>
-                          </div>
-                        ))}
-                      </div>
-                    ) : (
-                      <p className="rounded-lg bg-gray-50/80 px-2 py-2 text-center text-[10px] font-semibold text-[--text-muted]">
-                        暂无熨烫机
-                      </p>
-                    )}
-                  </div>
-
-                  {/* 5. 添加额外场地 */}
-                  <div className="card flex min-h-0 flex-1 flex-col p-3">
-                    <div className="flex gap-1.5 mb-2">
+                <div className="flex h-full min-h-full flex-col gap-2">
+                  {/* 1. 添加公共场地 */}
+                  <div className="card flex min-h-0 flex-col p-3">
+                    <h3 className="mb-2 text-xs font-semibold text-[--text-primary]">添加公共场地</h3>
+                    <div className="mb-2 grid grid-cols-[minmax(0,1fr)_76px_34px] gap-1.5">
                       <input
                         value={newVenue}
                         onChange={(e) => setNewVenue(e.target.value)}
@@ -694,13 +599,13 @@ export default function SpaceTab({ buildings: buildingsProp, config, onRefresh }
                             setNewVenue("");
                           }
                         }}
-                        className="flex-1 min-w-0 px-2 py-1.5 rounded-lg bg-[--bg-base] border border-gray-200 text-[11px] outline-none focus:border-blue-400 transition-colors"
+                        className="min-w-0 rounded-lg border border-gray-200 bg-[--bg-base] px-2 py-1.5 text-[11px] outline-none transition-colors focus:border-blue-400"
                         placeholder="场地名称"
                       />
                       <select
                         value={newVenueType}
                         onChange={(e) => setNewVenueType(e.target.value as "实景棚" | "无影棚")}
-                        className="px-1.5 py-1.5 rounded-lg bg-[--bg-base] border border-gray-200 text-[11px] outline-none focus:border-blue-400 transition-colors"
+                        className="rounded-lg border border-gray-200 bg-[--bg-base] px-1.5 py-1.5 text-[11px] outline-none transition-colors focus:border-blue-400"
                       >
                         <option value="实景棚">实景棚</option>
                         <option value="无影棚">无影棚</option>
@@ -714,17 +619,17 @@ export default function SpaceTab({ buildings: buildingsProp, config, onRefresh }
                           }
                           setNewVenue("");
                         }}
-                        className="px-2 py-1.5 rounded-lg bg-blue-500 text-white text-xs font-semibold hover:bg-blue-600 transition-colors shrink-0"
+                        className="rounded-lg bg-blue-500 text-xs font-semibold text-white transition-colors hover:bg-blue-600"
                       >
                         +
                       </button>
                     </div>
-                    {getExtraVenues(selectedBuilding).length > 0 && (
-                      <div className="min-h-0 flex-1 space-y-1 overflow-y-auto pr-1 task-scroll">
+                    {getExtraVenues(selectedBuilding).length > 0 ? (
+                      <div className="max-h-48 space-y-1 overflow-y-auto pr-1 task-scroll">
                         {getExtraVenues(selectedBuilding).map((venue) => (
                           <div
                             key={venue.name}
-                            className={`admin-table-row flex flex-col gap-1 px-2 py-1.5 rounded-lg group ${areaEditVenueName === venue.name ? "ring-2 ring-blue-300" : ""}`}
+                            className={`admin-table-row flex flex-col gap-1 rounded-lg px-2 py-1.5 group ${areaEditVenueName === venue.name ? "ring-2 ring-blue-300" : ""}`}
                           >
                             <div className="flex items-center justify-between gap-1.5">
                               <div className="flex min-w-0 items-center gap-1.5">
@@ -775,8 +680,72 @@ export default function SpaceTab({ buildings: buildingsProp, config, onRefresh }
                           </div>
                         ))}
                       </div>
+                    ) : (
+                      <p className="rounded-lg bg-gray-50/80 px-2 py-2 text-center text-[10px] font-semibold text-[--text-muted]">
+                        暂无其他场地
+                      </p>
                     )}
                   </div>
+
+                  {/* 2. 添加熨烫机 */}
+                  <div className="card flex min-h-0 flex-1 flex-col p-3">
+                    <div className="mb-2 flex items-center justify-between gap-2">
+                      <h3 className="text-xs font-semibold text-[--text-primary]">添加熨烫机</h3>
+                      <button
+                        type="button"
+                        onClick={() => createIroningMachines(selectedBuilding.id)}
+                        className="shrink-0 rounded-lg bg-red-500 px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-red-600"
+                      >
+                        添加
+                      </button>
+                    </div>
+                    {(selectedBuilding.ironingMachines ?? []).length > 0 ? (
+                      <div className="min-h-0 flex-1 space-y-1 overflow-y-auto pr-1 task-scroll">
+                        {(selectedBuilding.ironingMachines ?? []).map((machine, index) => (
+                          <div
+                            key={machine.id}
+                            className="admin-table-row flex items-center gap-1.5 rounded-lg px-2 py-1.5"
+                          >
+                            <div className="grid h-6 w-6 shrink-0 place-items-center rounded-md border border-red-200 bg-white/80">
+                              <svg width="16" height="16" viewBox="0 0 96 96" fill="none" aria-hidden="true">
+                                <path d="M21 52c0-12 8-22 20-22h20c8 0 14 6 14 14v8" stroke={machine.status === "maintenance" ? "#94a3b8" : "#f05b51"} strokeWidth="8" strokeLinecap="round" strokeLinejoin="round" />
+                                <path d="M19 55h58c4 0 7 3 7 7v4c0 5-4 9-9 9H24c-6 0-10-4-10-10v-3c0-4 2-7 5-7Z" stroke={machine.status === "maintenance" ? "#94a3b8" : "#f05b51"} strokeWidth="8" strokeLinejoin="round" />
+                                <path d="M36 30V20h24c7 0 12 5 12 12" stroke={machine.status === "maintenance" ? "#94a3b8" : "#f05b51"} strokeWidth="8" strokeLinecap="round" strokeLinejoin="round" />
+                              </svg>
+                            </div>
+                            <div className="min-w-0 flex-1">
+                              <p className="truncate text-[11px] font-bold text-slate-700">熨烫机{index + 1}</p>
+                            </div>
+                            <select
+                              value={machine.status}
+                              onChange={(e) =>
+                                updateIroningMachine(selectedBuilding.id, machine.id, {
+                                  status: e.target.value as IroningMachine["status"],
+                                })
+                              }
+                              className="rounded-lg border border-gray-200 bg-white/70 px-1.5 py-1 text-[10px] font-bold text-slate-600 outline-none"
+                            >
+                              <option value="normal">正常运行</option>
+                              <option value="maintenance">维修不可用</option>
+                            </select>
+                            <button
+                              type="button"
+                              onClick={() => deleteIroningMachine(selectedBuilding.id, machine.id)}
+                              className="shrink-0 text-sm leading-none text-red-300 transition-colors hover:text-red-500"
+                              aria-label={`删除${machine.name}`}
+                            >
+                              ×
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="rounded-lg bg-gray-50/80 px-2 py-2 text-center text-[10px] font-semibold text-[--text-muted]">
+                        暂无熨烫机
+                      </p>
+                    )}
+                  </div>
+
                 </div>
               </div>
             )}

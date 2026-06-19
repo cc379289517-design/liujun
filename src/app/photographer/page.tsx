@@ -45,6 +45,12 @@ function fmtMin(min: number): string {
   return `${rounded.toFixed(1)}小时`;
 }
 
+function fmtIroningHoverTime(min: number): string {
+  const m = Math.max(0, Math.round(Number(min) || 0));
+  if (m <= 60) return `${m}分钟`;
+  return `${(Math.round((m / 60) * 10) / 10).toFixed(1)}小时`;
+}
+
 type VenuePoint = { x: number; y: number };
 type ExtraVenueEntry = { name: string; type?: string; x?: number; y?: number; color?: string; polygon?: VenuePoint[] };
 type IroningMachine = {
@@ -202,6 +208,7 @@ function formatSecondsAsHMS(totalSeconds: number): string {
 
 type ThemeMode = "light" | "dark" | "auto";
 type TaskPublisherFeedback = "like" | "dislike";
+type IroningTaskStage = "none" | "waiting_machine" | "notified" | "using";
 
 type TaskFromAPI = {
   id: string;
@@ -212,6 +219,10 @@ type TaskFromAPI = {
   categoryId: number;
   priority: number;
   status: "waiting" | "executing" | "paused" | "completed";
+  ironingStage?: IroningTaskStage;
+  ironingQueuedAt?: string | null;
+  ironingNotifiedAt?: string | null;
+  ironingStartedAt?: string | null;
   note: string | null;
   publisherFeedback?: TaskPublisherFeedback | null;
   createdAt: string;
@@ -309,12 +320,14 @@ const STATUS_STYLE: Record<string, { statusLabel: string; statusCls: string; tag
   waiting:   { statusLabel: "等待中", statusCls: "bg-white/30 border-white/40", tagCls: "bg-gray-100/60 text-gray-500", hasProgress: false },
   queued:    { statusLabel: "队列中", statusCls: "bg-white/30 border-white/40", tagCls: "bg-gray-100/80 text-gray-500", hasProgress: false },
   assigned:  { statusLabel: "待就位", statusCls: "bg-white/35 border-blue-200/50", tagCls: "bg-blue-100/60 text-blue-600", hasProgress: false },
+  waitingMachine: { statusLabel: "等待熨烫机", statusCls: "bg-white/35 border-emerald-200/50", tagCls: "bg-emerald-100/70 text-emerald-700", hasProgress: false },
+  ironingReady: { statusLabel: "准备熨烫", statusCls: "bg-white/40 border-lime-200/60", tagCls: "bg-lime-100/80 text-lime-700", hasProgress: false },
   completed: { statusLabel: "已完成", statusCls: "bg-white/30 border-white/40", tagCls: "bg-green-100/60 text-green-600", hasProgress: false },
   paused:    { statusLabel: "已暂停", statusCls: "bg-white/25 border-yellow-200/40", tagCls: "bg-yellow-100/60 text-yellow-600", hasProgress: false },
 };
 
 // 任务状态排序权重：超过上限后的个人队列优先提醒，其余按待就位 → 等待中 → 进行中 → 已暂停 → 已完成
-const STATUS_ORDER: Record<string, number> = { "队列中": 0, "待就位": 1, "等待中": 2, "进行中": 3, "已暂停": 4, "已完成": 5, "已取消": 6 };
+const STATUS_ORDER: Record<string, number> = { "准备熨烫": 0, "等待熨烫机": 1, "队列中": 2, "待就位": 3, "等待中": 4, "进行中": 5, "已暂停": 6, "已完成": 7, "已取消": 8 };
 function sortTasksByStatus(tasks: DisplayTask[]): DisplayTask[] {
   return [...tasks].sort((a, b) => (STATUS_ORDER[a.statusLabel] ?? 99) - (STATUS_ORDER[b.statusLabel] ?? 99));
 }
@@ -393,10 +406,10 @@ type IroningWorkItem = {
   assistantAvatar: string | null;
   elapsedMin: number;
   overtimeMin: number | null;
+  remainingMin: number | null;
   durationLabel: string;
   elapsedLabel: string;
   taskLabel: string;
-  machine: IroningMachine | null;
 };
 
 function hasAreaMetricDetail(item: AreaMetricCard): item is AreaMetricDetailCard {
@@ -578,8 +591,9 @@ function resolveAssistantTasks(taskData: TaskFromAPI[], profileId?: string): {
   const executing = taskData.find((t) => belongsToProfile(t) && statusOf(t) === "executing") || null;
   const paused = taskData.find((t) => belongsToProfile(t) && statusOf(t) === "paused") || null;
   // waiting + parentTaskId = 插单待处理（pending）；waiting + no parentTaskId = 普通待就位
-  const waitingWithParent = taskData.find((t) => belongsToProfile(t) && statusOf(t) === "waiting" && t.parentTaskId) || null;
-  const waitingNormal = taskData.find((t) => belongsToProfile(t) && statusOf(t) === "waiting" && !t.parentTaskId) || null;
+  const waitingWithParent = taskData.find((t) => belongsToProfile(t) && statusOf(t) === "waiting" && t.parentTaskId && !isPassiveIroningWaitingTask(t)) || null;
+  const waitingNormal = taskData.find((t) => belongsToProfile(t) && statusOf(t) === "waiting" && !t.parentTaskId && !isPassiveIroningWaitingTask(t)) || null;
+  const passiveIroningWaiting = taskData.find((t) => belongsToProfile(t) && statusOf(t) === "waiting" && isPassiveIroningWaitingTask(t)) || null;
 
   if (executing && waitingWithParent) {
     // 旧任务执行中，新插单任务待处理
@@ -627,8 +641,26 @@ function resolveAssistantTasks(taskData: TaskFromAPI[], profileId?: string): {
     }
   }
   // 普通单任务
-  const current = executing || waitingNormal || waitingWithParent || null;
+  const current = executing || waitingNormal || waitingWithParent || passiveIroningWaiting || null;
   return { current, paused, pending: null, deferredWaiting: null };
+}
+
+function actionableWaitingTasksForProfile(taskData: TaskFromAPI[], profileId?: string): TaskFromAPI[] {
+  const statusOf = (task: TaskFromAPI) => taskStatusForProfile(task, profileId) ?? task.status;
+  const belongsToProfile = (task: TaskFromAPI) => !profileId || task.assistantId === profileId || !!taskParticipantForProfile(task, profileId);
+  const waitingTasks = taskData.filter((task) =>
+    belongsToProfile(task) &&
+    statusOf(task) === "waiting" &&
+    !isPassiveIroningWaitingTask(task)
+  );
+
+  return waitingTasks.sort((a, b) => {
+    const aIroningReady = isAssignedIroningReadyTask(a, profileId) ? 0 : 1;
+    const bIroningReady = isAssignedIroningReadyTask(b, profileId) ? 0 : 1;
+    return aIroningReady - bIroningReady ||
+      a.priority - b.priority ||
+      new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
+  });
 }
 
 function apiTaskToDisplay(t: TaskFromAPI, profileId?: string): DisplayTask {
@@ -638,6 +670,10 @@ function apiTaskToDisplay(t: TaskFromAPI, profileId?: string): DisplayTask {
   const hasAssignedPerson = !!t.assistantId || activeTaskParticipants(t).length > 0;
   const effectiveStatus = isPhotographerLimitQueuedTask(t)
     ? "queued"
+    : isIroningTask(t) && t.status === "waiting" && t.ironingStage === "waiting_machine"
+      ? "waitingMachine"
+    : isAssignedIroningReadyTask(t, profileId)
+      ? "ironingReady"
     : viewerStatus === "waiting"
       ? hasAssignedPerson ? "assigned" : "queued"
       : viewerStatus;
@@ -987,14 +1023,56 @@ function isIroningTask(task: TaskFromAPI | null | undefined): boolean {
   return taskTypeGroupName(name) === "熨烫" || name.includes("熨");
 }
 
-function IroningMachineIcon({ muted = false, className = "h-5 w-5" }: { muted?: boolean; className?: string }) {
-  const color = muted ? "#94a3b8" : "#f05b51";
+function isPassiveIroningWaitingTask(task: TaskFromAPI | null | undefined): boolean {
+  return !!task &&
+    isIroningTask(task) &&
+    task.status === "waiting" &&
+    task.ironingStage === "waiting_machine";
+}
+
+function isAssignedIroningReadyTask(task: TaskFromAPI | null | undefined, profileId?: string): boolean {
+  if (!task || !isIroningTask(task) || task.status !== "waiting") return false;
+  if (task.ironingStage === "waiting_machine") return false;
+  if (task.ironingStage === "notified") return true;
+  if (!profileId) return !!task.assistantId || activeTaskParticipants(task).length > 0;
+  return task.assistantId === profileId || !!taskParticipantForProfile(task, profileId);
+}
+
+function ironingQueueOrderMs(task: TaskFromAPI): number {
+  const raw = task.ironingQueuedAt ?? task.ironingNotifiedAt ?? task.createdAt;
+  const ms = new Date(raw).getTime();
+  return Number.isFinite(ms) ? ms : 0;
+}
+
+function ironingQueueEstimateMinutes(task: TaskFromAPI): number {
+  return taskSlotCapMinutes(task.category) ?? task.category?.estDuration ?? 30;
+}
+
+function isMapDeferredIroningWaitingTask(task: TaskFromAPI | null | undefined): boolean {
+  return !!task &&
+    isIroningTask(task) &&
+    task.status === "waiting" &&
+    task.ironingStage === "waiting_machine";
+}
+
+function IroningMachineIcon({
+  tone = "idle",
+  className = "h-5 w-5",
+}: {
+  tone?: "busy" | "idle" | "maintenance";
+  className?: string;
+}) {
+  const color = tone === "busy" ? "#ef4444" : tone === "maintenance" ? "#94a3b8" : "#22c55e";
+  const steamColor = tone === "busy" ? "#fca5a5" : tone === "maintenance" ? "#cbd5e1" : "#86efac";
   return (
     <svg className={className} viewBox="0 0 96 96" fill="none" aria-hidden="true">
-      <path d="M21 52c0-12 8-22 20-22h20c8 0 14 6 14 14v8" stroke={color} strokeWidth="7" strokeLinecap="round" strokeLinejoin="round" />
-      <path d="M19 55h58c4 0 7 3 7 7v4c0 5-4 9-9 9H24c-6 0-10-4-10-10v-3c0-4 2-7 5-7Z" stroke={color} strokeWidth="7" strokeLinejoin="round" />
-      <path d="M36 30V20h24c7 0 12 5 12 12" stroke={color} strokeWidth="7" strokeLinecap="round" strokeLinejoin="round" />
-      <path d="M33 62h30" stroke={color} strokeWidth="7" strokeLinecap="round" />
+      <path d="M17 31c6-8-5-13 1-22" stroke={steamColor} strokeWidth="6" strokeLinecap="round" />
+      <path d="M30 31c6-8-5-13 1-22" stroke={steamColor} strokeWidth="6" strokeLinecap="round" />
+      <path d="M45 31h10" stroke={color} strokeWidth="7" strokeLinecap="round" />
+      <path d="M20 70h59v9H18c-4 0-7-3-7-7 0-21 16-38 38-38h29c8 0 13 5 14 12l3 17c1 4-2 7-6 7H20Z" stroke={color} strokeWidth="6" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M50 48h19c4 0 7 3 8 7l1 6H40c1-8 5-13 10-13Z" stroke={color} strokeWidth="6" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M11 62h69" stroke={color} strokeWidth="5" strokeLinecap="round" />
+      <path d="M48 64h.1M59 64h.1M70 64h.1" stroke={steamColor} strokeWidth="6" strokeLinecap="round" />
     </svg>
   );
 }
@@ -2363,6 +2441,11 @@ export default function PhotographerPage() {
           t.category
             ? `${t.roomNumber}室 · ${t.category.name} · ${taskCategoryDurationCaption(t.category, t.priority)}`
             : `${t.roomNumber}室`;
+        const plainWaitingTask = allTasks.find((t: typeof allTasks[0]) =>
+          t.assistantId === p.id &&
+          taskStatusForProfile(t, p.id) === "waiting" &&
+          !isMapDeferredIroningWaitingTask(t)
+        ) ?? null;
 
         const pausedElapsedFor = (t: typeof allTasks[0]) =>
           effectiveWorkMinutesFromApi(
@@ -2461,17 +2544,14 @@ export default function PhotographerPage() {
           finalStatus = "busy";
           currentRoom = null;
           setPausedMarker(pausedTask);
-        } else {
+        } else if (plainWaitingTask) {
           // 仅有 waiting 任务（普通待就位）
-          const waitTask = allTasks.find((t: typeof allTasks[0]) => t.assistantId === p.id && taskStatusForProfile(t, p.id) === "waiting");
-          if (waitTask) {
-            finalStatus = "assigned";
-            currentRoom = waitTask.roomNumber;
-            // 插单完成后，原任务从 paused 恢复为 waiting（通常仍保留 startedAt）
-            // 这时地图应显示：正常饱和度头像 + 蓝色扩散脉冲外圈（代表等待就位）
-            if (waitTask.startedAt) {
-              resumingFromPause = true;
-            }
+          finalStatus = "assigned";
+          currentRoom = plainWaitingTask.roomNumber;
+          // 插单完成后，原任务从 paused 恢复为 waiting（通常仍保留 startedAt）
+          // 这时地图应显示：正常饱和度头像 + 蓝色扩散脉冲外圈（代表等待就位）
+          if (plainWaitingTask.startedAt) {
+            resumingFromPause = true;
           }
         }
 
@@ -2485,7 +2565,7 @@ export default function PhotographerPage() {
                   executingTask &&
                   executingTask.parentTaskId === preemptedWaitingTask.id
                 ? executingTask
-                : (executingTask || pausedTask || collaboratingTask || allTasks.find((t: typeof allTasks[0]) => t.assistantId === p.id && taskStatusForProfile(t, p.id) === "waiting") || null);
+                : (executingTask || pausedTask || collaboratingTask || plainWaitingTask || null);
         let currentTask: string | null = null;
         if (descTask) {
           const line = formatMapTaskElapsedLine(descTask, nowMs);
@@ -3670,8 +3750,17 @@ export default function PhotographerPage() {
         body: JSON.stringify({ action, actorAssistantId: profile?.id }),
       });
       if (!res.ok) {
-        const errText = await res.text().catch(() => "");
+        const data = await res.clone().json().catch(() => null) as { code?: string; error?: string } | null;
+        const errText = data?.error ?? await res.text().catch(() => "");
         console.error("任务状态更新失败", res.status, errText);
+        if (action === "start") {
+          showTaskCreateError(
+            data?.code === "ironing_machine_busy"
+              ? "当前区域熨烫机正在使用，请等待上一位助理完成后再开始"
+              : data?.error || "任务开始失败，请稍后重试",
+            true,
+          );
+        }
         return;
       }
       // 完成任务时，检查下一个待就位任务；顶部位置由任务/驻点派生，不再覆盖助理默认棚位
@@ -3712,7 +3801,7 @@ export default function PhotographerPage() {
     } catch (e) {
       console.error("Failed to update task status", e);
     }
-  }, [currentRawTask, profile, refreshAssistants]);
+  }, [currentRawTask, profile, refreshAssistants, showTaskCreateError]);
 
   const handleResumePausedTask = useCallback(async (task: TaskFromAPI) => {
     if (manualPauseSlide) return;
@@ -4109,11 +4198,14 @@ export default function PhotographerPage() {
       .sort((a, b) => a.sortRank - b.sortRank || a.id - b.id),
     [activeBuilding?.ironingMachines],
   );
+  const displayIroningMachines = useMemo(
+    () => [...(activeBuilding?.ironingMachines ?? [])].sort((a, b) => a.sortRank - b.sortRank || a.id - b.id),
+    [activeBuilding?.ironingMachines],
+  );
   const activeIroningWorkItems = useMemo(() => {
     const nowMs = now.getTime();
     const profileById = new Map(allProfiles.map((item) => [item.id, item]));
     const dockAssistantById = new Map(assistants.map((item) => [item.id, item]));
-    let machineIndex = 0;
 
     return areaTasks
       .filter((task) => isIroningTask(task) && task.status === "executing" && !!task.assistantId)
@@ -4128,9 +4220,9 @@ export default function PhotographerPage() {
         );
         const profileAssistant = profileById.get(assistantId);
         const dockAssistant = dockAssistantById.get(assistantId);
-        const machine = availableIroningMachines[machineIndex] ?? null;
-        machineIndex += 1;
         const durationLabel = taskCategoryDurationCaption(task.category, task.priority);
+        const capMin = taskSlotCapMinutes(task.category);
+        const remainingMin = capMin == null ? null : Math.max(0, capMin - elapsedMin);
         return {
           task,
           assistantId,
@@ -4138,25 +4230,123 @@ export default function PhotographerPage() {
           assistantAvatar: profileAssistant?.avatar ?? dockAssistant?.avatar ?? null,
           elapsedMin,
           overtimeMin,
+          remainingMin,
           durationLabel,
           elapsedLabel: overtimeMin != null
             ? `已进行${fmtMin(elapsedMin)} · 超时${fmtMin(overtimeMin)}`
             : `已进行${fmtMin(elapsedMin)}`,
           taskLabel: `${task.category?.name ?? "熨烫"}任务`,
-          machine,
         };
       })
       .filter((item): item is IroningWorkItem => item !== null);
-  }, [allProfiles, areaTasks, assistants, availableIroningMachines, now]);
-  const activeIroningMachineIds = useMemo(
-    () => new Set(activeIroningWorkItems.map((item) => item.machine?.id).filter((id): id is number => id != null)),
-    [activeIroningWorkItems],
+  }, [allProfiles, areaTasks, assistants, now]);
+  const waitingIroningWorkItems = useMemo(() => {
+    const profileById = new Map(allProfiles.map((item) => [item.id, item]));
+    const dockAssistantById = new Map(assistants.map((item) => [item.id, item]));
+
+    return areaTasks
+      .filter((task) =>
+        isIroningTask(task) &&
+        task.status === "waiting" &&
+        (task.ironingStage === "waiting_machine" || isAssignedIroningReadyTask(task)) &&
+        !!task.assistantId
+      )
+      .sort((a, b) =>
+        ironingQueueOrderMs(a) - ironingQueueOrderMs(b) ||
+        a.priority - b.priority ||
+        a.id.localeCompare(b.id)
+      )
+      .map((task): IroningWorkItem | null => {
+        const assistantId = task.assistantId;
+        if (!assistantId) return null;
+        const profileAssistant = profileById.get(assistantId);
+        const dockAssistant = dockAssistantById.get(assistantId);
+        const durationLabel = taskCategoryDurationCaption(task.category, task.priority);
+        return {
+          task,
+          assistantId,
+          assistantName: profileAssistant?.name ?? dockAssistant?.name ?? task.assistant?.name ?? "未命名助理",
+          assistantAvatar: profileAssistant?.avatar ?? dockAssistant?.avatar ?? null,
+          elapsedMin: 0,
+          overtimeMin: null,
+          remainingMin: null,
+          durationLabel,
+          elapsedLabel: isAssignedIroningReadyTask(task, assistantId) ? "准备熨烫" : "等待熨烫机",
+          taskLabel: `${task.category?.name ?? "熨烫"}任务`,
+        };
+      })
+      .filter((item): item is IroningWorkItem => item !== null);
+  }, [allProfiles, areaTasks, assistants]);
+  const ironingAssistantCapacity = availableIroningMachines.length;
+  const sortedWaitingIroningWorkItems = useMemo(
+    () => [...waitingIroningWorkItems].sort((a, b) =>
+      ironingQueueOrderMs(a.task) - ironingQueueOrderMs(b.task) ||
+      a.task.priority - b.task.priority ||
+      a.task.id.localeCompare(b.task.id)
+    ),
+    [waitingIroningWorkItems],
+  );
+  const ironingMachineRows = useMemo(() => {
+    let workIndex = 0;
+    let readyIndex = 0;
+    const rows = displayIroningMachines.map((machine) => {
+      let workItem: IroningWorkItem | null = null;
+      let readyItem: IroningWorkItem | null = null;
+      if (machine.status === "normal") {
+        workItem = activeIroningWorkItems[workIndex] ?? null;
+        workIndex += 1;
+        if (!workItem) {
+          readyItem = sortedWaitingIroningWorkItems[readyIndex] ?? null;
+          if (readyItem) readyIndex += 1;
+        }
+      }
+      return { machine, workItem, readyItem, queuedItems: [] as IroningWorkItem[] };
+    });
+    const assignedReadyTaskIds = new Set(rows.map((row) => row.readyItem?.task.id).filter((id): id is string => Boolean(id)));
+    const remainingQueuedItems = [
+      ...activeIroningWorkItems.slice(availableIroningMachines.length),
+      ...sortedWaitingIroningWorkItems.filter((item) => !assignedReadyTaskIds.has(item.task.id)),
+    ].sort((a, b) =>
+      ironingQueueOrderMs(a.task) - ironingQueueOrderMs(b.task) ||
+      a.task.priority - b.task.priority ||
+      a.task.id.localeCompare(b.task.id)
+    );
+    const normalRows = rows.filter((row) => row.machine.status === "normal");
+    if (normalRows.length > 0) {
+      const machineTimeline = normalRows.map((row) => ({
+        row,
+        availableInMinutes: row.workItem
+          ? row.workItem.remainingMin ?? ironingQueueEstimateMinutes(row.workItem.task)
+          : row.readyItem
+            ? ironingQueueEstimateMinutes(row.readyItem.task)
+            : 0,
+      }));
+      remainingQueuedItems.forEach((item) => {
+        machineTimeline.sort((a, b) =>
+          a.availableInMinutes - b.availableInMinutes ||
+          a.row.machine.sortRank - b.row.machine.sortRank ||
+          a.row.machine.id - b.row.machine.id
+        );
+        const target = machineTimeline[0];
+        target.row.queuedItems.push(item);
+        target.availableInMinutes += ironingQueueEstimateMinutes(item.task);
+      });
+    }
+    const rowRank = ({ machine, workItem }: (typeof rows)[number]) => {
+      if (workItem) return 0;
+      if (machine.status === "normal") return 1;
+      return 2;
+    };
+    return rows.sort((a, b) => rowRank(a) - rowRank(b) || a.machine.sortRank - b.machine.sortRank || a.machine.id - b.machine.id);
+  }, [activeIroningWorkItems, availableIroningMachines.length, displayIroningMachines, sortedWaitingIroningWorkItems]);
+  const queuedIroningWorkItems = useMemo(
+    () => ironingMachineRows.flatMap((row) => row.queuedItems),
+    [ironingMachineRows],
   );
   const ironingWorkByAssistantId = useMemo(
     () => new Map(activeIroningWorkItems.map((item) => [item.assistantId, item])),
     [activeIroningWorkItems],
   );
-  const ironingMachineOverCapacity = Math.max(0, activeIroningWorkItems.length - availableIroningMachines.length);
   const areaPublicQueueRows = useMemo(
     () => publicQueueDisplayTasks.slice(0, 10),
     [publicQueueDisplayTasks],
@@ -4808,93 +4998,84 @@ export default function PhotographerPage() {
 	                </div>
               )}
             </div>
-            <div
-              className={`pointer-events-auto absolute right-6 top-5 z-30 w-[min(330px,calc(100%-48px))] rounded-[22px] border px-3 py-2.5 text-left shadow-xl backdrop-blur-2xl ${
-                resolvedTheme === "dark"
-                  ? "border-white/[0.12] bg-slate-950/68 text-slate-100 shadow-black/32"
-                  : "border-white/75 bg-white/70 text-slate-700 shadow-slate-900/10"
-              }`}
-              onMouseDown={(e) => e.stopPropagation()}
-            >
-              <div className="flex items-center justify-between gap-3">
-                <div className="flex min-w-0 items-center gap-2">
-                  <span className="grid h-8 w-8 shrink-0 place-items-center rounded-xl border-2 border-[#f05b51] bg-white/88 shadow-sm">
-                    <IroningMachineIcon className="h-5 w-5" />
-                  </span>
-                  <div className="min-w-0">
-                    <p className="truncate text-[12px] font-extrabold text-[--text-primary]">熨烫机</p>
-                    <p className="text-[10px] font-bold text-[--text-muted]">
-                      {Math.min(activeIroningWorkItems.length, availableIroningMachines.length)}台工作中 · {availableIroningMachines.length}台可用
-                    </p>
-                  </div>
-                </div>
-                <span className={`shrink-0 rounded-full px-2 py-1 text-[11px] font-black ${
-                  ironingMachineOverCapacity > 0
-                    ? "bg-red-500 text-white"
-                    : activeIroningWorkItems.length > 0
-                      ? "bg-red-500/12 text-red-500"
-                      : "bg-slate-500/10 text-[--text-muted]"
-                }`}>
-                  {activeIroningWorkItems.length}
-                </span>
-              </div>
-
-              {ironingMachineOverCapacity > 0 && (
-                <div className="mt-2 rounded-xl border border-red-200/70 bg-red-50/88 px-2.5 py-1.5 text-[10px] font-extrabold text-red-600">
-                  熨烫任务超过可用机器 {ironingMachineOverCapacity} 个，请先增加机器或调整维修状态
-                </div>
-              )}
-
-              {activeIroningWorkItems.length > 0 ? (
-                <div className="mt-2 space-y-1.5">
-                  {activeIroningWorkItems.slice(0, 4).map((item) => {
-                    const hasMachine = !!item.machine;
-                    return (
-                      <div key={item.task.id} className="flex min-w-0 items-center justify-end gap-1.5">
-                        <div className={`min-w-0 flex-1 rounded-xl border px-2.5 py-1.5 ${
-                          item.overtimeMin != null
-                            ? "border-red-300 bg-red-50/90 text-red-600"
-                            : resolvedTheme === "dark"
-                              ? "border-white/[0.10] bg-white/[0.08] text-slate-100"
-                              : "border-[#f05b51]/70 bg-white/90 text-[#f05b51]"
-                        }`}>
-                          <p className="truncate text-[11px] font-extrabold">{item.taskLabel}</p>
-                          <p className="mt-0.5 truncate text-[10px] font-extrabold opacity-80">
-                            {item.durationLabel} · {item.elapsedLabel}
-                          </p>
-                        </div>
-                        <span className="flex h-8 w-8 shrink-0 items-center justify-center overflow-hidden rounded-full bg-slate-200 text-[10px] font-black text-white ring-2 ring-white/90 shadow-sm">
-                          {item.assistantAvatar ? (
-                            <img src={item.assistantAvatar} alt={item.assistantName} className="h-full w-full object-cover" />
-                          ) : (
-                            <span className="flex h-full w-full items-center justify-center bg-gradient-to-br from-slate-300 to-slate-500">
-                              {item.assistantName.slice(0, 1)}
-                            </span>
-                          )}
-                        </span>
+            {(ironingMachineRows.length > 0 || queuedIroningWorkItems.length > 0) && (
+              <div
+                className="pointer-events-auto absolute right-5 top-5 z-30 flex flex-col items-end gap-1.5"
+                onMouseDown={(e) => e.stopPropagation()}
+              >
+                {ironingMachineRows.map(({ machine, workItem, readyItem, queuedItems }) => {
+                  const tone = machine.status === "maintenance" ? "maintenance" : workItem ? "busy" : "idle";
+                  const machineStatusText = tone === "busy" ? "使用中" : tone === "maintenance" ? "维修不可用" : "空闲";
+                  const rowQueuedItems = [...queuedItems, ...(readyItem ? [readyItem] : [])].slice().reverse();
+                  const queuedStatusLabel = (queuedItem: IroningWorkItem) => {
+                    if (workItem) return "队列中";
+                    return isAssignedIroningReadyTask(queuedItem.task, queuedItem.assistantId) ? "准备熨烫" : "等待熨烫机";
+                  };
+                  return (
+                    <div key={machine.id} className="flex h-9 items-center justify-end gap-1.5">
+                      {rowQueuedItems.map((queuedItem) => (
                         <span
-                          className={`grid h-8 w-8 shrink-0 place-items-center rounded-xl border-2 bg-white/88 shadow-sm ${
-                            hasMachine ? "border-[#f05b51]" : "border-red-400 border-dashed"
-                          }`}
-                          title={item.machine?.name ?? "暂无可用熨烫机"}
+                          key={`queued-ironing-${queuedItem.task.id}`}
+                          className="group relative z-0 flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-[10px] font-black text-white transition-transform hover:z-[80] hover:scale-105"
                         >
-                          <IroningMachineIcon className="h-5 w-5" muted={!hasMachine} />
+                          <span className="flex h-full w-full overflow-hidden rounded-full bg-slate-200 ring-2 ring-slate-300/90 shadow-sm">
+                            {queuedItem.assistantAvatar ? (
+                              <img src={queuedItem.assistantAvatar} alt={queuedItem.assistantName} className="h-full w-full object-cover" />
+                            ) : (
+                              <span className="flex h-full w-full items-center justify-center bg-gradient-to-br from-slate-300 to-slate-500">
+                                {queuedItem.assistantName.slice(0, 1)}
+                              </span>
+                            )}
+                          </span>
+                          <span className="pointer-events-none absolute right-full top-1/2 z-[90] mr-2 hidden min-w-[132px] -translate-y-1/2 rounded-xl bg-white/96 px-3 py-2 text-left text-[11px] font-extrabold text-slate-700 shadow-lg ring-1 ring-slate-200/80 backdrop-blur group-hover:block">
+                            <span className="block text-slate-900">{queuedItem.durationLabel}熨烫任务</span>
+                            <span className="mt-0.5 block text-blue-600">
+                              {queuedStatusLabel(queuedItem)}
+                            </span>
+                          </span>
                         </span>
-                      </div>
-                    );
-                  })}
-                  {activeIroningWorkItems.length > 4 && (
-                    <p className="text-right text-[10px] font-extrabold text-[--text-muted]">
-                      另有 {activeIroningWorkItems.length - 4} 个熨烫任务
-                    </p>
-                  )}
-                </div>
-              ) : (
-                <p className="mt-2 rounded-xl bg-slate-500/8 px-2.5 py-1.5 text-center text-[10px] font-bold text-[--text-muted]">
-                  当前暂无熨烫任务
-                </p>
-              )}
-            </div>
+                      ))}
+                      {workItem && (
+                        <span
+                          className="group relative z-0 flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-[10px] font-black text-white transition-transform hover:z-[80] hover:scale-105"
+                        >
+                          <span className="flex h-full w-full overflow-hidden rounded-full bg-slate-200 ring-2 ring-slate-300/90 shadow-sm">
+                            {workItem.assistantAvatar ? (
+                              <img src={workItem.assistantAvatar} alt={workItem.assistantName} className="h-full w-full object-cover" />
+                            ) : (
+                              <span className="flex h-full w-full items-center justify-center bg-gradient-to-br from-slate-300 to-slate-500">
+                                {workItem.assistantName.slice(0, 1)}
+                              </span>
+                            )}
+                          </span>
+                          <span className="pointer-events-none absolute right-full top-1/2 z-[90] mr-2 hidden min-w-[156px] -translate-y-1/2 rounded-xl bg-white/96 px-3 py-2 text-left text-[11px] font-extrabold text-slate-700 shadow-lg ring-1 ring-slate-200/80 backdrop-blur group-hover:block">
+                            <span className="block text-slate-900">{workItem.durationLabel}熨烫任务</span>
+                            {workItem.overtimeMin == null && (
+                              <span className="mt-0.5 block text-orange-500">已进行{fmtIroningHoverTime(workItem.elapsedMin)}</span>
+                            )}
+                            <span className={workItem.overtimeMin != null ? "mt-0.5 block text-red-600" : "mt-0.5 block text-slate-900"}>
+                              {workItem.overtimeMin != null
+                                ? `已超时${fmtIroningHoverTime(workItem.overtimeMin)}`
+                                : workItem.remainingMin == null
+                                  ? "预计剩余时间--"
+                                  : `预计剩余时间${fmtIroningHoverTime(workItem.remainingMin)}`}
+                            </span>
+                          </span>
+                        </span>
+                      )}
+                      <span
+                        className="group relative grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-white/72 shadow-sm ring-1 ring-white/80 backdrop-blur transition-transform hover:scale-105"
+                      >
+                        <IroningMachineIcon className="h-6 w-6" tone={tone} />
+                        <span className="pointer-events-none absolute right-full top-1/2 mr-2 hidden -translate-y-1/2 whitespace-nowrap rounded-xl bg-white/96 px-3 py-2 text-[11px] font-extrabold text-slate-700 shadow-lg ring-1 ring-slate-200/80 backdrop-blur group-hover:block">
+                          {machineStatusText}
+                        </span>
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
         {activeBuilding?.floorPlanUrl ? (
           <div
             ref={mapInnerRef}
@@ -4964,42 +5145,6 @@ export default function PhotographerPage() {
                 </div>
               );
             })()}
-            {/* 熨烫机点位 */}
-            {(activeBuilding.ironingMachines ?? []).map((machine) => {
-              const isMaintenance = machine.status === "maintenance";
-              const isWorking = activeIroningMachineIds.has(machine.id);
-              return (
-                <div
-                  key={`ironing-machine-${machine.id}`}
-                  className="absolute z-[6] flex flex-col items-center"
-                  style={{
-                    left: `${machine.xPosition}%`,
-                    top: `${machine.yPosition}%`,
-                    transform: "translate(-50%, -50%)",
-                    opacity: isMaintenance ? 0.52 : 1,
-                    filter: isMaintenance ? "grayscale(1)" : "none",
-                  }}
-                  title={`${machine.name} · ${isMaintenance ? "维修不可用" : isWorking ? "工作中" : "正常运行"}`}
-                  onMouseDown={(e) => e.stopPropagation()}
-                >
-                  <div
-                    className="relative grid h-8 w-8 place-items-center rounded-lg border-2 bg-white/86 shadow-[0_8px_18px_rgba(15,23,42,0.12)] backdrop-blur"
-                    style={{ borderColor: isMaintenance ? "#94a3b8" : "#f05b51" }}
-                  >
-                    {isWorking && (
-                      <div className="pointer-events-none absolute -inset-1.5 rounded-xl bg-red-500/20 animate-pulse" />
-                    )}
-                    <IroningMachineIcon muted={isMaintenance} className="relative z-[1] h-5 w-5" />
-                  </div>
-                  <span
-                    className="mt-1 rounded px-1.5 py-0.5 text-[9px] font-extrabold text-white shadow-sm"
-                    style={{ backgroundColor: isMaintenance ? "rgba(100,116,139,0.78)" : "rgba(240,91,81,0.84)" }}
-                  >
-                    {isMaintenance ? "维修" : isWorking ? "工作中" : machine.name}
-                  </span>
-                </div>
-              );
-            })}
             {/* 助理地图标记 */}
             {(() => {
               // 允许同一助理同时在多个坐标出现标记：
@@ -5258,9 +5403,7 @@ export default function PhotographerPage() {
               // 执行中 + 紧急插单待处理：原（较低优先）进行中坐标用灰头像 50%，与 pending 蓝点并存
               const dimExecutingForPendingInterrupt =
                 !isAssigned && !a.resumingFromPause && !!a.pendingRoom;
-              const dimExecutingForIroning =
-                !isAssigned && !a.resumingFromPause && ironingWork?.task.id === a.currentTaskId;
-              const dimMainAvatar = dimExecutingForPendingInterrupt || dimExecutingForIroning;
+              const dimMainAvatar = dimExecutingForPendingInterrupt;
 
               const mainMarker = (
                 <div
@@ -5320,11 +5463,6 @@ export default function PhotographerPage() {
                           <div className="w-full h-full bg-gradient-to-br from-orange-200 to-orange-400 flex items-center justify-center text-white text-[8px] font-bold">{a.name[0]}</div>
                         )}
                       </div>
-                    </div>
-                  )}
-                  {dimExecutingForIroning && ironingWork && (
-                    <div className="pointer-events-none absolute left-1/2 top-full mt-1 -translate-x-1/2 whitespace-nowrap rounded-full bg-slate-100/92 px-2 py-0.5 text-[9px] font-extrabold text-slate-500 shadow-sm ring-1 ring-white/80 backdrop-blur">
-                      熨烫中已进行{fmtMin(ironingWork.elapsedMin)}
                     </div>
                   )}
                   {/* Tooltip — hover 显示所有任务 */}
@@ -7021,6 +7159,9 @@ export default function PhotographerPage() {
                     const status = myTaskStatus(task);
                     return { ...taskTimingForProfile(task, profile?.id), status };
                   };
+                  const actionableWaitingTasks = profile
+                    ? actionableWaitingTasksForProfile(taskListRaw, profile.id)
+                    : [];
 
                     const renderPausedBlock = (task: TaskFromAPI, flex: number, withResume = false) => {
                       const leaveSec = totalPausedSecondsFromApi(myTaskTiming(task), now.getTime());
@@ -7145,26 +7286,120 @@ export default function PhotographerPage() {
                     </div>
                   );
 
+                  const startActionLabel = (task: TaskFromAPI) =>
+                    isIroningTask(task) && task.ironingStage === "notified"
+                      ? "开始熨烫"
+                      : "开始任务";
+
+                  const waitingActionTone = (task: TaskFromAPI) =>
+                    isIroningTask(task) && task.ironingStage === "notified"
+                      ? {
+                        card: "border-lime-200/70 bg-lime-400/18 hover:bg-lime-400/28",
+                        dotWrap: "bg-lime-500/18",
+                        dot: "bg-lime-500",
+                        title: "text-lime-700",
+                        meta: "text-lime-700/80",
+                        tag: "bg-lime-100/80 text-lime-700",
+                      }
+                      : {
+                        card: "border-blue-200/60 bg-blue-400/16 hover:bg-blue-400/26",
+                        dotWrap: "bg-blue-500/18",
+                        dot: "bg-blue-500",
+                        title: "text-blue-600",
+                        meta: "text-blue-600/80",
+                        tag: "bg-blue-100/70 text-blue-600",
+                      };
+
+                  const renderWaitingChoiceBlock = (task: TaskFromAPI) => {
+                    const tone = waitingActionTone(task);
+                    return (
+                      <button
+                        type="button"
+                        key={task.id}
+                        onClick={() => handleAssistantStatusChange("start", task)}
+                        className={`flex min-h-0 flex-1 items-center gap-2 rounded-xl border px-2.5 py-2 text-left shadow-sm transition-all hover:translate-x-0.5 active:scale-[0.99] ${tone.card}`}
+                      >
+                        <div className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full ${tone.dotWrap}`}>
+                          <div className={`h-4 w-4 rounded-full ${tone.dot}`} />
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <div className="flex min-w-0 items-center gap-1.5">
+                            <span className={`truncate text-[14px] font-extrabold leading-tight ${tone.title}`}>
+                              {startActionLabel(task)}
+                            </span>
+                            <span className={`shrink-0 rounded-md px-1.5 py-0.5 text-[9px] font-extrabold ${tone.tag}`}>
+                              {isIroningTask(task) && task.ironingStage === "notified" ? "准备熨烫" : "待就位"}
+                            </span>
+                          </div>
+                          <p className={`mt-0.5 truncate text-[11px] font-semibold ${tone.meta}`}>
+                            {task.roomNumber}室 · {task.photographer?.name ?? "—"} · {assistantCatName(task)}
+                          </p>
+                          <p className={`mt-0.5 truncate text-[10px] ${tone.meta}`}>
+                            {taskCategoryDurationCaption(task.category, task.priority)}
+                          </p>
+                        </div>
+                      </button>
+                    );
+                  };
+
+                  const renderWaitingChoices = (tasks: TaskFromAPI[]) => (
+                    <div className="flex-1 min-h-0 w-full rounded-xl bg-white/18 p-2">
+                      <div className="mb-1.5 flex items-center justify-between gap-2 px-0.5">
+                        <span className="text-[11px] font-extrabold text-[--text-primary]">选择要开始的任务</span>
+                        <span className="rounded-md bg-white/55 px-1.5 py-0.5 text-[9px] font-extrabold text-[--text-muted]">
+                          {tasks.length} 个可选
+                        </span>
+                      </div>
+                      <div className="flex h-[calc(100%-1.375rem)] min-h-0 flex-col gap-1.5">
+                        {tasks.map(renderWaitingChoiceBlock)}
+                      </div>
+                    </div>
+                  );
+
+                  const renderPassiveIroningWaitingBlock = (task: TaskFromAPI, flex: number) => (
+                    <div
+                      key={task.id}
+                      className="w-full min-h-0 rounded-xl bg-emerald-400/12 flex flex-col items-center justify-center gap-1.5 pt-2 pb-1.5 px-2"
+                      style={flexStyle(flex)}
+                    >
+                      <div className="w-10 max-w-full min-w-0 min-h-0 shrink-[2] max-h-[min(2.5rem,28%)] h-[min(2.5rem,28%)] rounded-full bg-emerald-500/16 flex items-center justify-center overflow-hidden">
+                        <div className="min-w-0 min-h-0 w-[45%] h-[45%] max-w-[min(72%,1.35rem)] max-h-[min(72%,1.35rem)] rounded-full bg-emerald-500/80" />
+                      </div>
+                      <span className="text-[16px] font-extrabold text-emerald-700">
+                        {task.ironingStage === "notified" ? "准备熨烫" : "等待熨烫机"}
+                      </span>
+                      {lineRoomPhotoCategory(task, "text-emerald-700/80")}
+                      <p className="text-[11px] text-emerald-700/70 text-center px-2">
+                        熨烫机空出后再开始，可先处理其他待就位任务
+                      </p>
+                    </div>
+                  );
+
                   // 渲染单个任务区块（正常流程）
                   const renderTaskBlock = (task: TaskFromAPI, flex: number) => {
                     const status = myTaskStatus(task);
+                    if (isPassiveIroningWaitingTask(task)) return renderPassiveIroningWaitingBlock(task, flex);
                     if (status === "paused") return renderPausedBlock(task, flex);
                     if (status === "waiting") {
+                      const readyIroning = isIroningTask(task) && task.ironingStage === "notified";
+                      const tone = waitingActionTone(task);
                       return (
                         <button
                           type="button"
                           key={task.id}
                           onClick={() => handleAssistantStatusChange("start", task)}
-                          className="w-full min-h-0 rounded-xl bg-blue-400/20 hover:bg-blue-400/30 flex flex-col items-center justify-center gap-1.5 pt-2 pb-1.5 cursor-pointer transition-colors active:scale-[0.98]"
+                          className={`w-full min-h-0 rounded-xl flex flex-col items-center justify-center gap-1.5 pt-2 pb-1.5 cursor-pointer transition-colors active:scale-[0.98] ${readyIroning ? "bg-lime-400/20 hover:bg-lime-400/30" : "bg-blue-400/20 hover:bg-blue-400/30"}`}
                           style={flexStyle(flex)}
                         >
-                          <div className="w-10 max-w-full min-w-0 min-h-0 shrink-[2] max-h-[min(2.5rem,28%)] h-[min(2.5rem,28%)] rounded-full bg-blue-500/20 flex items-center justify-center overflow-hidden">
-                            <div className="min-w-0 min-h-0 w-[45%] h-[45%] max-w-[min(72%,1.35rem)] max-h-[min(72%,1.35rem)] rounded-full bg-blue-500" />
+                          <div className={`w-10 max-w-full min-w-0 min-h-0 shrink-[2] max-h-[min(2.5rem,28%)] h-[min(2.5rem,28%)] rounded-full ${tone.dotWrap} flex items-center justify-center overflow-hidden`}>
+                            <div className={`min-w-0 min-h-0 w-[45%] h-[45%] max-w-[min(72%,1.35rem)] max-h-[min(72%,1.35rem)] rounded-full ${tone.dot}`} />
                           </div>
-                          <span className="text-[16px] font-extrabold text-blue-600">点击开始任务</span>
-                          {lineRoomPhotoCategory(task, "text-blue-600/80")}
-                          <p className="text-[11px] text-blue-600/70 text-center px-2">
-                            {taskCategoryDurationCaption(task.category, task.priority)} · 待就位
+                          <span className={`text-[16px] font-extrabold ${tone.title}`}>
+                            {readyIroning ? "点击开始熨烫" : "点击开始任务"}
+                          </span>
+                          {lineRoomPhotoCategory(task, tone.meta)}
+                          <p className={`text-[11px] ${tone.meta} text-center px-2`}>
+                            {taskCategoryDurationCaption(task.category, task.priority)} · {readyIroning ? "准备熨烫" : "待就位"}
                           </p>
                         </button>
                       );
@@ -7290,6 +7525,10 @@ export default function PhotographerPage() {
                         {renderPausedBlock(pausedRawTask, 2, true)}
                       </div>
                     );
+                  }
+
+                  if (!pausedRawTask && actionableWaitingTasks.length > 1) {
+                    return renderWaitingChoices(actionableWaitingTasks);
                   }
 
                   // 场景2：已暂停 + 待就位插单 → 暂停 1/3，待就位（点击开始）2/3

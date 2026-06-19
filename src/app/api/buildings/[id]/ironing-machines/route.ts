@@ -12,16 +12,6 @@ function clampPercent(value: unknown, fallback: number): number {
   return Math.min(100, Math.max(0, Math.round(num * 100) / 100));
 }
 
-function machineSuffix(index: number): string {
-  let n = Math.max(0, index);
-  let text = "";
-  do {
-    text = String.fromCharCode(65 + (n % 26)) + text;
-    n = Math.floor(n / 26) - 1;
-  } while (n >= 0);
-  return text;
-}
-
 async function nextMachineName(buildingId: number): Promise<string> {
   const existing = await prisma.ironingMachine.findMany({
     where: { buildingId },
@@ -30,7 +20,7 @@ async function nextMachineName(buildingId: number): Promise<string> {
   });
   const names = new Set(existing.map((item) => item.name));
   for (let index = 0; index < 702; index += 1) {
-    const name = `熨烫机${machineSuffix(index)}`;
+    const name = `熨烫机${index + 1}`;
     if (!names.has(name)) return name;
   }
   return `熨烫机${existing.length + 1}`;

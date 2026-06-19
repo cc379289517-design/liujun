@@ -21,6 +21,18 @@ import {
   EATING_OVERTIME_ALERT_CONFIG_KEY,
   EATING_REENTRY_COOLDOWN_CONFIG_KEY,
 } from "@/lib/eatingPresence";
+import {
+  DEFAULT_IRONING_CONFIRM_TIMEOUT_SEC,
+  DEFAULT_IRONING_MACHINE_CLAIM_TTL_MIN,
+  DEFAULT_IRONING_PREP_WINDOW_MIN,
+  IRONING_CONFIRM_TIMEOUT_SEC_CONFIG_KEY,
+  IRONING_MACHINE_CLAIM_TTL_MIN_CONFIG_KEY,
+  IRONING_PREP_WINDOW_MIN_CONFIG_KEY,
+} from "@/lib/ironingRules";
+import {
+  DEFAULT_STANDBY_REASSIGN_TIMEOUT_MIN,
+  STANDBY_REASSIGN_TIMEOUT_MIN_CONFIG_KEY,
+} from "@/lib/standbyReassignRules";
 
 const P1_DISPATCH_CFG_KEY = "p1_interrupt_dispatch_mode";
 type P1DispatchUi = "priority_tier_rr" | "flat_round_robin";
@@ -126,6 +138,44 @@ const PARAM_DEFS = [
   { key: "ending_alert_min", min: 1, max: 10, step: 1, defaultValue: 2, label: "快结束提醒(分钟)" },
   { key: EATING_OVERTIME_ALERT_CONFIG_KEY, min: 5, max: 120, step: 5, defaultValue: DEFAULT_EATING_OVERTIME_ALERT_MIN, label: "吃饭中超时提醒(分钟)" },
   { key: EATING_REENTRY_COOLDOWN_CONFIG_KEY, min: 5, max: 180, step: 5, defaultValue: DEFAULT_EATING_REENTRY_COOLDOWN_MIN, label: "吃饭再次切换冷却(分钟)" },
+  {
+    key: STANDBY_REASSIGN_TIMEOUT_MIN_CONFIG_KEY,
+    min: 1,
+    max: 120,
+    step: 1,
+    defaultValue: DEFAULT_STANDBY_REASSIGN_TIMEOUT_MIN,
+    label: "待就位超时多久更换派发助理",
+  },
+] as const;
+
+const IRONING_PARAM_DEFS = [
+  {
+    key: IRONING_PREP_WINDOW_MIN_CONFIG_KEY,
+    min: 1,
+    max: 30,
+    step: 1,
+    defaultValue: DEFAULT_IRONING_PREP_WINDOW_MIN,
+    label: "熨烫机准备窗口",
+    unit: "分钟",
+  },
+  {
+    key: IRONING_CONFIRM_TIMEOUT_SEC_CONFIG_KEY,
+    min: 15,
+    max: 300,
+    step: 15,
+    defaultValue: DEFAULT_IRONING_CONFIRM_TIMEOUT_SEC,
+    label: "熨烫机空出确认倒计时",
+    unit: "秒",
+  },
+  {
+    key: IRONING_MACHINE_CLAIM_TTL_MIN_CONFIG_KEY,
+    min: 1,
+    max: 30,
+    step: 1,
+    defaultValue: DEFAULT_IRONING_MACHINE_CLAIM_TTL_MIN,
+    label: "熨烫机使用权保护时间",
+    unit: "分钟",
+  },
 ] as const;
 
 type EditForm = {
@@ -148,6 +198,9 @@ export default function TaskLogicTab({ categories: initCategories, buildings, co
   const [params, setParams] = useState<Record<string, number>>(() => {
     const init: Record<string, number> = {};
     for (const d of PARAM_DEFS) {
+      init[d.key] = Number(config[d.key]?.value ?? d.defaultValue);
+    }
+    for (const d of IRONING_PARAM_DEFS) {
       init[d.key] = Number(config[d.key]?.value ?? d.defaultValue);
     }
     return init;
@@ -689,6 +742,36 @@ export default function TaskLogicTab({ categories: initCategories, buildings, co
               </div>
             </div>
           ))}
+
+          <div className="card p-4 space-y-3">
+            <div>
+              <h4 className="text-xs font-semibold text-[--text-primary]">熨烫机接续规则</h4>
+              <p className="mt-1 text-[10px] leading-relaxed text-[--text-muted]">
+                用于控制熨烫机即将空出时提前多久锁定下一单、助理收到空出提示后的确认等待时间，以及机器空出后队首助理保留使用权多久。
+              </p>
+            </div>
+            {IRONING_PARAM_DEFS.map((def) => (
+              <div key={def.key}>
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-xs text-[--text-secondary]">{def.label}</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="range"
+                    min={def.min}
+                    max={def.max}
+                    step={def.step}
+                    value={params[def.key]}
+                    onChange={(e) => handleParamChange(def.key, Number(e.target.value))}
+                    className="flex-1 accent-purple-500"
+                  />
+                  <span className="text-sm font-medium text-[--text-primary] w-14 text-right">
+                    {params[def.key]} {def.unit}
+                  </span>
+                </div>
+              </div>
+            ))}
+          </div>
 
           <div className="card p-4">
             <div className="flex items-center justify-between mb-2">

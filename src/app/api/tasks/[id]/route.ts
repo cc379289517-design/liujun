@@ -7,6 +7,47 @@ import { flushExecutingSegment } from "@/lib/taskEffectiveTime";
 
 type RouteContext = { params: Promise<{ id: string }> };
 
+function taskTypeGroupName(name: string | null | undefined): string {
+  if (!name) return "其他";
+  if (name === "短时熨烫" || name === "长时熨烫" || name === "熨烫" || name.includes("熨")) return "熨烫";
+  return "其他";
+}
+
+async function ironingMachineAvailabilityForStart(taskId: string): Promise<{ ok: boolean; available: number; executing: number }> {
+  const task = await prisma.bookingTask.findUnique({
+    where: { id: taskId },
+    select: {
+      id: true,
+      locationBuildingId: true,
+      photographer: { select: { buildingId: true } },
+      category: { select: { name: true } },
+    },
+  });
+  if (!task || taskTypeGroupName(task.category?.name) !== "熨烫") {
+    return { ok: true, available: 0, executing: 0 };
+  }
+
+  const buildingId = task.locationBuildingId ?? task.photographer.buildingId;
+  const [available, executing] = await Promise.all([
+    prisma.ironingMachine.count({ where: { buildingId, status: "normal" } }),
+    prisma.bookingTask.count({
+      where: {
+        id: { not: task.id },
+        status: TaskStatus.executing,
+        OR: [
+          { locationBuildingId: buildingId },
+          { locationBuildingId: null, photographer: { buildingId } },
+        ],
+        category: {
+          name: { contains: "熨" },
+        },
+      },
+    }),
+  ]);
+
+  return { ok: executing < available, available, executing };
+}
+
 /**
  * GET /api/tasks/[id] - 获取单个任务详情
  */
@@ -99,6 +140,18 @@ export async function PATCH(request: NextRequest, { params }: RouteContext) {
         const actorId = actorAssistantId ?? task.assistantId;
         if (!actorId) {
           return Response.json({ error: "actorAssistantId required for start" }, { status: 400 });
+        }
+        const ironingAvailability = await ironingMachineAvailabilityForStart(id);
+        if (!ironingAvailability.ok) {
+          return Response.json(
+            {
+              code: "ironing_machine_busy",
+              error: "当前区域熨烫机正在使用，请等待上一位助理完成后再开始",
+              available: ironingAvailability.available,
+              executing: ironingAvailability.executing,
+            },
+            { status: 409 },
+          );
         }
         await updateTaskParticipantStatus(id, actorId, "executing", estMinutes);
         const updated = await prisma.bookingTask.findUnique({ where: { id } });
@@ -290,8 +343,13 @@ export async function PATCH(request: NextRequest, { params }: RouteContext) {
       }
     }
     return Response.json(
-      { error: "Failed to update task", ...(details ? { details } : {}) },
-      { status: 500 }
+      {
+        error: error instanceof Error && error.message.includes("熨烫机")
+          ? error.message
+          : "Failed to update task",
+        ...(details ? { details } : {}),
+      },
+      { status: error instanceof Error && error.message.includes("熨烫机") ? 409 : 500 }
     );
   }
 }

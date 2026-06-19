@@ -18,6 +18,7 @@ import {
   taskCategoryCanBeInterrupted,
   taskLeaveUpperMinutes,
 } from "@/lib/scheduler";
+import { isIroningCategoryName } from "@/lib/ironingRules";
 import {
   PHOTOGRAPHER_LIMIT_QUEUE_CAPACITY,
   PHOTOGRAPHER_LIMIT_QUEUE_LOCK_REASON,
@@ -219,7 +220,7 @@ export async function POST(request: NextRequest) {
 
     const category = await prisma.taskCategory.findUnique({
       where: { id: categoryId },
-      select: { priorityLevel: true, estDuration: true, maxDuration: true },
+      select: { name: true, priorityLevel: true, estDuration: true, maxDuration: true },
     });
 
     if (!category) {
@@ -300,6 +301,14 @@ export async function POST(request: NextRequest) {
           include: TASK_INCLUDE,
         });
         return Response.json(updated, { status: 201 });
+      }
+
+      if (isIroningCategoryName(category.name)) {
+        const finalTask = await prisma.bookingTask.findUnique({
+          where: { id: task.id },
+          include: TASK_INCLUDE,
+        });
+        return Response.json(finalTask ?? task, { status: 201 });
       }
 
       // 同楼座无空闲助理：尝试抢占「已派发、尚在待就位」的较低优先任务（新单更紧急）
