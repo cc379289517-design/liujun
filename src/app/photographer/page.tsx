@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback, useMemo, useRef } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef, type CSSProperties } from "react";
 import { createPortal } from "react-dom";
 import AssistantDock, { type DockAssistant, type NoteEditAnchor, assistantDockDotColor, DOCK_DOT } from "./AssistantDock";
 import {
@@ -84,6 +84,7 @@ const MAP_AWAY_AVATAR_OPACITY = 0.58;
 const MAP_AWAY_AVATAR_BG = "rgba(229, 231, 235, 0.55)";
 const MAP_AWAY_AVATAR_BORDER = "rgba(156, 163, 175, 0.45)";
 type AssistantPresenceState = "online" | "eating" | "on_break";
+type MobileWorkbenchTab = "current" | "map" | "queue" | "me";
 
 function assistantPresenceState(profile: { onlineStatus?: string | null; subStatus?: string | null } | null | undefined): AssistantPresenceState {
   if (profile?.onlineStatus === "on_break" || profile?.onlineStatus === "offline") return "on_break";
@@ -102,6 +103,26 @@ function assistantPresenceMeta(state: AssistantPresenceState) {
 
 function assistantEatingStorageKey(profileId: string): string {
   return `assistant_eating_started_at_${profileId}`;
+}
+
+function safeLocalStorageGet(key: string): string | null {
+  try {
+    return typeof window !== "undefined" ? window.localStorage.getItem(key) : null;
+  } catch {
+    return null;
+  }
+}
+
+function safeLocalStorageSet(key: string, value: string) {
+  try {
+    if (typeof window !== "undefined") window.localStorage.setItem(key, value);
+  } catch {}
+}
+
+function safeLocalStorageRemove(key: string) {
+  try {
+    if (typeof window !== "undefined") window.localStorage.removeItem(key);
+  } catch {}
 }
 
 function wait(ms: number) {
@@ -874,9 +895,8 @@ function publicQueueOrderStorageKey(profileId: string, buildingId: number | null
 }
 
 function readPublicQueueSeenEscalations(profileId: string): Set<string> {
-  if (typeof window === "undefined") return new Set();
   try {
-    const parsed = JSON.parse(localStorage.getItem(publicQueueSeenStorageKey(profileId)) || "[]");
+    const parsed = JSON.parse(safeLocalStorageGet(publicQueueSeenStorageKey(profileId)) || "[]");
     return new Set(Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === "string") : []);
   } catch {
     return new Set();
@@ -884,16 +904,15 @@ function readPublicQueueSeenEscalations(profileId: string): Set<string> {
 }
 
 function writePublicQueueSeenEscalations(profileId: string, keys: string[]) {
-  if (typeof window === "undefined" || keys.length === 0) return;
+  if (keys.length === 0) return;
   const seen = readPublicQueueSeenEscalations(profileId);
   keys.forEach((key) => seen.add(key));
-  localStorage.setItem(publicQueueSeenStorageKey(profileId), JSON.stringify([...seen].slice(-300)));
+  safeLocalStorageSet(publicQueueSeenStorageKey(profileId), JSON.stringify([...seen].slice(-300)));
 }
 
 function readPublicQueueLastOrder(profileId: string, buildingId: number | null): string[] {
-  if (typeof window === "undefined") return [];
   try {
-    const parsed = JSON.parse(localStorage.getItem(publicQueueOrderStorageKey(profileId, buildingId)) || "[]");
+    const parsed = JSON.parse(safeLocalStorageGet(publicQueueOrderStorageKey(profileId, buildingId)) || "[]");
     return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === "string") : [];
   } catch {
     return [];
@@ -901,8 +920,7 @@ function readPublicQueueLastOrder(profileId: string, buildingId: number | null):
 }
 
 function writePublicQueueLastOrder(profileId: string, buildingId: number | null, ids: string[]) {
-  if (typeof window === "undefined") return;
-  localStorage.setItem(publicQueueOrderStorageKey(profileId, buildingId), JSON.stringify(ids.slice(0, 80)));
+  safeLocalStorageSet(publicQueueOrderStorageKey(profileId, buildingId), JSON.stringify(ids.slice(0, 80)));
 }
 
 function mergePublicQueueOrder(storedIds: string[], finalIds: string[]): string[] {
@@ -1059,11 +1077,27 @@ function IroningMachineIcon({
   tone = "idle",
   className = "h-5 w-5",
 }: {
-  tone?: "busy" | "idle" | "maintenance";
+  tone?: "busy" | "queue" | "moderate" | "idle" | "maintenance";
   className?: string;
 }) {
-  const color = tone === "busy" ? "#ef4444" : tone === "maintenance" ? "#94a3b8" : "#22c55e";
-  const steamColor = tone === "busy" ? "#fca5a5" : tone === "maintenance" ? "#cbd5e1" : "#86efac";
+  const color = tone === "busy"
+    ? "#ef4444"
+    : tone === "queue"
+      ? "#ef4444"
+    : tone === "moderate"
+      ? "#f59e0b"
+      : tone === "maintenance"
+        ? "#94a3b8"
+        : "#22c55e";
+  const steamColor = tone === "busy"
+    ? "#fca5a5"
+    : tone === "queue"
+      ? "#fca5a5"
+    : tone === "moderate"
+      ? "#fdba74"
+      : tone === "maintenance"
+        ? "#cbd5e1"
+        : "#86efac";
   return (
     <svg className={className} viewBox="0 0 96 96" fill="none" aria-hidden="true">
       <path d="M17 31c6-8-5-13 1-22" stroke={steamColor} strokeWidth="6" strokeLinecap="round" />
@@ -1502,6 +1536,11 @@ export default function PhotographerPage() {
   const [showVenueMenu, setShowVenueMenu] = useState(false);
   const [showMapBuildingMenu, setShowMapBuildingMenu] = useState(false);
   const [areaDataPanelOpen, setAreaDataPanelOpen] = useState(false);
+  const [ironingQueueMode, setIroningQueueMode] = useState<"auto" | "fixed">("auto");
+  const [ironingQueueFixedOpen, setIroningQueueFixedOpen] = useState(false);
+  const [ironingQueueHoverOpen, setIroningQueueHoverOpen] = useState(false);
+  const ironingQueueHoverCloseTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const ironingQueueRef = useRef<HTMLDivElement | null>(null);
   const [locationMenu, setLocationMenu] = useState<"building" | "venue" | null>(null);
   const locationMenuCloseTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const mapBuildingMenuCloseTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -1530,6 +1569,8 @@ export default function PhotographerPage() {
   const [collaborationMaxByBuilding, setCollaborationMaxByBuilding] = useState<Record<number, number>>({});
   const [collaborationQueueAutoCloseLimit, setCollaborationQueueAutoCloseLimit] = useState(10);
   const [showIdentityModal, setShowIdentityModal] = useState(false);
+  const [needsIdentitySelection, setNeedsIdentitySelection] = useState(false);
+  const [identityUrlState, setIdentityUrlState] = useState<"unknown" | "present" | "absent">("unknown");
   const [identityBuildingFilter, setIdentityBuildingFilter] = useState<number | null>(null);
   const [identityBuildingOrder, setIdentityBuildingOrder] = useState<number[]>([]);
   const [allProfiles, setAllProfiles] = useState<{ id: string; name: string; role: string; employeeId: string | null; department: string | null; group: string | null; avatar: string | null; buildingId: number; currentRoom: string | null; activeBuildingId?: number | null; activeRoom?: string | null; status: string; subStatus?: string | null; onlineStatus: string; updatedAt?: string; eatingStartedAt?: string | null; eatingEndedAt?: string | null; building: { id: number; name: string } }[]>([]);
@@ -1554,6 +1595,8 @@ export default function PhotographerPage() {
   /** 当前区域公共队列：供所有人查看未分配、待就位、暂停任务 */
   const [publicQueueRaw, setPublicQueueRaw] = useState<TaskFromAPI[]>([]);
   const [publicQueueOpen, setPublicQueueOpen] = useState(false);
+  const [mobileTab, setMobileTab] = useState<MobileWorkbenchTab>("current");
+  const [mobileQuickBookCategory, setMobileQuickBookCategory] = useState<string | null>(null);
   const [publicQueueVisualOrderIds, setPublicQueueVisualOrderIds] = useState<string[] | null>(null);
   const [publicQueueAnimatingTaskId, setPublicQueueAnimatingTaskId] = useState<string | null>(null);
   const [publicQueueSeenVersion, setPublicQueueSeenVersion] = useState(0);
@@ -1591,6 +1634,42 @@ export default function PhotographerPage() {
     document.addEventListener("pointerdown", closeHelp);
     return () => document.removeEventListener("pointerdown", closeHelp);
   }, [assistantRankingHelpOpen]);
+
+  useEffect(() => {
+    if (ironingQueueMode !== "fixed" || !ironingQueueFixedOpen) return;
+    const closeIroningQueue = (event: PointerEvent) => {
+      const target = event.target;
+      if (target instanceof Node && ironingQueueRef.current?.contains(target)) return;
+      setIroningQueueMode("auto");
+      setIroningQueueFixedOpen(false);
+      setIroningQueueHoverOpen(false);
+    };
+    document.addEventListener("pointerdown", closeIroningQueue);
+    return () => document.removeEventListener("pointerdown", closeIroningQueue);
+  }, [ironingQueueFixedOpen, ironingQueueMode]);
+
+  useEffect(() => () => {
+    if (ironingQueueHoverCloseTimer.current) clearTimeout(ironingQueueHoverCloseTimer.current);
+  }, []);
+
+  const openIroningQueueHover = useCallback(() => {
+    if (ironingQueueHoverCloseTimer.current) clearTimeout(ironingQueueHoverCloseTimer.current);
+    if (ironingQueueMode === "auto") setIroningQueueHoverOpen(true);
+  }, [ironingQueueMode]);
+
+  const closeIroningQueueHoverSoon = useCallback(() => {
+    if (ironingQueueHoverCloseTimer.current) clearTimeout(ironingQueueHoverCloseTimer.current);
+    if (ironingQueueMode === "auto") {
+      ironingQueueHoverCloseTimer.current = setTimeout(() => setIroningQueueHoverOpen(false), 900);
+    }
+  }, [ironingQueueMode]);
+
+  const resetIroningQueueAutoAfterLabelLeave = useCallback(() => {
+    if (ironingQueueMode === "fixed" && !ironingQueueFixedOpen) {
+      setIroningQueueMode("auto");
+      setIroningQueueHoverOpen(false);
+    }
+  }, [ironingQueueFixedOpen, ironingQueueMode]);
 
   const showAssistantScoreBubble = useCallback((assistantId: string, element: HTMLElement, detailCount = 0) => {
     const rect = element.getBoundingClientRect();
@@ -1914,7 +1993,7 @@ export default function PhotographerPage() {
     const key = assistantEatingStorageKey(profile.id);
     const profileEatingStartedAt = profile.eatingStartedAt ? new Date(profile.eatingStartedAt).getTime() : 0;
     const profileUpdatedAt = profile.updatedAt ? new Date(profile.updatedAt).getTime() : 0;
-    const stored = typeof window !== "undefined" ? Number(localStorage.getItem(key)) : 0;
+    const stored = Number(safeLocalStorageGet(key));
     const startedAt = Number.isFinite(profileEatingStartedAt) && profileEatingStartedAt > 0
       ? profileEatingStartedAt
       : Number.isFinite(profileUpdatedAt) && profileUpdatedAt > 0
@@ -1922,8 +2001,8 @@ export default function PhotographerPage() {
       : Number.isFinite(stored) && stored > 0
         ? stored
         : Date.now();
-    if (typeof window !== "undefined" && (!stored || stored <= 0)) {
-      localStorage.setItem(key, String(startedAt));
+    if (!stored || stored <= 0) {
+      safeLocalStorageSet(key, String(startedAt));
     }
     setEatingStartedAt(startedAt);
   }, [profile?.id, profile?.role, profile?.subStatus, profile?.eatingStartedAt, profile?.updatedAt]);
@@ -1954,6 +2033,66 @@ export default function PhotographerPage() {
     }
   }, []);
 
+  const applyWorkbenchProfile = useCallback((selected: typeof allProfiles[0]) => {
+    originalRoomRef.current = selected.currentRoom;
+    originalBuildingIdRef.current = selected.buildingId;
+    const selectedServiceBuildingId = profileServiceBuildingId(selected);
+    const selectedForWorkbench = isAssistantRole(selected.role)
+      ? {
+        ...selected,
+        buildingId: selectedServiceBuildingId,
+        currentRoom: profileServiceRoom(selected),
+      }
+      : selected;
+    setNeedsIdentitySelection(false);
+    setShowIdentityModal(false);
+    setProfile(selectedForWorkbench);
+    setLoginRole(selectedForWorkbench.role);
+    setActiveBuildingId(selectedServiceBuildingId);
+    safeLocalStorageSet("currentProfileId", selectedForWorkbench.id);
+    safeLocalStorageSet("user", JSON.stringify({
+      id: selectedForWorkbench.id,
+      name: selectedForWorkbench.name,
+      employeeId: selectedForWorkbench.employeeId,
+      role: selectedForWorkbench.role,
+    }));
+    const url = new URL(window.location.href);
+    if (url.searchParams.get("profileId") !== selectedForWorkbench.id || url.searchParams.has("employeeId")) {
+      url.searchParams.set("profileId", selectedForWorkbench.id);
+      url.searchParams.delete("employeeId");
+      window.history.replaceState(null, "", url.toString());
+    }
+    if (isAssistantRole(selectedForWorkbench.role)) {
+      refreshReassignmentNotices(selectedForWorkbench.id);
+    } else {
+      setReassignmentNotices([]);
+    }
+    fetch(taskListUrlForProfile(selectedForWorkbench))
+      .then((r) => r.json())
+      .then((taskData) => {
+        if (Array.isArray(taskData)) {
+          const raw = visibleTasksForProfile(taskData as TaskFromAPI[], selectedForWorkbench, selectedServiceBuildingId);
+          setTaskListRaw(raw);
+          setTasks(sortTasksByStatus(raw.map((t) => apiTaskToDisplay(t, isAssistantRole(selectedForWorkbench.role) ? selectedForWorkbench.id : undefined))));
+          if (isAssistantRole(selectedForWorkbench.role)) {
+            setAssistantRawTasks(raw);
+            const { current: active, paused, pending, deferredWaiting } = resolveAssistantTasks(raw, selectedForWorkbench.id);
+            setCurrentRawTask(active);
+            setPausedRawTask(paused);
+            setPendingRawTask(pending);
+            setDeferredWaitingRawTask(deferredWaiting);
+          } else {
+            setAssistantRawTasks([]);
+            setDeferredWaitingRawTask(null);
+            setCurrentRawTask(null);
+            setPausedRawTask(null);
+            setPendingRawTask(null);
+          }
+        }
+      })
+      .catch(console.error);
+  }, [refreshReassignmentNotices]);
+
   // Map pan & zoom state
   const mapContainerRef = useRef<HTMLDivElement>(null);
   const mapInnerRef = useRef<HTMLDivElement>(null);
@@ -1967,11 +2106,26 @@ export default function PhotographerPage() {
   const [mapCoverZoom, setMapCoverZoom] = useState(MAP_BASE_MIN_ZOOM);
   const [mapZoom, setMapZoom] = useState(MAP_BASE_MIN_ZOOM);
   const [mapPan, setMapPan] = useState({ x: 0, y: 0 });
+  const [mapViewportWidth, setMapViewportWidth] = useState(0);
   const [mapPanning, setMapPanning] = useState<{
     startX: number; startY: number; origPanX: number; origPanY: number;
   } | null>(null);
   const mapUserInteractedRef = useRef(false);
   const mapAutoViewKeyRef = useRef("");
+  const mapMarkerViewportScale = useMemo(
+    () => Math.max(0.72, Math.min(1, (mapViewportWidth || 1180) / 1180)),
+    [mapViewportWidth],
+  );
+  const mapLabelViewportScale = useMemo(
+    () => Math.max(0.9, Math.min(1, (mapViewportWidth || 1180) / 1180)),
+    [mapViewportWidth],
+  );
+  const mapMarkerInverseScale = Math.round((1 / Math.pow(Math.max(0.01, mapZoom), 0.72)) * 1000) / 1000;
+  const mapMarkerSizePx = Math.round((30 * mapMarkerViewportScale) * 10) / 10;
+  const mapSlotGapPx = Math.round((24 * mapMarkerViewportScale) * 10) / 10;
+  const mapAreaLabelFontPx = Math.round((13 * mapLabelViewportScale) * 10) / 10;
+  const mapAreaLabelPadXPx = Math.round((10 * mapLabelViewportScale) * 10) / 10;
+  const mapAreaLabelPadYPx = Math.round((5 * mapLabelViewportScale) * 10) / 10;
   const markMapUserInteracted = useCallback(() => {
     mapUserInteractedRef.current = true;
   }, []);
@@ -2176,6 +2330,16 @@ export default function PhotographerPage() {
     window.addEventListener("resize", onResize);
     return () => window.removeEventListener("resize", onResize);
   }, [applyMapViewMode, areaDataPanelOpen, clampMapPan, computeCoverZoom, mapZoom]);
+
+  useEffect(() => {
+    const container = mapContainerRef.current;
+    if (!container) return;
+    const updateSize = () => setMapViewportWidth(container.clientWidth);
+    updateSize();
+    const observer = new ResizeObserver(updateSize);
+    observer.observe(container);
+    return () => observer.disconnect();
+  }, []);
 
   // Reset view when switching buildings
   useEffect(() => {
@@ -2834,7 +2998,12 @@ export default function PhotographerPage() {
   }, [mapZoom, mapPan, clampMapZoom, clampMapPan, hasCrop, markMapUserInteracted]);
 
   useEffect(() => {
-    const saved = localStorage.getItem("themeMode") as ThemeMode | null;
+    const params = new URLSearchParams(window.location.search);
+    setIdentityUrlState(params.has("profileId") || params.has("employeeId") ? "present" : "absent");
+  }, []);
+
+  useEffect(() => {
+    const saved = safeLocalStorageGet("themeMode") as ThemeMode | null;
     if (saved === "light" || saved === "dark" || saved === "auto") {
       setThemeMode(saved);
     }
@@ -2862,67 +3031,45 @@ export default function PhotographerPage() {
   useEffect(() => {
     // 读取登录账号角色
     try {
-      const loginUser = JSON.parse(localStorage.getItem("user") || "null");
+      const loginUser = JSON.parse(safeLocalStorageGet("user") || "null");
       if (loginUser?.role) setLoginRole(loginUser.role);
     } catch {}
-    // Fetch profiles, then pick current identity from localStorage or default
+    // Fetch profiles, then pick current identity from URL or localStorage.
     fetch("/api/profiles")
       .then((r) => r.json())
       .then((data) => {
         if (Array.isArray(data)) {
           setAllProfiles(data);
-          const savedId = typeof window !== "undefined" ? localStorage.getItem("currentProfileId") : null;
+          const params = new URLSearchParams(window.location.search);
+          const urlProfileId = params.get("profileId");
+          const urlEmployeeId = params.get("employeeId")?.trim().toLowerCase();
+          setIdentityUrlState(urlProfileId || urlEmployeeId ? "present" : "absent");
+          const urlMatch = urlProfileId
+            ? data.find((p: { id: string }) => p.id === urlProfileId)
+            : urlEmployeeId
+              ? data.find((p: { employeeId: string | null }) => p.employeeId?.toLowerCase() === urlEmployeeId)
+              : null;
+          const savedId = safeLocalStorageGet("currentProfileId");
           const match = savedId ? data.find((p: { id: string }) => p.id === savedId) : null;
-          // fallback: 登录账号 → 第一个用户
+          // fallback: 登录账号；没有身份时进入选择态，不默认选第一个用户。
           let loginMatch = null;
           try {
-            const loginUser = JSON.parse(localStorage.getItem("user") || "null");
+            const loginUser = JSON.parse(safeLocalStorageGet("user") || "null");
             if (loginUser?.id) loginMatch = data.find((p: { id: string }) => p.id === loginUser.id);
           } catch {}
-          const selected = match || loginMatch || data[0];
+          const selected = urlMatch || match || loginMatch;
           if (selected) {
-            originalRoomRef.current = selected.currentRoom;
-            originalBuildingIdRef.current = selected.buildingId;
-            const selectedServiceBuildingId = profileServiceBuildingId(selected);
-            const selectedForWorkbench = isAssistantRole(selected.role)
-              ? {
-                ...selected,
-                buildingId: selectedServiceBuildingId,
-                currentRoom: profileServiceRoom(selected),
-              }
-              : selected;
-            setProfile(selectedForWorkbench);
-            setActiveBuildingId(selectedServiceBuildingId);
-            if (isAssistantRole(selectedForWorkbench.role)) {
-              refreshReassignmentNotices(selectedForWorkbench.id);
-            } else {
-              setReassignmentNotices([]);
-            }
-            // Fetch tasks for this profile
-            fetch(taskListUrlForProfile(selectedForWorkbench))
-              .then((r) => r.json())
-              .then((taskData) => {
-                if (Array.isArray(taskData)) {
-                  const raw = visibleTasksForProfile(taskData as TaskFromAPI[], selectedForWorkbench, selectedServiceBuildingId);
-                  setTaskListRaw(raw);
-                  setTasks(sortTasksByStatus(raw.map((t) => apiTaskToDisplay(t, isAssistantRole(selectedForWorkbench.role) ? selectedForWorkbench.id : undefined))));
-                  if (isAssistantRole(selectedForWorkbench.role)) {
-                    setAssistantRawTasks(raw);
-                    const { current: active, paused, pending, deferredWaiting } = resolveAssistantTasks(raw, selectedForWorkbench.id);
-                    setCurrentRawTask(active);
-                    setPausedRawTask(paused);
-                    setPendingRawTask(pending);
-                    setDeferredWaitingRawTask(deferredWaiting);
-                  } else {
-                    setAssistantRawTasks([]);
-                    setDeferredWaitingRawTask(null);
-                    setCurrentRawTask(null);
-                    setPausedRawTask(null);
-                    setPendingRawTask(null);
-                  }
-                }
-              })
-              .catch(console.error);
+            applyWorkbenchProfile(selected);
+          } else {
+            setNeedsIdentitySelection(true);
+            setProfile(null);
+            setTasks([]);
+            setTaskListRaw([]);
+            setAssistantRawTasks([]);
+            setCurrentRawTask(null);
+            setPausedRawTask(null);
+            setPendingRawTask(null);
+            setDeferredWaitingRawTask(null);
           }
         }
       })
@@ -2981,7 +3128,23 @@ export default function PhotographerPage() {
         setCollaborationMaxByBuilding(nextCollaborationMaxConfig);
       })
       .catch(console.error);
-  }, [refreshReassignmentNotices]);
+  }, [applyWorkbenchProfile]);
+
+  useEffect(() => {
+    if (profile || allProfiles.length === 0) return;
+    const params = new URLSearchParams(window.location.search);
+    const urlProfileId = params.get("profileId");
+    const urlEmployeeId = params.get("employeeId")?.trim().toLowerCase();
+    if (!urlProfileId && !urlEmployeeId) return;
+    const selected = urlProfileId
+      ? allProfiles.find((p) => p.id === urlProfileId)
+      : allProfiles.find((p) => p.employeeId?.toLowerCase() === urlEmployeeId);
+    if (!selected) return;
+    applyWorkbenchProfile(selected);
+    params.set("profileId", selected.id);
+    params.delete("employeeId");
+    window.history.replaceState(null, "", `${window.location.pathname}?${params.toString()}`);
+  }, [allProfiles, applyWorkbenchProfile, profile]);
 
   const activeBuilding = buildings.find((b) => b.id === activeBuildingId) || null;
   const mapBuildingOptions = useMemo(
@@ -3037,7 +3200,7 @@ export default function PhotographerPage() {
     setThemeMode((prev) => {
       const order: ThemeMode[] = ["light", "dark", "auto"];
       const next = order[(order.indexOf(prev) + 1) % 3];
-      localStorage.setItem("themeMode", next);
+      safeLocalStorageSet("themeMode", next);
       return next;
     });
   }, []);
@@ -3178,7 +3341,17 @@ export default function PhotographerPage() {
   }, [removingTaskId, refreshAssistants]);
 
   const switchIdentity = useCallback((p: typeof allProfiles[0]) => {
-    localStorage.setItem("currentProfileId", p.id);
+    safeLocalStorageSet("currentProfileId", p.id);
+    safeLocalStorageSet("user", JSON.stringify({
+      id: p.id,
+      name: p.name,
+      employeeId: p.employeeId,
+      role: p.role,
+    }));
+    const url = new URL(window.location.href);
+    url.searchParams.set("profileId", p.id);
+    url.searchParams.delete("employeeId");
+    window.history.replaceState(null, "", url.toString());
     setShowIdentityModal(false);
     window.location.reload();
   }, []);
@@ -3280,19 +3453,17 @@ export default function PhotographerPage() {
     const startedAt = Date.now();
     const startedAtIso = new Date(startedAt).toISOString();
 
-    if (typeof window !== "undefined") {
-      const key = assistantEatingStorageKey(profileId);
-      if (nextState === "eating") {
-        const existingStartedAt = previousWasEating && previousPresenceProfile?.eatingStartedAt
-          ? new Date(previousPresenceProfile.eatingStartedAt).getTime()
-          : Number(localStorage.getItem(key));
-        const nextStartedAt = Number.isFinite(existingStartedAt) && existingStartedAt > 0 ? existingStartedAt : startedAt;
-        localStorage.setItem(key, String(nextStartedAt));
-        setEatingStartedAt(nextStartedAt);
-      } else {
-        localStorage.removeItem(key);
-        if (profile?.id === profileId) setEatingStartedAt(null);
-      }
+    const key = assistantEatingStorageKey(profileId);
+    if (nextState === "eating") {
+      const existingStartedAt = previousWasEating && previousPresenceProfile?.eatingStartedAt
+        ? new Date(previousPresenceProfile.eatingStartedAt).getTime()
+        : Number(safeLocalStorageGet(key));
+      const nextStartedAt = Number.isFinite(existingStartedAt) && existingStartedAt > 0 ? existingStartedAt : startedAt;
+      safeLocalStorageSet(key, String(nextStartedAt));
+      setEatingStartedAt(nextStartedAt);
+    } else {
+      safeLocalStorageRemove(key);
+      if (profile?.id === profileId) setEatingStartedAt(null);
     }
 
     setAllProfiles((prev) => prev.map((p) => p.id === profileId ? {
@@ -3340,20 +3511,17 @@ export default function PhotographerPage() {
               eatingEndedAt: previousPresenceProfile.eatingEndedAt,
             } : prev);
           }
-          if (typeof window !== "undefined") {
-            const key = assistantEatingStorageKey(profileId);
-            if (previousWasEating) {
-              const restoredStartedAt = previousPresenceProfile.eatingStartedAt
-                ? new Date(previousPresenceProfile.eatingStartedAt).getTime()
-                : previousPresenceProfile.updatedAt
-                  ? new Date(previousPresenceProfile.updatedAt).getTime()
-                  : Date.now();
-              localStorage.setItem(key, String(restoredStartedAt));
-              if (profile?.id === profileId) setEatingStartedAt(restoredStartedAt);
-            } else {
-              localStorage.removeItem(key);
-              if (profile?.id === profileId) setEatingStartedAt(null);
-            }
+          if (previousWasEating) {
+            const restoredStartedAt = previousPresenceProfile.eatingStartedAt
+              ? new Date(previousPresenceProfile.eatingStartedAt).getTime()
+              : previousPresenceProfile.updatedAt
+                ? new Date(previousPresenceProfile.updatedAt).getTime()
+                : Date.now();
+            safeLocalStorageSet(key, String(restoredStartedAt));
+            if (profile?.id === profileId) setEatingStartedAt(restoredStartedAt);
+          } else {
+            safeLocalStorageRemove(key);
+            if (profile?.id === profileId) setEatingStartedAt(null);
           }
         }
         if (data?.code === "EATING_REENTRY_COOLDOWN") {
@@ -3387,16 +3555,13 @@ export default function PhotographerPage() {
           eatingStartedAt: updated.eatingStartedAt,
           eatingEndedAt: updated.eatingEndedAt,
         } : prev);
-        if (typeof window !== "undefined") {
-          const key = assistantEatingStorageKey(profileId);
-          if (updated.subStatus === ASSISTANT_EATING_SUB_STATUS && updated.eatingStartedAt) {
-            const serverStartedAt = new Date(updated.eatingStartedAt).getTime();
-            localStorage.setItem(key, String(serverStartedAt));
-            setEatingStartedAt(serverStartedAt);
-          } else {
-            localStorage.removeItem(key);
-            setEatingStartedAt(null);
-          }
+        if (updated.subStatus === ASSISTANT_EATING_SUB_STATUS && updated.eatingStartedAt) {
+          const serverStartedAt = new Date(updated.eatingStartedAt).getTime();
+          safeLocalStorageSet(key, String(serverStartedAt));
+          setEatingStartedAt(serverStartedAt);
+        } else {
+          safeLocalStorageRemove(key);
+          setEatingStartedAt(null);
         }
       }
       if (nextState === "eating") {
@@ -4278,6 +4443,7 @@ export default function PhotographerPage() {
       .filter((item): item is IroningWorkItem => item !== null);
   }, [allProfiles, areaTasks, assistants]);
   const ironingAssistantCapacity = availableIroningMachines.length;
+  const freeIroningMachineCount = Math.max(0, ironingAssistantCapacity - activeIroningWorkItems.length);
   const sortedWaitingIroningWorkItems = useMemo(
     () => [...waitingIroningWorkItems].sort((a, b) =>
       ironingQueueOrderMs(a.task) - ironingQueueOrderMs(b.task) ||
@@ -4343,9 +4509,102 @@ export default function PhotographerPage() {
     () => ironingMachineRows.flatMap((row) => row.queuedItems),
     [ironingMachineRows],
   );
+  const ironingQueueOverview = useMemo(() => {
+    const totalNormalMachines = displayIroningMachines.filter((machine) => machine.status === "normal").length;
+    const activeCount = activeIroningWorkItems.length;
+    const waitingCount = waitingIroningWorkItems.length;
+    const freeMachines = Math.max(0, totalNormalMachines - activeCount);
+    let tone: "busy" | "queue" | "moderate" | "idle" = "idle";
+    if (totalNormalMachines > 0) {
+      if (freeMachines > activeCount) tone = "idle";
+      else if (freeMachines > 0) tone = "moderate";
+      else if (waitingCount > 0) tone = "queue";
+      else tone = "busy";
+    }
+    return {
+      tone,
+      label: tone === "busy" ? "繁忙" : tone === "queue" ? "拥挤" : tone === "moderate" ? "适中" : "空闲",
+      totalMachines: totalNormalMachines,
+      freeMachines,
+      waitingCount,
+      activeCount,
+    };
+  }, [activeIroningWorkItems.length, displayIroningMachines.length, waitingIroningWorkItems.length]);
   const ironingWorkByAssistantId = useMemo(
     () => new Map(activeIroningWorkItems.map((item) => [item.assistantId, item])),
     [activeIroningWorkItems],
+  );
+  const renderIroningQueueDetailPanel = useCallback(
+    () => ironingMachineRows.map(({ machine, workItem, readyItem, queuedItems }) => {
+        const tone = machine.status === "maintenance" ? "maintenance" : workItem ? "busy" : "idle";
+        const machineStatusText = tone === "busy" ? "使用中" : tone === "maintenance" ? "维修不可用" : "空闲";
+        const rowQueuedItems = [...queuedItems, ...(readyItem ? [readyItem] : [])].slice().reverse();
+        const queuedStatusLabel = (queuedItem: IroningWorkItem) => {
+          if (workItem) return "队列中";
+          return isAssignedIroningReadyTask(queuedItem.task, queuedItem.assistantId) ? "准备熨烫" : "等待熨烫机";
+        };
+        return (
+          <div key={machine.id} className="grid h-9 w-[184px] grid-cols-[1fr_36px] items-center gap-1.5">
+            <div className="flex min-w-0 items-center justify-end gap-1.5">
+              {rowQueuedItems.map((queuedItem) => (
+                <span
+                  key={`queued-ironing-${queuedItem.task.id}`}
+                  className="group relative z-0 flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-[10px] font-black text-white transition-transform hover:z-[80] hover:scale-105"
+                >
+                  <span className="flex h-full w-full overflow-hidden rounded-full bg-slate-200 ring-2 ring-slate-300/90 shadow-sm">
+                    {queuedItem.assistantAvatar ? (
+                      <img src={queuedItem.assistantAvatar} alt={queuedItem.assistantName} className="h-full w-full object-cover" />
+                    ) : (
+                      <span className="flex h-full w-full items-center justify-center bg-gradient-to-br from-slate-300 to-slate-500">
+                        {queuedItem.assistantName.slice(0, 1)}
+                      </span>
+                    )}
+                  </span>
+                  <span className="pointer-events-none absolute right-full top-1/2 z-[90] mr-2 hidden min-w-[132px] -translate-y-1/2 rounded-xl bg-white/96 px-3 py-2 text-left text-[11px] font-extrabold text-slate-700 shadow-lg ring-1 ring-slate-200/80 backdrop-blur group-hover:block">
+                    <span className="block text-slate-900">{queuedItem.durationLabel}熨烫任务</span>
+                    <span className="mt-0.5 block text-blue-600">{queuedStatusLabel(queuedItem)}</span>
+                  </span>
+                </span>
+              ))}
+              {workItem && (
+                <span className="group relative z-0 flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-[10px] font-black text-white transition-transform hover:z-[80] hover:scale-105">
+                  <span className="flex h-full w-full overflow-hidden rounded-full bg-slate-200 ring-2 ring-slate-300/90 shadow-sm">
+                    {workItem.assistantAvatar ? (
+                      <img src={workItem.assistantAvatar} alt={workItem.assistantName} className="h-full w-full object-cover" />
+                    ) : (
+                      <span className="flex h-full w-full items-center justify-center bg-gradient-to-br from-slate-300 to-slate-500">
+                        {workItem.assistantName.slice(0, 1)}
+                      </span>
+                    )}
+                  </span>
+                  <span className="pointer-events-none absolute right-full top-1/2 z-[90] mr-2 hidden min-w-[156px] -translate-y-1/2 rounded-xl bg-white/96 px-3 py-2 text-left text-[11px] font-extrabold text-slate-700 shadow-lg ring-1 ring-slate-200/80 backdrop-blur group-hover:block">
+                    <span className="block text-slate-900">{workItem.durationLabel}熨烫任务</span>
+                    {workItem.overtimeMin == null && (
+                      <span className="mt-0.5 block text-orange-500">已进行{fmtIroningHoverTime(workItem.elapsedMin)}</span>
+                    )}
+                    <span className={workItem.overtimeMin != null ? "mt-0.5 block text-red-600" : "mt-0.5 block text-slate-900"}>
+                      {workItem.overtimeMin != null
+                        ? `已超时${fmtIroningHoverTime(workItem.overtimeMin)}`
+                        : workItem.remainingMin == null
+                          ? "预计剩余时间--"
+                          : `预计剩余时间${fmtIroningHoverTime(workItem.remainingMin)}`}
+                    </span>
+                  </span>
+                </span>
+              )}
+            </div>
+            <span className="group relative grid h-9 w-9 shrink-0 place-items-center justify-self-end rounded-xl bg-white/72 shadow-sm ring-1 ring-white/80 backdrop-blur transition-transform hover:scale-105">
+              <IroningMachineIcon className="h-6 w-6" tone={tone} />
+              {tone === "maintenance" && (
+                <span className="pointer-events-none absolute right-full top-1/2 mr-2 hidden -translate-y-1/2 whitespace-nowrap rounded-xl bg-white/96 px-3 py-2 text-[11px] font-extrabold text-slate-700 shadow-lg ring-1 ring-slate-200/80 backdrop-blur group-hover:block">
+                  {machineStatusText}
+                </span>
+              )}
+            </span>
+          </div>
+        );
+      }),
+    [ironingMachineRows],
   );
   const areaPublicQueueRows = useMemo(
     () => publicQueueDisplayTasks.slice(0, 10),
@@ -4866,6 +5125,848 @@ export default function PhotographerPage() {
     writePublicQueueLastOrder(profile.id, publicQueueBuildingId, publicQueueTasks.map((task) => task.id));
   }, [profile?.id, publicQueueBuildingId, publicQueueInteractionVisible, publicQueuePendingPromotion, publicQueueTasks]);
 
+  const mobileGlassPanel = resolvedTheme === "dark"
+    ? "border-white/[0.14] bg-slate-950/62 shadow-black/35"
+    : "border-white/75 bg-white/62 shadow-[0_18px_52px_rgba(56,68,89,0.10)]";
+  const mobileSoftPanel = resolvedTheme === "dark"
+    ? "border-white/[0.10] bg-white/[0.06]"
+    : "border-white/70 bg-white/48";
+
+  const mobileRoleLabel =
+    profile?.role === "photographer"
+      ? "摄影师"
+      : profile?.role === "assistant"
+        ? "助理"
+        : profile?.role === "assistant_leader"
+          ? "助理组长"
+          : profile?.role === "admin"
+            ? "管理"
+            : "";
+
+  const mobileActionableWaitingTasks = isAssistantProfile && profile
+    ? actionableWaitingTasksForProfile(taskListRaw, profile.id).filter((task) =>
+        !isAssignedIroningReadyTask(task, profile.id) || freeIroningMachineCount > 0
+      )
+    : [];
+
+  const createMobileTask = useCallback(async (
+    catName: string,
+    dur: BuiltCategory["durations"][number],
+  ) => {
+    if (!profile) return;
+    const room = profile.currentRoom || defaultBuildingVenue(activeBuilding);
+    const locationBuildingId = activeBuilding?.id ?? profile.buildingId ?? null;
+    if (!room || !locationBuildingId) {
+      showTaskCreateError("当前楼座没有可用场地，无法创建任务");
+      return;
+    }
+
+    const priority = parseInt(dur.priority.replace("P", ""), 10);
+    const tempId = `temp-mobile-${Date.now()}`;
+    const createdAt = new Date().toISOString();
+    setTasks((prev) => sortTasksByStatus([
+      {
+        id: tempId,
+        name: catName,
+        room,
+        time: dur.label,
+        timePeriod: dur.label,
+        estimatedLabel: dur.label,
+        durationSlotLabel: dur.label,
+        actualTime: "",
+        progress: null,
+        hasProgress: false,
+        statusLabel: "等待中",
+        statusCls: "bg-white/30 border-white/40",
+        tagCls: "bg-gray-100/60 text-gray-500",
+        assistantName: null,
+        photographerName: profile.name,
+        createdAt,
+        estEndTime: null,
+        publisherFeedback: null,
+      },
+      ...prev,
+    ]));
+    setTaskListScrollY(0);
+    setMobileQuickBookCategory(null);
+
+    try {
+      const response = await fetch("/api/tasks", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          photographerId: profile.id,
+          locationBuildingId,
+          roomNumber: room,
+          categoryId: dur.categoryId,
+          priority,
+        }),
+      });
+      if (!response.ok) {
+        const data = await response.json().catch(() => null) as { code?: string; error?: string } | null;
+        setTasks((prev) => prev.filter((task) => task.id !== tempId));
+        showTaskCreateError(
+          data?.error || "任务创建失败，请稍后重试",
+          data?.code === "PHOTOGRAPHER_ACTIVE_TASK_LIMIT_REACHED" ||
+            data?.code === "PHOTOGRAPHER_LIMIT_QUEUE_FULL",
+        );
+        return;
+      }
+      const saved = await response.json() as TaskFromAPI;
+      setTasks((prev) => sortTasksByStatus(prev.map((task) => task.id === tempId ? apiTaskToDisplay(saved) : task)));
+      setTaskListRaw((prev) => [...prev.filter((task) => task.id !== saved.id), saved]);
+      if (isPhotographerLimitQueuedTask(saved)) {
+        showTaskCreateError(photographerLimitQueuePrompt(photographerMaxActiveTasks), true);
+      }
+      refreshAssistants();
+    } catch (error) {
+      setTasks((prev) => prev.filter((task) => task.id !== tempId));
+      showTaskCreateError("任务创建失败，请检查网络后重试");
+      console.error("Failed to create mobile task", error);
+    }
+  }, [activeBuilding, photographerMaxActiveTasks, profile, refreshAssistants, showTaskCreateError]);
+
+  const mobileTaskStatusForProfile = useCallback((task: TaskFromAPI) => (
+    taskStatusForProfile(task, isAssistantProfile ? profile?.id : undefined) ?? task.status
+  ), [isAssistantProfile, profile?.id]);
+
+  const mobileTaskStatusMeta = useCallback((task: TaskFromAPI) => {
+    const status = mobileTaskStatusForProfile(task);
+    if (status === "executing") {
+      const over = overtimeMinutesBeyondSlot(
+        {
+          ...taskTimingForProfile(task, isAssistantProfile ? profile?.id : undefined),
+          status,
+          category: task.category,
+        },
+        now.getTime(),
+      );
+      return over != null
+        ? { label: `超时${fmtMin(over)}`, dot: DOCK_DOT.overtime, badge: "bg-red-100/80 text-red-600", panel: "bg-red-400/14" }
+        : { label: "进行中", dot: DOCK_DOT.inProgress, badge: "bg-orange-100/80 text-orange-600", panel: "bg-orange-400/16" };
+    }
+    if (status === "paused") return { label: "暂停中", dot: "#9ca3af", badge: "bg-gray-100/80 text-gray-600", panel: "bg-gray-400/14" };
+    if (status === "completed") return { label: "已完成", dot: DOCK_DOT.idle, badge: "bg-green-100/80 text-green-600", panel: "bg-green-400/12" };
+    if (isIroningTask(task) && task.ironingStage === "waiting_machine") {
+      return { label: "等待熨烫机", dot: "#10b981", badge: "bg-emerald-100/80 text-emerald-700", panel: "bg-emerald-400/12" };
+    }
+    if (isIroningTask(task) && task.ironingStage === "notified") {
+      return { label: "准备熨烫", dot: "#84cc16", badge: "bg-lime-100/80 text-lime-700", panel: "bg-lime-400/14" };
+    }
+    return { label: task.assistantId ? "待就位" : "队列中", dot: DOCK_DOT.assigned, badge: "bg-blue-100/80 text-blue-600", panel: "bg-blue-400/12" };
+  }, [isAssistantProfile, mobileTaskStatusForProfile, now, profile?.id]);
+
+  const mobileTaskSubtitle = useCallback((task: TaskFromAPI) => {
+    const person = isAssistantProfile
+      ? task.photographer?.name ?? "摄影师"
+      : task.assistant?.name ?? "未分配助理";
+    return `${formatRoomOrVenue(task.roomNumber)} · ${person} · ${taskCategoryDurationCaption(task.category, task.priority)}`;
+  }, [isAssistantProfile]);
+
+  const mobileTaskTimeLine = useCallback((task: TaskFromAPI) => {
+    const display = apiTaskToDisplay(task, isAssistantProfile ? profile?.id : undefined);
+    return taskListActualLine(display, task, now.getTime(), true, isAssistantProfile ? profile?.id : undefined);
+  }, [isAssistantProfile, now, profile?.id]);
+
+  const mobileIcon = useCallback((name: MobileWorkbenchTab | "admin" | "logout" | "stats" | "identity") => {
+    const common = "h-5 w-5";
+    if (name === "map") return (
+      <svg className={common} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+        <path d="M4 6l5-2 6 2 5-2v14l-5 2-6-2-5 2V6Z" /><path d="M9 4v14" /><path d="M15 6v14" />
+      </svg>
+    );
+    if (name === "queue") return (
+      <svg className={common} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+        <path d="M7 7h10" /><path d="M7 12h10" /><path d="M7 17h7" />
+      </svg>
+    );
+    if (name === "me" || name === "identity") return (
+      <svg className={common} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+        <circle cx="12" cy="8" r="4" /><path d="M4 21a8 8 0 0 1 16 0" />
+      </svg>
+    );
+    if (name === "admin") return (
+      <svg className={common} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+        <path d="M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z" /><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 0 1-4 0v-.1a1.7 1.7 0 0 0-1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 0 1 0-4h.1a1.7 1.7 0 0 0 1.5-1 1.7 1.7 0 0 0-.3-1.8l-.1-.1A2 2 0 1 1 7 4.4l.1.1a1.7 1.7 0 0 0 1.8.3 1.7 1.7 0 0 0 1-1.5V3a2 2 0 0 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1A2 2 0 1 1 19.6 7l-.1.1a1.7 1.7 0 0 0-.3 1.8 1.7 1.7 0 0 0 1.5 1h.3a2 2 0 0 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1Z" />
+      </svg>
+    );
+    if (name === "logout") return (
+      <svg className={common} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+        <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" /><path d="M16 17l5-5-5-5" /><path d="M21 12H9" />
+      </svg>
+    );
+    if (name === "stats") return (
+      <svg className={common} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+        <path d="M18 20V10" /><path d="M12 20V4" /><path d="M6 20v-6" />
+      </svg>
+    );
+    return (
+      <svg className={common} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+        <path d="M5 11h14v9H5z" /><path d="M8 4h8v7H8z" />
+      </svg>
+    );
+  }, []);
+
+  const renderMobileTaskCard = useCallback((task: TaskFromAPI, options?: {
+    compact?: boolean;
+    primaryAction?: "start" | "complete" | "resume" | null;
+    showCancel?: boolean;
+  }) => {
+    const meta = mobileTaskStatusMeta(task);
+    const status = mobileTaskStatusForProfile(task);
+    const timeLine = mobileTaskTimeLine(task);
+    const primaryAction = options?.primaryAction ?? null;
+    const actionLabel =
+      primaryAction === "complete"
+        ? "完成任务"
+        : primaryAction === "resume"
+          ? "继续任务"
+          : primaryAction === "start"
+            ? isIroningTask(task) && task.ironingStage === "notified" ? "开始熨烫" : "开始任务"
+            : "";
+    const canStart = primaryAction === "start" && status === "waiting";
+    const canComplete = primaryAction === "complete" && status === "executing";
+    const canResume = primaryAction === "resume";
+    return (
+      <div
+        key={task.id}
+        className={`rounded-[20px] border p-4 backdrop-blur-2xl ${mobileGlassPanel} ${options?.compact ? "" : meta.panel}`}
+      >
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <div className="flex min-w-0 items-center gap-2">
+              <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: meta.dot }} />
+              <h3 className="truncate text-[18px] font-extrabold leading-tight text-[--text-primary]">
+                {formatRoomOrVenue(task.roomNumber)} {task.category?.name ?? "任务"}
+              </h3>
+            </div>
+            <p className="mt-1 truncate text-[12px] font-semibold text-[--text-secondary]">{mobileTaskSubtitle(task)}</p>
+          </div>
+          <span className={`shrink-0 rounded-full px-2.5 py-1 text-[10px] font-extrabold ${meta.badge}`}>
+            {meta.label}
+          </span>
+        </div>
+        {timeLine && (
+          <p className="mt-3 text-[12px] font-bold text-[--text-muted]">{timeLine}</p>
+        )}
+        {!options?.compact && task.note?.trim() && (
+          <p className="mt-3 rounded-2xl bg-white/44 px-3 py-2 text-[11px] font-semibold leading-relaxed text-orange-600">
+            {task.note.trim()}
+          </p>
+        )}
+        {(primaryAction || options?.showCancel) && (
+          <div className="mt-4 flex gap-2">
+            {primaryAction && (
+              <button
+                type="button"
+                onClick={() => {
+                  if (canStart || canComplete) void handleAssistantStatusChange(primaryAction, task);
+                  if (canResume) void handleResumePausedTask(task);
+                }}
+                className="min-h-[44px] flex-1 rounded-2xl bg-orange-500 px-4 text-[14px] font-extrabold text-white shadow-lg shadow-orange-500/20 active:scale-[0.99]"
+              >
+                {actionLabel}
+              </button>
+            )}
+            {canComplete && (
+              <button
+                type="button"
+                onClick={handlePauseCurrentTask}
+                className="min-h-[44px] rounded-2xl bg-red-500/90 px-4 text-[13px] font-extrabold text-white shadow-lg shadow-red-500/15 active:scale-[0.99]"
+              >
+                短暂离开
+              </button>
+            )}
+            {options?.showCancel && (
+              <button
+                type="button"
+                onClick={() => handleCancelTask(task.id)}
+                className="min-h-[44px] rounded-2xl border border-red-200/80 bg-white/54 px-4 text-[13px] font-extrabold text-red-500 active:scale-[0.99]"
+              >
+                取消
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+    );
+  }, [handleAssistantStatusChange, handleCancelTask, handlePauseCurrentTask, handleResumePausedTask, mobileGlassPanel, mobileTaskStatusForProfile, mobileTaskStatusMeta, mobileTaskSubtitle, mobileTaskTimeLine]);
+
+  const renderMobileCurrentView = useCallback(() => {
+    if (isAssistantProfile) {
+      if (assistantPresence === "eating") {
+        return (
+          <div className={`rounded-[24px] border p-5 text-center backdrop-blur-2xl ${mobileGlassPanel} ${eatingIsOvertime ? "bg-red-400/12" : "bg-blue-400/12"}`}>
+            <div className={`mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-full ${eatingIsOvertime ? "bg-red-500/15" : "bg-blue-500/15"}`}>
+              <span className={`h-8 w-8 rounded-full ${eatingIsOvertime ? "bg-red-500" : "bg-blue-500"} pulse-dot`} />
+            </div>
+            <h2 className={`text-[28px] font-extrabold ${eatingIsOvertime ? "text-red-600" : "text-blue-600"}`}>
+              {eatingIsOvertime ? "吃饭超时" : "吃饭中"}
+            </h2>
+            <p className={`mt-2 font-mono text-[26px] font-semibold tabular-nums ${eatingIsOvertime ? "text-red-600" : "text-blue-600"}`}>
+              {formatSecondsAsHMS(eatingElapsedSeconds)}
+            </p>
+            <button
+              type="button"
+              disabled={!profile}
+              onClick={() => profile && void updateAssistantPresenceStatus(profile.id, "online")}
+              className="mt-5 min-h-[46px] w-full rounded-2xl bg-emerald-500 px-4 text-[14px] font-extrabold text-white shadow-lg shadow-emerald-500/20 disabled:opacity-50"
+            >
+              结束吃饭并恢复在线
+            </button>
+          </div>
+        );
+      }
+
+      if (activeReassignmentNotice) {
+        return (
+          <div className={`rounded-[24px] border p-5 backdrop-blur-2xl ${mobileGlassPanel} bg-orange-400/12`}>
+            <p className="text-[13px] font-extrabold leading-relaxed text-orange-600">{activeReassignmentMessage}</p>
+            <button
+              type="button"
+              disabled={reassignmentNoticeSavingId === activeReassignmentNotice.id}
+              onClick={() => void handleAcknowledgeReassignmentNotice(
+                activeReassignmentNotice,
+                activeReassignmentNoticeRole === "old" ? "acknowledgeOld" : "acknowledgeNew",
+              )}
+              className="mt-4 min-h-[44px] w-full rounded-2xl bg-orange-500 px-4 text-[14px] font-extrabold text-white shadow-lg shadow-orange-500/20 disabled:opacity-60"
+            >
+              确认
+            </button>
+          </div>
+        );
+      }
+
+      if (!currentRawTask && !pausedRawTask && mobileActionableWaitingTasks.length === 0) {
+        const off = assistantPresence === "on_break";
+        return (
+          <div className={`rounded-[24px] border p-6 text-center backdrop-blur-2xl ${mobileGlassPanel} ${off ? "bg-gray-400/12" : "bg-green-400/12"}`}>
+            <div className={`mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-full ${off ? "bg-gray-500/15" : "bg-green-500/15"}`}>
+              <span className={`h-8 w-8 rounded-full ${off ? "bg-gray-400" : "bg-green-500"}`} />
+            </div>
+            <h2 className={`text-[30px] font-extrabold ${off ? "text-gray-500" : "text-green-600"}`}>
+              {off ? "休假/下班 /离线" : "空闲"}
+            </h2>
+            <p className={`mt-2 text-[12px] font-semibold ${off ? "text-gray-500/70" : "text-green-600/70"}`}>
+              {off ? "当前不会接收新任务" : "等待系统派发任务"}
+            </p>
+          </div>
+        );
+      }
+
+      if (!pausedRawTask && mobileActionableWaitingTasks.length > 1) {
+        return (
+          <div className="space-y-3">
+            <div className={`rounded-[20px] border px-4 py-3 backdrop-blur-2xl ${mobileGlassPanel}`}>
+              <div className="flex items-center justify-between">
+                <h2 className="text-[16px] font-extrabold text-[--text-primary]">选择要开始的任务</h2>
+                <span className="rounded-full bg-orange-500/10 px-2.5 py-1 text-[11px] font-extrabold text-orange-500">{mobileActionableWaitingTasks.length} 个可选</span>
+              </div>
+            </div>
+            {mobileActionableWaitingTasks.map((task) => renderMobileTaskCard(task, { primaryAction: "start" }))}
+          </div>
+        );
+      }
+
+      if (currentRawTask) {
+        const status = mobileTaskStatusForProfile(currentRawTask);
+        const primaryAction = status === "executing" ? "complete" : status === "waiting" ? "start" : null;
+        return renderMobileTaskCard(currentRawTask, { primaryAction });
+      }
+
+      if (pausedRawTask) {
+        return renderMobileTaskCard(pausedRawTask, { primaryAction: "resume" });
+      }
+
+      return null;
+    }
+
+    if (profile?.role === "photographer") {
+      const selectedCategory = categories.find((cat) => cat.name === mobileQuickBookCategory) ?? null;
+      return (
+        <div className="space-y-4">
+          <div className={`rounded-[24px] border p-4 backdrop-blur-2xl ${mobileGlassPanel}`}>
+            <div className="mb-3 flex items-center justify-between">
+              <div>
+                <h2 className="text-[17px] font-extrabold text-[--text-primary]">快捷发单</h2>
+                <p className="mt-1 text-[12px] font-semibold text-[--text-muted]">{workbenchLocationText}</p>
+              </div>
+              <span className="rounded-full bg-orange-500/10 px-2.5 py-1 text-[11px] font-extrabold text-orange-500">P档</span>
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              {categories.map((cat) => (
+                <button
+                  type="button"
+                  key={cat.name}
+                  onClick={() => setMobileQuickBookCategory((current) => current === cat.name ? null : cat.name)}
+                  className={`min-h-[46px] rounded-2xl px-3 text-[14px] font-extrabold active:scale-[0.99] ${
+                    selectedCategory?.name === cat.name
+                      ? "bg-orange-500 text-white shadow-lg shadow-orange-500/20"
+                      : `${resolvedTheme === "dark" ? cat.darkBg : cat.bg} ${resolvedTheme === "dark" ? cat.darkText : cat.text}`
+                  }`}
+                >
+                  {cat.name}
+                </button>
+              ))}
+            </div>
+            {selectedCategory && (
+              <div className="mt-3 grid grid-cols-1 gap-2">
+                {selectedCategory.durations.map((dur) => (
+                  <button
+                    type="button"
+                    key={`${selectedCategory.name}-${dur.priority}`}
+                    onClick={() => void createMobileTask(selectedCategory.name, dur)}
+                    className="flex min-h-[44px] items-center justify-between rounded-2xl bg-white/60 px-4 text-[13px] font-extrabold text-[--text-primary] shadow-sm active:scale-[0.99]"
+                  >
+                    <span>{dur.label}</span>
+                    <span className={`rounded-lg px-2 py-1 text-[11px] ${dur.cls}`}>{dur.priority}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+          <div className={`rounded-[24px] border p-4 backdrop-blur-2xl ${mobileGlassPanel}`}>
+            <div className="mb-3 flex items-center justify-between">
+              <h2 className="text-[16px] font-extrabold text-[--text-primary]">当前发布任务</h2>
+              <span className="text-[11px] font-bold text-[--text-muted]">{tasks.filter((task) => task.statusLabel !== "已完成").length} 条进行中</span>
+            </div>
+            <div className="space-y-2">
+              {taskListRaw.filter((task) => task.status !== "completed").slice(0, 4).map((task) => renderMobileTaskCard(task, {
+                compact: true,
+                showCancel: task.status === "waiting" || isPhotographerLimitQueuedTask(task),
+              }))}
+              {taskListRaw.filter((task) => task.status !== "completed").length === 0 && (
+                <p className="rounded-2xl bg-white/42 px-4 py-6 text-center text-[12px] font-semibold text-[--text-muted]">暂无进行中的发布任务</p>
+              )}
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    return (
+      <div className="space-y-4">
+        <div className={`rounded-[24px] border p-4 backdrop-blur-2xl ${mobileGlassPanel}`}>
+          <h2 className="text-[17px] font-extrabold text-[--text-primary]">管理工作台</h2>
+          <p className="mt-1 text-[12px] font-semibold text-[--text-muted]">手机端保留关键状态与后台入口</p>
+          <div className="mt-4 grid grid-cols-3 gap-2">
+            {[
+              ["队列", publicQueueTasks.length, "text-orange-500"],
+              ["执行", areaRealtimeStats.executing, "text-green-600"],
+              ["超时", areaRealtimeStats.overtime, "text-red-600"],
+            ].map(([label, value, cls]) => (
+              <div key={label} className={`rounded-2xl border p-3 text-center ${mobileSoftPanel}`}>
+                <p className={`text-[24px] font-extrabold ${cls}`}>{value}</p>
+                <p className="mt-1 text-[11px] font-bold text-[--text-muted]">{label}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+        <a href="/admin" className="flex min-h-[48px] items-center justify-center gap-2 rounded-2xl bg-orange-500 px-4 text-[14px] font-extrabold text-white shadow-lg shadow-orange-500/20">
+          {mobileIcon("admin")}
+          进入后台管理
+        </a>
+      </div>
+    );
+  }, [
+    activeReassignmentMessage,
+    activeReassignmentNotice,
+    activeReassignmentNoticeRole,
+    areaRealtimeStats.executing,
+    areaRealtimeStats.overtime,
+    assistantPresence,
+    categories,
+    createMobileTask,
+    eatingElapsedSeconds,
+    eatingIsOvertime,
+    freeIroningMachineCount,
+    handleAcknowledgeReassignmentNotice,
+    isAssistantProfile,
+    mobileActionableWaitingTasks,
+    mobileGlassPanel,
+    mobileIcon,
+    mobileQuickBookCategory,
+    mobileSoftPanel,
+    mobileTaskStatusForProfile,
+    pausedRawTask,
+    profile,
+    publicQueueTasks.length,
+    reassignmentNoticeSavingId,
+    renderMobileTaskCard,
+    resolvedTheme,
+    currentRawTask,
+    taskListRaw,
+    tasks,
+    updateAssistantPresenceStatus,
+    workbenchLocationText,
+  ]);
+
+  const renderMobileMapView = useCallback(() => {
+    const venueCoords = new Map<string, { x: number; y: number }>();
+    for (const venue of safeExtraVenueEntries(activeBuilding?.extraVenues)) {
+      if (typeof venue.x === "number" && typeof venue.y === "number") {
+        venueCoords.set(venue.name, { x: venue.x, y: venue.y });
+      }
+    }
+    const visibleAssistants = assistants
+      .filter((assistant) => assistant.currentRoom || assistant.pausedRoom || assistant.pendingRoom || assistant.preemptedWaitingRoom)
+      .slice(0, 28);
+    const markerForRoom = (roomName: string | null | undefined) => {
+      if (!roomName || !activeBuilding) return null;
+      const room = activeBuilding.rooms.find((item) => item.roomNumber === roomName || `${item.roomNumber}室` === roomName);
+      const venue = room ? null : venueCoords.get(roomName);
+      const x = room?.xPosition ?? venue?.x;
+      const y = room?.yPosition ?? venue?.y;
+      if (x == null || y == null) return null;
+      return { x, y };
+    };
+
+    return (
+      <div className="space-y-4">
+        <div className={`rounded-[24px] border p-3 backdrop-blur-2xl ${mobileGlassPanel}`}>
+          <div className="mb-3 flex items-center justify-between gap-2">
+            <div className="min-w-0">
+              <h2 className="truncate text-[17px] font-extrabold text-[--text-primary]">区域平面图</h2>
+              <p className="mt-1 text-[12px] font-semibold text-[--text-muted]">{activeBuilding?.name ?? "加载中"}</p>
+            </div>
+            <span className="rounded-full bg-green-500/10 px-2.5 py-1 text-[11px] font-extrabold text-green-600">{areaAssistantStats.total}人</span>
+          </div>
+          {mapBuildingOptions.length > 0 && (
+            <div className="mb-3 flex gap-2 overflow-x-auto pb-1 scrollbar-none">
+              {[activeBuilding, ...mapBuildingOptions].filter(Boolean).map((building) => (
+                <button
+                  type="button"
+                  key={building!.id}
+                  onClick={() => setActiveBuildingId(building!.id)}
+                  className={`min-h-[36px] shrink-0 rounded-full px-3 text-[12px] font-extrabold ${
+                    building!.id === activeBuildingId
+                      ? "bg-orange-500 text-white shadow-md shadow-orange-500/20"
+                      : "bg-white/54 text-[--text-secondary]"
+                  }`}
+                >
+                  {building!.name}
+                </button>
+              ))}
+            </div>
+          )}
+          <div className={`relative aspect-[4/5] overflow-hidden rounded-[24px] border ${mobileSoftPanel}`}>
+            {activeBuilding?.floorPlanUrl ? (
+              <>
+                <img
+                  src={activeBuilding.floorPlanUrl}
+                  alt={activeBuilding.name}
+                  className="h-full w-full object-contain"
+                  style={{ filter: "var(--map-filter)" }}
+                />
+                <div className="pointer-events-none absolute inset-0 opacity-70" style={{
+                  backgroundImage:
+                    resolvedTheme === "dark"
+                      ? "linear-gradient(rgba(148,163,184,0.08) 1px, transparent 1px), linear-gradient(90deg, rgba(148,163,184,0.08) 1px, transparent 1px)"
+                      : "linear-gradient(rgba(67,82,104,0.05) 1px, transparent 1px), linear-gradient(90deg, rgba(67,82,104,0.05) 1px, transparent 1px)",
+                  backgroundSize: "32px 32px",
+                }} />
+                {visibleAssistants.map((assistant) => {
+                  const pos = markerForRoom(assistant.currentRoom ?? assistant.pendingRoom ?? assistant.pausedRoom ?? assistant.preemptedWaitingRoom);
+                  if (!pos) return null;
+                  const dot = assistantDockDotColor(assistant);
+                  return (
+                    <div
+                      key={`mobile-map-${assistant.id}`}
+                      className="absolute flex h-9 w-9 -translate-x-1/2 -translate-y-1/2 items-center justify-center"
+                      style={{ left: `${pos.x}%`, top: `${pos.y}%` }}
+                      title={`${assistant.name} · ${formatRoomOrVenue(assistant.currentRoom)}`}
+                    >
+                      <span className="absolute -inset-1 rounded-full bg-white/70 blur-[2px]" />
+                      <span className="relative flex h-8 w-8 items-center justify-center overflow-hidden rounded-full bg-slate-200 text-[11px] font-extrabold text-white ring-2 ring-white shadow-sm">
+                        {assistant.avatar ? <img src={assistant.avatar} alt={assistant.name} className="h-full w-full object-cover" /> : assistant.name.slice(0, 1)}
+                      </span>
+                      <span className="absolute bottom-0 right-0 h-2.5 w-2.5 rounded-full ring-2 ring-white" style={{ backgroundColor: dot }} />
+                    </div>
+                  );
+                })}
+              </>
+            ) : (
+              <div className="flex h-full items-center justify-center px-6 text-center text-[13px] font-semibold text-[--text-muted]">
+                {activeBuilding ? `${activeBuilding.name} 暂无平面图` : "加载中..."}
+              </div>
+            )}
+          </div>
+          <div className="mt-3 grid grid-cols-4 gap-2">
+            {[
+              ["空闲", areaAssistantStats.idle, DOCK_DOT.idle],
+              ["待就位", areaAssistantStats.assigned, DOCK_DOT.assigned],
+              ["进行", areaRealtimeStats.executing, DOCK_DOT.inProgress],
+              ["超时", areaRealtimeStats.overtime, DOCK_DOT.overtime],
+            ].map(([label, value, color]) => (
+              <div key={label} className="rounded-2xl bg-white/44 px-2 py-2 text-center">
+                <span className="mx-auto block h-2 w-2 rounded-full" style={{ backgroundColor: color as string }} />
+                <p className="mt-1 text-[14px] font-extrabold text-[--text-primary]">{value}</p>
+                <p className="text-[10px] font-bold text-[--text-muted]">{label}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    );
+  }, [activeBuilding, activeBuildingId, areaAssistantStats.assigned, areaAssistantStats.idle, areaAssistantStats.total, areaRealtimeStats.executing, areaRealtimeStats.overtime, assistants, mapBuildingOptions, mobileGlassPanel, mobileSoftPanel, resolvedTheme]);
+
+  const renderMobileQueueView = useCallback(() => (
+    <div className="space-y-3">
+      <div className={`rounded-[20px] border px-4 py-3 backdrop-blur-2xl ${mobileGlassPanel}`}>
+        <div className="flex items-center justify-between">
+          <h2 className="text-[16px] font-extrabold text-[--text-primary]">公共队列</h2>
+          <span className="rounded-full bg-orange-500/10 px-2.5 py-1 text-[11px] font-extrabold text-orange-500">{publicQueueDisplayTasks.length} 条</span>
+        </div>
+      </div>
+      {publicQueueDisplayTasks.length === 0 ? (
+        <p className={`rounded-[20px] border px-4 py-8 text-center text-[13px] font-semibold text-[--text-muted] ${mobileSoftPanel}`}>
+          当前区域暂无公共队列
+        </p>
+      ) : publicQueueDisplayTasks.map((task, index) => {
+        const display = apiTaskToDisplay(task);
+        const statusInfo = publicQueueStatusInfo(task, publicQueueRaw);
+        const timeLine = taskListActualLine(display, task, now.getTime(), true);
+        return (
+          <div key={`mobile-public-${task.id}`} className={`rounded-[20px] border p-4 backdrop-blur-2xl ${mobileGlassPanel}`}>
+            <div className="flex items-start gap-3">
+              <span className={`mt-0.5 flex shrink-0 items-center justify-center text-[10px] font-extrabold shadow-sm ${publicQueueRankShapeCls(index, task.priority)}`}>
+                {publicQueueRankLabel(index, task.priority)}
+              </span>
+              <div className="min-w-0 flex-1">
+                <div className="flex items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    <h3 className="truncate text-[14px] font-extrabold text-[--text-primary]">{display.name}</h3>
+                    <p className="mt-1 truncate text-[12px] font-semibold text-[--text-muted]">
+                      {formatRoomOrVenue(task.roomNumber)} · {task.photographer?.name ?? "摄影师"} · {display.durationSlotLabel}
+                    </p>
+                  </div>
+                  <span className={`shrink-0 rounded-full px-2 py-1 text-[10px] font-extrabold ${statusInfo.cls}`}>{statusInfo.label}</span>
+                </div>
+                {timeLine && <p className="mt-2 text-[11px] font-bold text-[--text-muted]">{timeLine}</p>}
+              </div>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  ), [mobileGlassPanel, mobileSoftPanel, now, publicQueueDisplayTasks, publicQueueRaw]);
+
+  const renderMobileMeView = useCallback(() => (
+    <div className="space-y-4">
+      <div className={`rounded-[24px] border p-4 backdrop-blur-2xl ${mobileGlassPanel}`}>
+        <h2 className="text-[16px] font-extrabold text-[--text-primary]">我的任务</h2>
+        <div className="mt-3 space-y-2">
+          {taskListRaw.slice(0, 8).map((task) => renderMobileTaskCard(task, {
+            compact: true,
+            primaryAction: isAssistantProfile && mobileTaskStatusForProfile(task) === "waiting" ? "start" : null,
+            showCancel: !isAssistantProfile && (task.status === "waiting" || isPhotographerLimitQueuedTask(task)),
+          }))}
+          {taskListRaw.length === 0 && (
+            <p className="rounded-2xl bg-white/42 px-4 py-8 text-center text-[12px] font-semibold text-[--text-muted]">暂无任务</p>
+          )}
+        </div>
+      </div>
+      <div className={`rounded-[24px] border p-4 backdrop-blur-2xl ${mobileGlassPanel}`}>
+        <h2 className="text-[16px] font-extrabold text-[--text-primary]">快捷入口</h2>
+        <div className="mt-3 grid grid-cols-2 gap-2">
+          {(loginRole === "admin" || loginRole === "assistant_leader") && (
+            <>
+              <button
+                type="button"
+                onClick={() => setShowIdentityModal(true)}
+                className="flex min-h-[46px] items-center justify-center gap-2 rounded-2xl bg-white/54 px-3 text-[13px] font-extrabold text-[--text-primary]"
+              >
+                {mobileIcon("identity")}
+                切换身份
+              </button>
+              <a href="/admin" className="flex min-h-[46px] items-center justify-center gap-2 rounded-2xl bg-white/54 px-3 text-[13px] font-extrabold text-[--text-primary]">
+                {mobileIcon("admin")}
+                后台管理
+              </a>
+            </>
+          )}
+          {(loginRole === "photographer" || loginRole === "assistant") && (
+            <a href="/stats" className="flex min-h-[46px] items-center justify-center gap-2 rounded-2xl bg-white/54 px-3 text-[13px] font-extrabold text-[--text-primary]">
+              {mobileIcon("stats")}
+              数据统计
+            </a>
+          )}
+          <a
+            href="/"
+            onClick={() => { safeLocalStorageRemove("user"); safeLocalStorageRemove("currentProfileId"); }}
+            className="flex min-h-[46px] items-center justify-center gap-2 rounded-2xl bg-white/54 px-3 text-[13px] font-extrabold text-[--text-primary]"
+          >
+            {mobileIcon("logout")}
+            返回登录
+          </a>
+        </div>
+      </div>
+    </div>
+  ), [isAssistantProfile, loginRole, mobileGlassPanel, mobileIcon, mobileTaskStatusForProfile, renderMobileTaskCard, taskListRaw]);
+
+  const renderMobileWorkbench = () => {
+    const mobileNavItems: { key: MobileWorkbenchTab; label: string }[] = [
+      { key: "current", label: "当前" },
+      { key: "map", label: "地图" },
+      { key: "queue", label: "队列" },
+      { key: "me", label: "我的" },
+    ];
+    const identityLoading = !profile && !needsIdentitySelection && identityUrlState !== "absent";
+    const identityRequired = !identityLoading && (needsIdentitySelection || !profile);
+    return (
+      <div
+        className="relative z-30 flex h-full flex-col overflow-hidden px-3 lg:hidden"
+        style={{
+          backgroundColor: resolvedTheme === "dark" ? "#0f1117" : "#eef1f5",
+          backgroundImage: workbenchPageBackground ? `url(${workbenchPageBackground})` : undefined,
+          backgroundSize: workbenchPageBackground ? "cover" : undefined,
+          backgroundPosition: workbenchPageBackground ? "center" : undefined,
+          paddingTop: "max(env(safe-area-inset-top), 12px)",
+        }}
+      >
+        {workbenchPageBackground && <div className="readable-page-scrim" />}
+        <div className="pointer-events-none absolute inset-0 z-0 opacity-80" style={{
+          backgroundImage:
+            resolvedTheme === "dark"
+              ? "linear-gradient(rgba(148,163,184,0.06) 1px, transparent 1px), linear-gradient(90deg, rgba(148,163,184,0.06) 1px, transparent 1px)"
+              : "linear-gradient(rgba(67,82,104,0.045) 1px, transparent 1px), linear-gradient(90deg, rgba(67,82,104,0.045) 1px, transparent 1px)",
+          backgroundSize: "38px 38px",
+        }} />
+        <div className="relative z-[1] shrink-0">
+          <div className={`relative rounded-[24px] border px-4 py-3 backdrop-blur-2xl ${mobileGlassPanel}`}>
+            <div className="flex items-center gap-3">
+              <button
+                type="button"
+                onClick={() => setShowAvatarModal(true)}
+                className="relative h-14 w-14 shrink-0 overflow-hidden rounded-full bg-gradient-to-br from-orange-200 to-orange-400 text-[20px] font-extrabold text-white shadow-md shadow-orange-200/40 ring-2 ring-white/70"
+                aria-label="更换头像"
+              >
+                {profile?.avatar ? <img src={profile.avatar} alt={profile.name} className="h-full w-full object-cover" /> : profile?.name?.slice(0, 1) || "?"}
+                {isAssistantProfile && (
+                  <span className="absolute bottom-1 right-1 h-3 w-3 rounded-full ring-2 ring-white" style={{ backgroundColor: assistantPresenceDotColor }} />
+                )}
+              </button>
+              <div className="min-w-0 flex-1">
+                <p className="truncate text-[16px] font-extrabold text-[--text-primary]">
+                  {profile?.name || "加载中"}{mobileRoleLabel ? ` · ${mobileRoleLabel}` : ""}
+                </p>
+                <p className="mt-1 truncate text-[12px] font-semibold text-[--text-muted]">{workbenchLocationText}</p>
+              </div>
+              {isAssistantProfile ? (
+                <div className="relative">
+                  <button
+                    type="button"
+                    disabled={!assistantCanChangePresence}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setShowAssistantPresenceMenu((open) => !open);
+                    }}
+                    className={`flex min-h-[36px] items-center gap-1.5 rounded-full px-3 text-[12px] font-extrabold ${assistantPresenceInfo.bgCls} ${assistantPresenceInfo.textCls} disabled:opacity-60`}
+                  >
+                    <span className="h-2 w-2 rounded-full" style={{ backgroundColor: assistantPresenceDotColor }} />
+                    {assistantPresenceInfo.shortLabel}
+                  </button>
+                  {showAssistantPresenceMenu && (
+                    <div className={`absolute right-0 top-full z-40 mt-2 w-36 rounded-2xl border p-1.5 backdrop-blur-2xl ${mobileGlassPanel}`}>
+                      {(["online", "eating", "on_break"] as AssistantPresenceState[]).map((state) => {
+                        const meta = assistantPresenceMeta(state);
+                        const selected = assistantPresence === state;
+                        return (
+                          <button
+                            type="button"
+                            key={state}
+                            disabled={selected || !profile}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              if (!profile || selected) return;
+                              setShowAssistantPresenceMenu(false);
+                              void updateAssistantPresenceStatus(profile.id, state);
+                            }}
+                            className={`mb-1 flex min-h-[38px] w-full items-center gap-2 rounded-xl px-3 text-left text-[12px] font-extrabold last:mb-0 disabled:opacity-60 ${
+                              selected ? `${meta.bgCls} ${meta.textCls}` : "bg-white/44 text-[--text-secondary]"
+                            }`}
+                          >
+                            <span className="h-2 w-2 rounded-full" style={{ backgroundColor: meta.dot }} />
+                            {meta.label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <span className="rounded-full bg-orange-500/10 px-3 py-2 text-[12px] font-extrabold text-orange-500">{mobileRoleLabel}</span>
+              )}
+            </div>
+            {assistantNoteTask?.note?.trim() && (
+              <div className="mt-3 rounded-2xl bg-orange-500/10 px-3 py-2 text-[11px] font-bold leading-relaxed text-orange-600">
+                {assistantNoteTask.note.trim()}
+              </div>
+            )}
+          </div>
+        </div>
+        <main
+          className="relative z-[1] min-h-0 flex-1 overflow-y-auto px-1 pt-4 scrollbar-none"
+          style={{ paddingBottom: "calc(env(safe-area-inset-bottom) + 96px)" }}
+        >
+          {identityLoading ? (
+            <div className={`rounded-[24px] border p-5 text-center backdrop-blur-2xl ${mobileGlassPanel}`}>
+              <div className="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-full bg-orange-500/12 text-[28px] font-black text-orange-500">
+                ...
+              </div>
+              <h2 className="text-[22px] font-extrabold text-[--text-primary]">正在加载身份</h2>
+              <p className="mt-2 text-[12px] font-semibold leading-relaxed text-[--text-muted]">
+                正在同步手机端身份与任务数据。
+              </p>
+            </div>
+          ) : identityRequired ? (
+            <div className={`rounded-[24px] border p-5 text-center backdrop-blur-2xl ${mobileGlassPanel}`}>
+              <div className="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-full bg-orange-500/12 text-[28px] font-black text-orange-500">
+                ?
+              </div>
+              <h2 className="text-[22px] font-extrabold text-[--text-primary]">选择身份继续</h2>
+              <p className="mt-2 text-[12px] font-semibold leading-relaxed text-[--text-muted]">
+                手机首次访问需要选择当前使用人，选择后页面、数据和电脑端手机预览会保持一致。
+              </p>
+              <button
+                type="button"
+                onClick={() => setShowIdentityModal(true)}
+                className="mt-5 min-h-[48px] w-full rounded-2xl bg-orange-500 px-4 text-[14px] font-extrabold text-white shadow-lg shadow-orange-500/20 active:scale-[0.99]"
+              >
+                选择身份
+              </button>
+            </div>
+          ) : (
+            <>
+              {mobileTab === "current" && renderMobileCurrentView()}
+              {mobileTab === "map" && renderMobileMapView()}
+              {mobileTab === "queue" && renderMobileQueueView()}
+              {mobileTab === "me" && renderMobileMeView()}
+            </>
+          )}
+        </main>
+        <nav className={`fixed bottom-3 left-3 right-3 z-40 grid grid-cols-4 gap-1.5 rounded-[24px] border p-2 backdrop-blur-2xl lg:hidden ${mobileGlassPanel}`}>
+          {mobileNavItems.map((item) => {
+            const active = mobileTab === item.key;
+            return (
+              <button
+                type="button"
+                key={item.key}
+                onClick={() => setMobileTab(item.key)}
+                className={`flex min-h-[52px] flex-col items-center justify-center gap-1 rounded-[18px] text-[10px] font-extrabold transition-colors ${
+                  active ? "bg-orange-500/12 text-orange-500" : "text-[--text-muted]"
+                }`}
+              >
+                {mobileIcon(item.key)}
+                {item.label}
+              </button>
+            );
+          })}
+        </nav>
+      </div>
+    );
+  };
+
   return (
     <div className="relative w-full h-full overflow-hidden select-none">
       {taskCreateError && (
@@ -4875,9 +5976,10 @@ export default function PhotographerPage() {
           {taskCreateError}
         </div>
       )}
+      {renderMobileWorkbench()}
       {/* ====== INTERACTIVE BIRD'S-EYE MAP ====== */}
       <div
-        className="absolute inset-0 overflow-hidden transition-colors duration-700"
+        className="absolute inset-0 hidden overflow-hidden transition-colors duration-700 lg:block"
         style={{
           backgroundColor: resolvedTheme === "dark" ? "#0f1117" : "#f2f2f4",
           backgroundImage: workbenchPageBackground ? `url(${workbenchPageBackground})` : undefined,
@@ -4893,7 +5995,7 @@ export default function PhotographerPage() {
             left: "max(354px, calc(3vw + 321.5px))",
             right: "max(128px, calc(3vw + 66.5px))",
             top: 36,
-            bottom: 58,
+            bottom: 36,
             gridTemplateRows: areaDataPanelOpen
               ? "minmax(0, 3fr) minmax(0, 2fr)"
               : "minmax(0, 1fr) minmax(0, 0fr)",
@@ -4909,10 +6011,15 @@ export default function PhotographerPage() {
 	            }`}
             style={{
               cursor: hasCrop ? "default" : mapPanning ? "grabbing" : "grab",
+              "--map-marker-size": `${mapMarkerSizePx}px`,
+              "--map-slot-gap": `${mapSlotGapPx}px`,
+              "--map-area-label-font": `${mapAreaLabelFontPx}px`,
+              "--map-area-label-pad-x": `${mapAreaLabelPadXPx}px`,
+              "--map-area-label-pad-y": `${mapAreaLabelPadYPx}px`,
               background: resolvedTheme === "dark"
                 ? "radial-gradient(circle at 18% 16%, rgba(96, 165, 250, 0.18), transparent 34%), rgba(15, 23, 42, 0.52)"
                 : "radial-gradient(circle at 18% 16%, rgba(255, 255, 255, 0.74), transparent 34%), rgba(249, 252, 255, 0.50)",
-            }}
+            } as CSSProperties}
 	            onMouseDown={handleMapPanDown}
 	          >
 	            <div
@@ -5000,80 +6107,84 @@ export default function PhotographerPage() {
             </div>
             {(ironingMachineRows.length > 0 || queuedIroningWorkItems.length > 0) && (
               <div
+                ref={ironingQueueRef}
                 className="pointer-events-auto absolute right-5 top-5 z-30 flex flex-col items-end gap-1.5"
-                onMouseDown={(e) => e.stopPropagation()}
+                onPointerDown={(e) => e.stopPropagation()}
               >
-                {ironingMachineRows.map(({ machine, workItem, readyItem, queuedItems }) => {
-                  const tone = machine.status === "maintenance" ? "maintenance" : workItem ? "busy" : "idle";
-                  const machineStatusText = tone === "busy" ? "使用中" : tone === "maintenance" ? "维修不可用" : "空闲";
-                  const rowQueuedItems = [...queuedItems, ...(readyItem ? [readyItem] : [])].slice().reverse();
-                  const queuedStatusLabel = (queuedItem: IroningWorkItem) => {
-                    if (workItem) return "队列中";
-                    return isAssignedIroningReadyTask(queuedItem.task, queuedItem.assistantId) ? "准备熨烫" : "等待熨烫机";
-                  };
-                  return (
-                    <div key={machine.id} className="flex h-9 items-center justify-end gap-1.5">
-                      {rowQueuedItems.map((queuedItem) => (
-                        <span
-                          key={`queued-ironing-${queuedItem.task.id}`}
-                          className="group relative z-0 flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-[10px] font-black text-white transition-transform hover:z-[80] hover:scale-105"
-                        >
-                          <span className="flex h-full w-full overflow-hidden rounded-full bg-slate-200 ring-2 ring-slate-300/90 shadow-sm">
-                            {queuedItem.assistantAvatar ? (
-                              <img src={queuedItem.assistantAvatar} alt={queuedItem.assistantName} className="h-full w-full object-cover" />
-                            ) : (
-                              <span className="flex h-full w-full items-center justify-center bg-gradient-to-br from-slate-300 to-slate-500">
-                                {queuedItem.assistantName.slice(0, 1)}
-                              </span>
-                            )}
-                          </span>
-                          <span className="pointer-events-none absolute right-full top-1/2 z-[90] mr-2 hidden min-w-[132px] -translate-y-1/2 rounded-xl bg-white/96 px-3 py-2 text-left text-[11px] font-extrabold text-slate-700 shadow-lg ring-1 ring-slate-200/80 backdrop-blur group-hover:block">
-                            <span className="block text-slate-900">{queuedItem.durationLabel}熨烫任务</span>
-                            <span className="mt-0.5 block text-blue-600">
-                              {queuedStatusLabel(queuedItem)}
-                            </span>
-                          </span>
-                        </span>
-                      ))}
-                      {workItem && (
-                        <span
-                          className="group relative z-0 flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-[10px] font-black text-white transition-transform hover:z-[80] hover:scale-105"
-                        >
-                          <span className="flex h-full w-full overflow-hidden rounded-full bg-slate-200 ring-2 ring-slate-300/90 shadow-sm">
-                            {workItem.assistantAvatar ? (
-                              <img src={workItem.assistantAvatar} alt={workItem.assistantName} className="h-full w-full object-cover" />
-                            ) : (
-                              <span className="flex h-full w-full items-center justify-center bg-gradient-to-br from-slate-300 to-slate-500">
-                                {workItem.assistantName.slice(0, 1)}
-                              </span>
-                            )}
-                          </span>
-                          <span className="pointer-events-none absolute right-full top-1/2 z-[90] mr-2 hidden min-w-[156px] -translate-y-1/2 rounded-xl bg-white/96 px-3 py-2 text-left text-[11px] font-extrabold text-slate-700 shadow-lg ring-1 ring-slate-200/80 backdrop-blur group-hover:block">
-                            <span className="block text-slate-900">{workItem.durationLabel}熨烫任务</span>
-                            {workItem.overtimeMin == null && (
-                              <span className="mt-0.5 block text-orange-500">已进行{fmtIroningHoverTime(workItem.elapsedMin)}</span>
-                            )}
-                            <span className={workItem.overtimeMin != null ? "mt-0.5 block text-red-600" : "mt-0.5 block text-slate-900"}>
-                              {workItem.overtimeMin != null
-                                ? `已超时${fmtIroningHoverTime(workItem.overtimeMin)}`
-                                : workItem.remainingMin == null
-                                  ? "预计剩余时间--"
-                                  : `预计剩余时间${fmtIroningHoverTime(workItem.remainingMin)}`}
-                            </span>
-                          </span>
-                        </span>
-                      )}
-                      <span
-                        className="group relative grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-white/72 shadow-sm ring-1 ring-white/80 backdrop-blur transition-transform hover:scale-105"
-                      >
-                        <IroningMachineIcon className="h-6 w-6" tone={tone} />
-                        <span className="pointer-events-none absolute right-full top-1/2 mr-2 hidden -translate-y-1/2 whitespace-nowrap rounded-xl bg-white/96 px-3 py-2 text-[11px] font-extrabold text-slate-700 shadow-lg ring-1 ring-slate-200/80 backdrop-blur group-hover:block">
-                          {machineStatusText}
-                        </span>
-                      </span>
+                <div
+                  className="relative flex flex-col items-end"
+                  onMouseLeave={closeIroningQueueHoverSoon}
+                >
+                  <button
+                    type="button"
+                    aria-expanded={ironingQueueMode === "fixed" ? ironingQueueFixedOpen : ironingQueueHoverOpen}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      if (ironingQueueHoverCloseTimer.current) clearTimeout(ironingQueueHoverCloseTimer.current);
+                      if (ironingQueueMode === "fixed") {
+                        setIroningQueueFixedOpen(!ironingQueueFixedOpen);
+                        setIroningQueueHoverOpen(false);
+                        return;
+                      }
+                      setIroningQueueMode("fixed");
+                      setIroningQueueFixedOpen(true);
+                      setIroningQueueHoverOpen(false);
+                    }}
+                    className={`flex h-9 items-center justify-end gap-1.5 rounded-full px-3.5 py-2 text-left text-[--text-primary] backdrop-blur-2xl transition-all duration-200 ${
+                      resolvedTheme === "dark"
+                        ? "bg-slate-900/58 shadow-[inset_0_1px_0_rgba(255,255,255,0.10)]"
+                        : "bg-white/58 shadow-[inset_0_1px_0_rgba(255,255,255,0.75)]"
+                    }`}
+                  >
+                    <span className="ml-0.5 flex h-4 w-4 shrink-0 items-center justify-center text-[--text-muted]">
+                      <svg viewBox="0 0 16 16" aria-hidden="true" className="h-3.5 w-3.5">
+                        <path
+                          d="M4 6.25L8 10.25L12 6.25"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="1.8"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        />
+                      </svg>
+                    </span>
+            <span
+              className="whitespace-nowrap text-[12px] font-black leading-none drop-shadow-sm"
+              onMouseEnter={openIroningQueueHover}
+              onMouseLeave={resetIroningQueueAutoAfterLabelLeave}
+            >
+              <span>熨烫机状态 - </span>
+              <span className={
+                ironingQueueOverview.tone === "busy"
+                  ? "text-red-500"
+                  : ironingQueueOverview.tone === "queue"
+                    ? "text-red-500"
+                    : ironingQueueOverview.tone === "moderate"
+                      ? "text-orange-500"
+                      : "text-emerald-500"
+              }>
+                {ironingQueueOverview.label}
+              </span>
+            </span>
+            <span className="grid h-9 w-9 shrink-0 place-items-center">
+              <IroningMachineIcon
+                className="h-6 w-6"
+                tone={ironingQueueOverview.tone}
+              />
+            </span>
+                  </button>
+                  <div
+                    className={`pointer-events-auto absolute right-0 top-full z-40 mt-0.5 origin-top overflow-visible transition-all duration-300 ease-[cubic-bezier(.16,1.35,.3,1)] ${
+                      (ironingQueueMode === "fixed" ? ironingQueueFixedOpen : ironingQueueHoverOpen)
+                        ? "max-h-[520px] translate-y-0 scale-y-100 opacity-100"
+                        : "max-h-0 -translate-y-1 scale-y-95 opacity-0"
+                    }`}
+                  >
+                    <div className="flex w-[184px] flex-col items-end gap-1.5 pr-3.5 pt-1">
+                      {renderIroningQueueDetailPanel()}
                     </div>
-                  );
-                })}
+                  </div>
+                </div>
               </div>
             )}
         {activeBuilding?.floorPlanUrl ? (
@@ -5130,10 +6241,13 @@ export default function PhotographerPage() {
                     return (
                       <div
                         key={`${venue.name}-area-label`}
-                        className="absolute -translate-x-1/2 -translate-y-1/2 rounded-full border border-white/45 px-2.5 py-1 text-[10px] font-extrabold text-white/90 shadow-[0_4px_12px_rgba(15,23,42,0.10)] backdrop-blur-sm"
+                        className="absolute -translate-x-1/2 -translate-y-1/2 rounded-full border border-white/45 font-extrabold leading-none text-white/90 shadow-[0_4px_12px_rgba(15,23,42,0.10)] backdrop-blur-sm"
                         style={{
                           left: `${center.x}%`,
                           top: `${center.y}%`,
+                          transform: `translate(-50%, -50%) scale(${mapMarkerInverseScale})`,
+                          padding: "var(--map-area-label-pad-y) var(--map-area-label-pad-x)",
+                          fontSize: "var(--map-area-label-font)",
                           backgroundColor: `${color}99`,
                           textShadow: "0 1px 1px rgba(0,0,0,0.22)",
                         }}
@@ -5191,13 +6305,12 @@ export default function PhotographerPage() {
                 if (a.pausedRoom) pushSlot(a.pausedRoom, `paused:${a.id}`);
                 if (a.pendingRoom) pushSlot(a.pendingRoom, `pending:${a.id}`);
               }
-              const SLOT_GAP = 22;
               const slotLayout = new Map<string, { offsetPx: number; zBase: number }>();
               for (const [, slotList] of slotsByRoom) {
                 const sorted = [...slotList].sort((x, y) => x.key.localeCompare(y.key));
                 const n = sorted.length;
                 sorted.forEach((s, i) => {
-                  const offsetPx = n > 1 ? (i - (n - 1) / 2) * SLOT_GAP : 0;
+                  const offsetPx = n > 1 ? (i - (n - 1) / 2) * mapSlotGapPx : 0;
                   slotLayout.set(s.key, { offsetPx, zBase: 8 + i });
                 });
               }
@@ -5220,7 +6333,7 @@ export default function PhotographerPage() {
                     style={{
                       left: `${px}%`,
                       top: `${py}%`,
-                      transform: `translate(calc(-50% + ${ox}px), -50%)`,
+                      transform: `translate(calc(-50% + ${ox / Math.max(0.01, mapZoom)}px), -50%) scale(${mapMarkerInverseScale})`,
                       zIndex: preemptHovered ? 50 : zb,
                     }}
                     onMouseEnter={(e) => {
@@ -5230,7 +6343,7 @@ export default function PhotographerPage() {
                     onMouseLeave={() => setHoveredMapAssistant(null)}
                     onMouseDown={(e) => e.stopPropagation()}
                   >
-                    <div className="relative h-[26px] w-[26px] overflow-visible">
+                    <div className="map-avatar-marker relative overflow-visible">
                       {a.preemptedOvertimeMin != null && (
                         <>
                           <div className="pointer-events-none absolute -inset-2 rounded-full bg-red-500/35 animate-ping" />
@@ -5287,14 +6400,14 @@ export default function PhotographerPage() {
                     style={{
                       left: `${pX}%`,
                       top: `${pY}%`,
-                      transform: `translate(calc(-50% + ${oxP}px), -50%)`,
+                      transform: `translate(calc(-50% + ${oxP / Math.max(0.01, mapZoom)}px), -50%) scale(${mapMarkerInverseScale})`,
                       zIndex: pausedHovered ? 50 : zbP,
                     }}
                     onMouseEnter={(e) => { e.stopPropagation(); setHoveredMapAssistant(`${a.id}-paused`); }}
                     onMouseLeave={() => setHoveredMapAssistant(null)}
                     onMouseDown={(e) => e.stopPropagation()}
                   >
-                    <div className="relative h-[26px] w-[26px] overflow-visible">
+                    <div className="map-avatar-marker relative overflow-visible">
                       {a.pausedOvertimeMin != null && (
                         <>
                           <div className="pointer-events-none absolute -inset-2 rounded-full bg-red-500/35 animate-ping" />
@@ -5351,18 +6464,18 @@ export default function PhotographerPage() {
                     style={{
                       left: `${px}%`,
                       top: `${py}%`,
-                      transform: `translate(calc(-50% + ${oxPen}px), -50%)`,
+                      transform: `translate(calc(-50% + ${oxPen / Math.max(0.01, mapZoom)}px), -50%) scale(${mapMarkerInverseScale})`,
                       zIndex: penHovered ? 50 : zbPen,
                     }}
                     onMouseEnter={(e) => { e.stopPropagation(); setHoveredMapAssistant(`${a.id}-pending`); }}
                     onMouseLeave={() => setHoveredMapAssistant(null)}
                     onMouseDown={(e) => e.stopPropagation()}
                   >
-                    <div className="relative h-[26px] w-[26px] overflow-visible">
+                    <div className="map-avatar-marker relative overflow-visible">
                       <div className="pointer-events-none absolute -inset-2 rounded-full bg-blue-500/25 animate-ping" />
                       <div className="pointer-events-none absolute -inset-1 rounded-full bg-blue-500/15 animate-pulse" />
                       <div
-                        className="relative z-[1] h-[26px] w-[26px] overflow-hidden rounded-full border-[2px] border-solid shadow-sm"
+                        className="relative z-[1] h-full w-full overflow-hidden rounded-full border-[2px] border-solid shadow-sm"
                         style={{ borderColor: DOCK_DOT.assigned }}
                       >
                         {a.avatar ? (
@@ -5412,7 +6525,7 @@ export default function PhotographerPage() {
                   style={{
                     left: `${posX}%`,
                     top: `${posY}%`,
-                    transform: `translate(calc(-50% + ${offset}px), -50%) scale(${isHovered ? 1.35 : 1})`,
+                    transform: `translate(calc(-50% + ${offset / Math.max(0.01, mapZoom)}px), -50%) scale(${mapMarkerInverseScale * (isHovered ? 1.35 : 1)})`,
                     zIndex: isHovered ? 50 : zMain,
                     transition: "transform .3s cubic-bezier(.34,1.56,.64,1)",
                   }}
@@ -5421,12 +6534,12 @@ export default function PhotographerPage() {
                   onMouseDown={(e) => e.stopPropagation()}
                 >
                   {isAssigned || a.resumingFromPause ? (
-                    <div className="relative h-[26px] w-[26px] overflow-visible">
+                    <div className="map-avatar-marker relative overflow-visible">
                       {/* 外圈脉冲：居中包裹头像，pointer-events-none 避免挡 hover */}
                       <div className="pointer-events-none absolute -inset-2 rounded-full bg-blue-500/25 animate-ping" />
                       <div className="pointer-events-none absolute -inset-1 rounded-full bg-blue-500/15 animate-pulse" />
                       <div
-                        className="relative z-[1] h-[26px] w-[26px] overflow-hidden rounded-full border-[2px] border-solid shadow-sm"
+                        className="relative z-[1] h-full w-full overflow-hidden rounded-full border-[2px] border-solid shadow-sm"
                         style={{ borderColor: assistantDockDotColor(a) }}
                       >
                         {a.avatar ? (
@@ -5437,7 +6550,7 @@ export default function PhotographerPage() {
                       </div>
                     </div>
                   ) : (
-                    <div className="relative h-[26px] w-[26px] overflow-visible">
+                    <div className="map-avatar-marker relative overflow-visible">
                       {a.executingOvertimeMin != null && (
                         <>
                           <div className="pointer-events-none absolute -inset-2 rounded-full bg-red-500/35 animate-ping" />
@@ -5639,7 +6752,7 @@ export default function PhotographerPage() {
 
 	          <div
 	            aria-hidden={!areaDataPanelOpen}
-	            className={`relative h-full min-h-0 overflow-visible rounded-[44px] border px-5 py-4 backdrop-blur-[26px] transition-all duration-[680ms] ease-[cubic-bezier(.22,1,.36,1)] ${
+	            className={`area-data-panel relative h-full min-h-0 overflow-visible rounded-[44px] border px-5 py-4 backdrop-blur-[26px] transition-all duration-[680ms] ease-[cubic-bezier(.22,1,.36,1)] ${
             resolvedTheme === "dark"
               ? "border-white/[0.12] bg-slate-950/73 shadow-[0_28px_90px_rgba(0,0,0,0.36)] ring-1 ring-white/[0.06]"
               : "border-white/70 bg-white/73 shadow-[0_28px_80px_rgba(56,68,89,0.12)] ring-1 ring-slate-900/[0.04]"
@@ -5649,8 +6762,8 @@ export default function PhotographerPage() {
               : "pointer-events-none translate-y-8 scale-[0.985] opacity-0"
           }`}
           >
-            <div className="grid h-full min-h-0 grid-cols-[32%_minmax(0,1fr)] gap-[22px]">
-              <div className={`min-h-0 rounded-[34px] border p-4 ${
+            <div className="area-data-layout grid h-full min-h-0 grid-cols-[32%_minmax(0,1fr)] gap-[22px]">
+              <div className={`area-public-queue min-h-0 rounded-[34px] border p-4 ${
                 resolvedTheme === "dark"
                   ? "border-white/[0.10] bg-white/[0.06] shadow-[inset_0_1px_0_rgba(255,255,255,0.08)]"
                   : "border-white/75 bg-white/58 shadow-[0_18px_44px_rgba(56,68,89,0.08),inset_0_1px_0_rgba(255,255,255,0.70)]"
@@ -5755,13 +6868,13 @@ export default function PhotographerPage() {
 
 	              <div className="grid h-full min-h-0 grid-rows-[auto_minmax(0,1fr)] gap-y-3 overflow-visible">
 	                <div aria-hidden="true" className="h-[16px]" />
-	                <div className="relative grid min-h-0 grid-cols-[minmax(0,1fr)_minmax(220px,0.78fr)] grid-rows-[136px_minmax(0,1fr)] gap-x-5 gap-y-3 2xl:grid-cols-[minmax(0,1.36fr)_minmax(0,0.62fr)_minmax(220px,0.74fr)] 2xl:grid-rows-[minmax(0,1fr)]">
+	                <div className="area-data-main-grid relative grid min-h-0 grid-cols-[minmax(0,1fr)_minmax(220px,0.78fr)] grid-rows-[136px_minmax(0,1fr)] gap-x-5 gap-y-3 2xl:grid-cols-[minmax(0,1.36fr)_minmax(0,0.62fr)_minmax(220px,0.74fr)] 2xl:grid-rows-[minmax(0,1fr)]">
                   <div className="col-span-2 row-start-1 grid min-h-0 grid-rows-[auto_minmax(0,1fr)] overflow-visible 2xl:col-span-1 2xl:row-start-1">
                     <div className="relative z-20 flex shrink-0 items-center justify-between gap-2 pl-[4.5rem]">
                       <h2 className="whitespace-nowrap text-[12px] font-extrabold tracking-wide text-[--text-primary]">{activeBuilding?.name ?? "当前"}区域 任务数据</h2>
                     </div>
                     <div className="relative flex h-full items-center justify-center rounded-2xl px-5 py-3 2xl:px-6 2xl:py-5">
-                      <div className={`group relative grid h-full w-full max-w-[460px] grid-cols-6 grid-rows-3 content-center gap-x-4 gap-y-2.5 rounded-[28px] border px-4 py-3 transition-all duration-200 2xl:max-w-[520px] 2xl:gap-x-6 2xl:gap-y-5 2xl:px-5 2xl:py-5 ${
+                      <div className={`area-metrics-grid group relative grid h-full w-full max-w-[460px] grid-cols-6 grid-rows-3 content-center gap-x-4 gap-y-2.5 rounded-[28px] border px-4 py-3 transition-all duration-200 2xl:max-w-[520px] 2xl:gap-x-6 2xl:gap-y-5 2xl:px-5 2xl:py-5 ${
                         resolvedTheme === "dark"
                           ? "border-transparent hover:border-white/[0.10] hover:bg-white/[0.04]"
                           : "border-transparent hover:border-white/70 hover:bg-white/28 hover:shadow-[0_14px_34px_rgba(56,68,89,0.08)]"
@@ -5833,7 +6946,7 @@ export default function PhotographerPage() {
                                 aria-expanded={expandedAreaMetricKey === item.detailKey}
                               >
                                 <span className="whitespace-nowrap text-[10px] font-bold text-[--text-muted] 2xl:text-[11px]">{item.caption}</span>
-                                <span data-area-metric-value className="text-[24px] font-extrabold leading-none tabular-nums text-[--text-primary] 2xl:text-[32px]">{item.value}</span>
+                                <span data-area-metric-value className="area-metric-value text-[24px] font-extrabold leading-none tabular-nums text-[--text-primary] 2xl:text-[32px]">{item.value}</span>
                                 {expandedAreaMetricKey === item.detailKey ? renderAreaMetricBubble({
                                   key: item.detailKey,
                                   caption: item.caption,
@@ -5855,13 +6968,13 @@ export default function PhotographerPage() {
                                       setAreaCompletedStatsHoveredDay(null);
                                       setShowAreaCompletedStatsModal(true);
                                     }}
-                                    className="rounded-xl px-2 text-[24px] font-extrabold leading-none tabular-nums text-[--text-primary] transition-colors hover:bg-white/34 focus-visible:bg-white/40 focus-visible:outline-none 2xl:text-[32px]"
+                                    className="area-metric-value rounded-xl px-2 text-[24px] font-extrabold leading-none tabular-nums text-[--text-primary] transition-colors hover:bg-white/34 focus-visible:bg-white/40 focus-visible:outline-none 2xl:text-[32px]"
                                     aria-label="打开区域完成统计"
                                   >
                                     {item.value}
                                   </button>
                                 ) : (
-                                  <span className="text-[24px] font-extrabold leading-none tabular-nums text-[--text-primary] 2xl:text-[32px]">{item.value}</span>
+                                  <span className="area-metric-value text-[24px] font-extrabold leading-none tabular-nums text-[--text-primary] 2xl:text-[32px]">{item.value}</span>
                                 )}
                               </div>
                             )}
@@ -5872,7 +6985,7 @@ export default function PhotographerPage() {
                   </div>
 
 			                  <div
-			                    className="relative z-[90] col-start-2 row-start-2 grid h-full min-h-0 min-w-0 grid-rows-[auto_minmax(0,1fr)] gap-y-2 overflow-visible px-0 py-0 2xl:col-start-3 2xl:row-start-1"
+			                    className="area-assistant-rank relative z-[90] col-start-2 row-start-2 grid h-full min-h-0 min-w-0 grid-rows-[auto_minmax(0,1fr)] gap-y-2 overflow-visible px-0 py-0 2xl:col-start-3 2xl:row-start-1"
 			                    onWheelCapture={(e) => {
 			                      const list = assistantRankingScrollRef.current;
 			                      if (!list || list.scrollHeight <= list.clientHeight) return;
@@ -6024,7 +7137,7 @@ export default function PhotographerPage() {
 	                    </div>
                   </div>
 
-	                  <div className="relative z-10 col-start-1 row-start-2 grid min-h-0 grid-rows-[auto_minmax(0,1fr)] overflow-visible px-0 py-0 2xl:col-start-2 2xl:row-start-1">
+	                  <div className="area-task-types relative z-10 col-start-1 row-start-2 grid min-h-0 grid-rows-[auto_minmax(0,1fr)] overflow-visible px-0 py-0 2xl:col-start-2 2xl:row-start-1">
                     <div className="relative z-20 flex shrink-0 items-center justify-between gap-2">
                       <h3 className="whitespace-nowrap text-[12px] font-extrabold tracking-wide text-[--text-primary]">任务类型</h3>
                     </div>
@@ -6042,6 +7155,7 @@ export default function PhotographerPage() {
                       ) : (
                         <>
                           <div
+                            data-area-task-type-pie
                             className="relative flex min-h-0 items-center justify-center overflow-visible"
                             onMouseLeave={() => setHoveredAreaTaskTypeName(null)}
                           >
@@ -6128,7 +7242,7 @@ export default function PhotographerPage() {
                               </div>
                             </div>
                           </div>
-                          <div className="-mt-1 min-h-0 overflow-y-auto pr-1">
+                          <div data-area-task-type-list className="-mt-1 min-h-0 overflow-y-auto pr-1">
                             <div className="space-y-0.5">
                               <div className={`grid grid-cols-[1fr_52px] items-center gap-3 pb-0.5 text-[11px] font-extrabold ${
                                 resolvedTheme === "dark" ? "text-slate-200" : "text-slate-700"
@@ -6756,7 +7870,7 @@ export default function PhotographerPage() {
         }}
       >
         {/* 左侧三面板 */}
-        <div className="absolute top-3 left-3 bottom-3 z-20 w-[330px] flex flex-col gap-2">
+        <div className="absolute top-3 left-3 bottom-3 z-20 hidden w-[330px] flex-col gap-2 lg:flex">
           {/* 面板1：摄影师信息 + 位置 + 天气 + 时间 */}
           <div className={`relative z-[80] overflow-visible rounded-2xl px-4 py-3.5 ${glass}`}>
             <div className="relative mb-1" style={{ zIndex: 240 }}>
@@ -7162,6 +8276,13 @@ export default function PhotographerPage() {
                   const actionableWaitingTasks = profile
                     ? actionableWaitingTasksForProfile(taskListRaw, profile.id)
                     : [];
+                  const selectedActionableWaitingTasks = actionableWaitingTasks.filter((task) =>
+                    !isAssignedIroningReadyTask(task, profile?.id) ||
+                    freeIroningMachineCount > 0
+                  );
+                  const passiveIroningReadyTask = actionableWaitingTasks.find((task) =>
+                    isAssignedIroningReadyTask(task, profile?.id)
+                  ) ?? null;
 
                     const renderPausedBlock = (task: TaskFromAPI, flex: number, withResume = false) => {
                       const leaveSec = totalPausedSecondsFromApi(myTaskTiming(task), now.getTime());
@@ -7317,7 +8438,7 @@ export default function PhotographerPage() {
                         type="button"
                         key={task.id}
                         onClick={() => handleAssistantStatusChange("start", task)}
-                        className={`flex min-h-0 flex-1 items-center gap-2 rounded-xl border px-2.5 py-2 text-left shadow-sm transition-all hover:translate-x-0.5 active:scale-[0.99] ${tone.card}`}
+                        className={`flex h-full min-h-0 w-full flex-1 items-center gap-2 rounded-xl border px-2.5 py-2 text-left shadow-sm transition-all hover:translate-x-0.5 active:scale-[0.99] ${tone.card}`}
                       >
                         <div className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full ${tone.dotWrap}`}>
                           <div className={`h-4 w-4 rounded-full ${tone.dot}`} />
@@ -7370,7 +8491,7 @@ export default function PhotographerPage() {
                       </span>
                       {lineRoomPhotoCategory(task, "text-emerald-700/80")}
                       <p className="text-[11px] text-emerald-700/70 text-center px-2">
-                        熨烫机空出后再开始，可先处理其他待就位任务
+                        当前无空余熨烫机，只能开始做其他任务
                       </p>
                     </div>
                   );
@@ -7527,8 +8648,36 @@ export default function PhotographerPage() {
                     );
                   }
 
-                  if (!pausedRawTask && actionableWaitingTasks.length > 1) {
-                    return renderWaitingChoices(actionableWaitingTasks);
+                  if (!currentRawTask && !pausedRawTask && passiveIroningReadyTask && freeIroningMachineCount === 0) {
+                    const otherWaitingTasks = selectedActionableWaitingTasks.filter((task) => task.id !== passiveIroningReadyTask.id);
+                    const primaryWaitingTask = otherWaitingTasks[0] ?? null;
+                    if (!primaryWaitingTask) {
+                      return renderPassiveIroningWaitingBlock(passiveIroningReadyTask, 1);
+                    }
+                    return (
+                      <div className="flex-1 min-h-0 w-full rounded-xl bg-white/18 p-2">
+                        <div className="mb-1.5 flex items-center justify-between gap-2 px-0.5">
+                          <span className="text-[11px] font-extrabold text-[--text-primary]">选择要开始的任务</span>
+                          <span className="rounded-md bg-white/55 px-1.5 py-0.5 text-[9px] font-extrabold text-[--text-muted]">
+                            {primaryWaitingTask ? "2 个可选" : "1 个可选"}
+                          </span>
+                        </div>
+                        <div className="flex h-[calc(100%-1.375rem)] min-h-0 flex-col gap-1.5">
+                          <div className="shrink-0" style={{ flex: "0 0 18%" }}>
+                            {renderPassiveIroningWaitingBlock(passiveIroningReadyTask, 0.55)}
+                          </div>
+                          {primaryWaitingTask ? (
+                            <div className="flex min-h-0 flex-[1.7]">
+                              {renderTaskBlock(primaryWaitingTask, 1)}
+                            </div>
+                          ) : null}
+                        </div>
+                      </div>
+                    );
+                  }
+
+                  if (!pausedRawTask && selectedActionableWaitingTasks.length > 1) {
+                    return renderWaitingChoices(selectedActionableWaitingTasks);
                   }
 
                   // 场景2：已暂停 + 待就位插单 → 暂停 1/3，待就位（点击开始）2/3
@@ -8089,7 +9238,7 @@ export default function PhotographerPage() {
 
         {/* 右上按钮区域 */}
         <div
-          className={`absolute top-3 right-3 z-20 flex ${
+          className={`absolute top-3 right-3 z-20 hidden lg:flex ${
             loginRole === "admin" || loginRole === "assistant_leader"
               ? "flex-col items-end gap-1.5"
               : "items-center gap-2"
@@ -8099,7 +9248,7 @@ export default function PhotographerPage() {
           {!(loginRole === "admin" || loginRole === "assistant_leader") && (
             <a
               href="/"
-              onClick={() => { localStorage.removeItem("user"); localStorage.removeItem("currentProfileId"); }}
+              onClick={() => { safeLocalStorageRemove("user"); safeLocalStorageRemove("currentProfileId"); }}
               className={`rounded-xl px-3 py-2 flex items-center gap-2 cursor-pointer hover:bg-white/70 transition-colors ${glass}`}
             >
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--text-secondary)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -8145,7 +9294,7 @@ export default function PhotographerPage() {
                 <div className="rounded-2xl border border-white/70 bg-white/95 p-1.5 shadow-xl shadow-black/10 backdrop-blur-xl">
                   <a
                     href="/"
-                    onClick={() => { localStorage.removeItem("user"); localStorage.removeItem("currentProfileId"); }}
+                    onClick={() => { safeLocalStorageRemove("user"); safeLocalStorageRemove("currentProfileId"); }}
                     className="flex w-full items-center justify-start rounded-xl px-3 py-2 text-left text-xs font-bold text-[--text-secondary] transition-colors hover:bg-gray-50 hover:text-[--text-primary]"
                   >
                     返回登录
@@ -8227,7 +9376,7 @@ export default function PhotographerPage() {
           onClick={() => setShowIdentityModal(false)}
         >
           <div
-            className={`relative flex w-[min(92vw,680px)] max-h-[84vh] flex-col overflow-hidden rounded-[34px] border p-1 shadow-[0_32px_96px_rgba(15,23,42,0.24),inset_0_1px_0_rgba(255,255,255,0.72)] backdrop-blur-[32px] ring-1 ${
+            className={`relative flex w-[min(94vw,680px)] max-h-[86vh] flex-col overflow-hidden rounded-[26px] border p-1 shadow-[0_32px_96px_rgba(15,23,42,0.24),inset_0_1px_0_rgba(255,255,255,0.72)] backdrop-blur-[32px] ring-1 sm:rounded-[34px] ${
               resolvedTheme === "dark"
                 ? "border-white/12 bg-slate-950/62 ring-white/10"
                 : "border-white/82 bg-white/58 ring-white/70"
@@ -8241,8 +9390,8 @@ export default function PhotographerPage() {
                   "radial-gradient(68% 42% at 16% 0%, rgba(255,255,255,0.70), transparent 60%), radial-gradient(44% 36% at 100% 0%, rgba(249,115,22,0.10), transparent 58%), linear-gradient(135deg, rgba(255,255,255,0.34), transparent 44%)",
               }}
             />
-            <div className="relative z-[1] flex items-center justify-between px-6 pt-6 pb-3">
-              <h2 className="text-[20px] font-extrabold tracking-wide text-[--text-primary]">切换身份</h2>
+            <div className="relative z-[1] flex items-center justify-between px-4 pt-5 pb-3 sm:px-6 sm:pt-6">
+              <h2 className="text-[18px] font-extrabold tracking-wide text-[--text-primary] sm:text-[20px]">切换身份</h2>
               <button
                 onClick={() => setShowIdentityModal(false)}
                 className="flex h-9 w-9 items-center justify-center rounded-2xl border border-white/65 bg-white/36 text-[--text-secondary] shadow-sm backdrop-blur-xl transition-colors hover:bg-white/66 hover:text-[--text-primary]"
@@ -8253,7 +9402,7 @@ export default function PhotographerPage() {
                 </svg>
               </button>
             </div>
-            <div className="relative z-[1] px-6 pb-3">
+            <div className="relative z-[1] px-4 pb-3 sm:px-6">
               <p className="text-[12px] font-semibold text-[--text-muted]">选择一个身份查看对应视角的页面，当前：<span className="font-extrabold text-[--text-primary]">{profile?.name}</span></p>
             </div>
             {/* Building tabs + filtered profiles */}
@@ -8302,7 +9451,7 @@ export default function PhotographerPage() {
                     onSelect={(id) => setIdentityBuildingFilter(id)}
                     onReorder={(newOrder) => setIdentityBuildingOrder(newOrder)}
                   />
-                  <div className="relative z-[1] mx-2 mb-2 flex-1 overflow-y-auto px-3 pb-4 pt-1 [scrollbar-color:rgba(148,163,184,0.48)_transparent] [scrollbar-width:thin]">
+                  <div className="relative z-[1] mx-1 mb-2 flex-1 overflow-y-auto px-2 pb-4 pt-1 [scrollbar-color:rgba(148,163,184,0.48)_transparent] [scrollbar-width:thin] sm:mx-2 sm:px-3">
                     {activeEntry && roles.map((role) => {
                       const roleProfiles = activeEntry.profiles.filter((p) => p.role === role);
                       if (roleProfiles.length === 0) return null;
@@ -8312,7 +9461,7 @@ export default function PhotographerPage() {
                             <span className={`rounded-full px-2.5 py-1 text-[11px] font-extrabold ${roleBg(role)} ${roleColor(role)}`}>{roleLabel(role)}</span>
                             <span className="text-[11px] font-bold text-[--text-muted]">{roleProfiles.length}人</span>
                           </div>
-                          <div className="grid grid-cols-2 gap-x-2 gap-y-1">
+                          <div className="grid grid-cols-1 gap-x-2 gap-y-1 sm:grid-cols-2">
                             {roleProfiles.map((p) => {
                               const isCurrent = p.id === profile?.id;
                               const isAssistant = isAssistantRole(p.role);
@@ -9237,16 +10386,18 @@ export default function PhotographerPage() {
         })()
       )}
 
-      <AssistantDock
-        assistants={assistants}
-        rankingCrownByAssistantId={rankingCrownByAssistantId}
-        onNoteEdit={(taskId, note, anchor) => {
-          if (noteTaskIsExecuting(taskId)) return;
-          setNotePopupTaskId(taskId);
-          setNotePopupValue(note);
-          setNotePopupAnchor(anchor);
-        }}
-      />
+      <div className="hidden lg:block">
+        <AssistantDock
+          assistants={assistants}
+          rankingCrownByAssistantId={rankingCrownByAssistantId}
+          onNoteEdit={(taskId, note, anchor) => {
+            if (noteTaskIsExecuting(taskId)) return;
+            setNotePopupTaskId(taskId);
+            setNotePopupValue(note);
+            setNotePopupAnchor(anchor);
+          }}
+        />
+      </div>
       </div>
     </div>
   );

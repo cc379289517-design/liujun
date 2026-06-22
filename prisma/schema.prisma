@@ -230,10 +230,14 @@ model BookingTask {
   category        TaskCategory @relation(fields: [categoryId], references: [id])
 
   @@index([status, priority])
+  @@index([status, createdAt])
   @@index([ironingStage, status])
   @@index([assistantId, status])
+  @@index([assistantId, createdAt])
   @@index([photographerId])
+  @@index([photographerId, createdAt])
   @@index([locationBuildingId])
+  @@index([createdAt])
   @@map("booking_tasks")
 }
 
@@ -288,6 +292,7 @@ model TaskCollaborator {
 
   @@unique([taskId, assistantId])
   @@index([assistantId, status])
+  @@index([assistantId, status, joinedAt])
   @@index([taskId, status])
   @@map("task_collaborators")
 }

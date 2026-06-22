@@ -1,7 +1,7 @@
 import { NextRequest } from "next/server";
 import { OnlineStatus, ProfileStatus } from "@/generated/prisma/client";
 import { prisma } from "@/lib/prisma";
-import { sweepWaitingTasks } from "@/lib/scheduler";
+import { runTaskMaintenance } from "@/lib/scheduler";
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -56,7 +56,7 @@ export async function PATCH(request: NextRequest, { params }: RouteContext) {
           include: { building: { select: { id: true, name: true, extraVenues: true } } },
         }),
       ]);
-      await sweepWaitingTasks();
+      await runTaskMaintenance({ force: true });
       return Response.json({ notice: updatedNotice, profile: updatedProfile });
     }
 

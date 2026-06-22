@@ -11,10 +11,7 @@ import {
   interruptAssistant,
   interruptWaitingPreempt,
   recordP1InterruptRoundRobin,
-  sweepWaitingTasks,
-  cleanupStaleTasks,
-  syncProfileStatus,
-  escalatePriorities,
+  runTaskMaintenance,
   taskCategoryCanBeInterrupted,
   taskLeaveUpperMinutes,
 } from "@/lib/scheduler";
@@ -45,6 +42,11 @@ const TASK_INCLUDE = {
     },
   },
 } as const;
+
+async function createdTaskResponse(task: unknown) {
+  await runTaskMaintenance();
+  return Response.json(task, { status: 201 });
+}
 
 /**
  * GET /api/tasks - 查询任务列表
@@ -91,18 +93,6 @@ export async function GET(request: NextRequest) {
       const nextMonday = new Date(monday.getTime() + 7 * 24 * 60 * 60 * 1000);
       where.createdAt = { gte: monday, lt: nextMonday };
     }
-
-    // 每日首次请求时清理过期任务
-    await cleanupStaleTasks();
-
-    // 同步助理 profile.status 与实际任务一致
-    await syncProfileStatus();
-
-    // 动态提权：等待超时的任务自动升级优先级
-    await escalatePriorities();
-
-    // 每次查询时扫描：将空闲助理与等待中的任务自动匹配
-    await sweepWaitingTasks();
 
     const tasks = await prisma.bookingTask.findMany({
       where,
@@ -152,10 +142,7 @@ export async function DELETE(request: NextRequest) {
     }
 
     const result = await prisma.bookingTask.deleteMany({ where });
-    await syncProfileStatus();
-
-    // 助理释放后，扫描等待队列自动派单
-    await sweepWaitingTasks();
+    await runTaskMaintenance({ force: true });
 
     return Response.json({ deleted: result.count });
   } catch (error) {
@@ -190,6 +177,8 @@ export async function POST(request: NextRequest) {
         { status: 400 }
       );
     }
+
+    await runTaskMaintenance({ force: true });
 
     const taskLimit = await checkPhotographerActiveTaskLimit(photographerId);
     const queuedByPhotographerLimit = !taskLimit.allowed;
@@ -265,7 +254,7 @@ export async function POST(request: NextRequest) {
     });
 
     if (queuedByPhotographerLimit) {
-      return Response.json(task, { status: 201 });
+      return createdTaskResponse(task);
     }
 
     if (isSpecified && assistantId) {
@@ -284,7 +273,7 @@ export async function POST(request: NextRequest) {
         where: { id: task.id },
         include: TASK_INCLUDE,
       });
-      return Response.json(updated ?? task, { status: 201 });
+      return createdTaskResponse(updated ?? task);
     }
 
     // 自动派单（非指定助理模式）：先空闲助理；无空闲则对「更紧急的短时单」尝试插单
@@ -300,7 +289,7 @@ export async function POST(request: NextRequest) {
           where: { id: task.id },
           include: TASK_INCLUDE,
         });
-        return Response.json(updated, { status: 201 });
+        return createdTaskResponse(updated);
       }
 
       if (isIroningCategoryName(category.name)) {
@@ -308,7 +297,7 @@ export async function POST(request: NextRequest) {
           where: { id: task.id },
           include: TASK_INCLUDE,
         });
-        return Response.json(finalTask ?? task, { status: 201 });
+        return createdTaskResponse(finalTask ?? task);
       }
 
       // 同楼座无空闲助理：尝试抢占「已派发、尚在待就位」的较低优先任务（新单更紧急）
@@ -318,7 +307,7 @@ export async function POST(request: NextRequest) {
           where: { id: task.id },
           include: TASK_INCLUDE,
         });
-        return Response.json(updated ?? task, { status: 201 });
+        return createdTaskResponse(updated ?? task);
       }
 
       // 仍无：尝试对执行中单插单（新单更紧急且离场在 cap 内、当前类型允许被打断）
@@ -385,7 +374,7 @@ export async function POST(request: NextRequest) {
             where: { id: task.id },
             include: TASK_INCLUDE,
           });
-          return Response.json(updated, { status: 201 });
+          return createdTaskResponse(updated);
         }
       }
 
@@ -393,14 +382,14 @@ export async function POST(request: NextRequest) {
         where: { id: task.id },
         include: TASK_INCLUDE,
       });
-      return Response.json(finalTask ?? task, { status: 201 });
+      return createdTaskResponse(finalTask ?? task);
     }
 
     const withInclude = await prisma.bookingTask.findUnique({
       where: { id: task.id },
       include: TASK_INCLUDE,
     });
-    return Response.json(withInclude ?? task, { status: 201 });
+    return createdTaskResponse(withInclude ?? task);
   } catch (error) {
     console.error("[POST /api/tasks]", error);
     return Response.json({ error: "Failed to create task" }, { status: 500 });

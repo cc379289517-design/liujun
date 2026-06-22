@@ -1,4 +1,4 @@
-import { sweepWaitingTasks } from "@/lib/scheduler";
+import { runTaskMaintenance } from "@/lib/scheduler";
 
 /**
  * POST /api/tasks/sweep - 触发全局扫描自动派单
@@ -6,8 +6,8 @@ import { sweepWaitingTasks } from "@/lib/scheduler";
  */
 export async function POST() {
   try {
-    const count = await sweepWaitingTasks();
-    return Response.json({ assigned: count });
+    const result = await runTaskMaintenance();
+    return Response.json(result);
   } catch (error) {
     console.error("[POST /api/tasks/sweep]", error);
     return Response.json({ error: "Failed to sweep" }, { status: 500 });

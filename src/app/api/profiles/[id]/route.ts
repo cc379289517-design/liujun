@@ -1,7 +1,7 @@
 import { NextRequest } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { OnlineStatus, ProfileStatus, TaskStatus } from "@/generated/prisma/client";
-import { sweepWaitingTasks } from "@/lib/scheduler";
+import { runTaskMaintenance } from "@/lib/scheduler";
 import {
   ASSISTANT_EATING_SUB_STATUS,
   EATING_REENTRY_COOLDOWN_CONFIG_KEY,
@@ -241,7 +241,7 @@ export async function PATCH(request: NextRequest, { params }: RouteContext) {
     }
 
     if (shouldSweep) {
-      await sweepWaitingTasks();
+      await runTaskMaintenance({ force: true });
       const fresh = await prisma.profile.findUnique({
         where: { id },
         include: { building: { select: { id: true, name: true, extraVenues: true } } },

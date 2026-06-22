@@ -1,6 +1,6 @@
 import { NextRequest } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { completeTask, assignTask, sweepWaitingTasks, syncProfileStatus, updateTaskParticipantStatus } from "@/lib/scheduler";
+import { completeTask, assignTask, runTaskMaintenance, updateTaskParticipantStatus } from "@/lib/scheduler";
 import { TaskStatus, ProfileStatus } from "@/generated/prisma/client";
 import { Prisma } from "@/generated/prisma/client";
 import { flushExecutingSegment } from "@/lib/taskEffectiveTime";
@@ -108,10 +108,7 @@ export async function DELETE(_request: NextRequest, { params }: RouteContext) {
     }
 
     await prisma.bookingTask.delete({ where: { id } });
-    await syncProfileStatus();
-
-    // 助理释放后，扫描等待队列自动派单
-    await sweepWaitingTasks();
+    await runTaskMaintenance({ force: true });
 
     return Response.json({ success: true });
   } catch (error) {
@@ -155,6 +152,7 @@ export async function PATCH(request: NextRequest, { params }: RouteContext) {
         }
         await updateTaskParticipantStatus(id, actorId, "executing", estMinutes);
         const updated = await prisma.bookingTask.findUnique({ where: { id } });
+        await runTaskMaintenance();
 
         return Response.json(updated);
       }
@@ -166,6 +164,7 @@ export async function PATCH(request: NextRequest, { params }: RouteContext) {
         }
         await updateTaskParticipantStatus(id, actorId, "paused");
         const updated = await prisma.bookingTask.findUnique({ where: { id } });
+        await runTaskMaintenance();
 
         return Response.json(updated);
       }
@@ -178,6 +177,7 @@ export async function PATCH(request: NextRequest, { params }: RouteContext) {
           await completeTask(id);
         }
         const updated = await prisma.bookingTask.findUnique({ where: { id } });
+        await runTaskMaintenance();
         return Response.json(updated);
       }
 
@@ -195,6 +195,7 @@ export async function PATCH(request: NextRequest, { params }: RouteContext) {
         if (newStatus === "completed") {
           await completeTask(id);
           const updated = await prisma.bookingTask.findUnique({ where: { id } });
+          await runTaskMaintenance();
           return Response.json(updated);
         }
 
@@ -285,7 +286,7 @@ export async function PATCH(request: NextRequest, { params }: RouteContext) {
         if (newStatus === "waiting" && !task.assistantId) {
           await assignTask(id);
         }
-        await syncProfileStatus();
+        await runTaskMaintenance();
 
         return Response.json(updated);
       }

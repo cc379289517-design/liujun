@@ -464,6 +464,41 @@ async function assistantHasActiveNonPassiveWork(assistantId: string): Promise<bo
   return task != null || participant != null;
 }
 
+async function activeWorkingAssistantIds(assistantIds: string[]): Promise<Set<string>> {
+  if (assistantIds.length === 0) return new Set();
+
+  const [tasks, participants] = await Promise.all([
+    prisma.bookingTask.findMany({
+      where: {
+        assistantId: { in: assistantIds },
+        status: { in: [TaskStatus.executing, TaskStatus.paused] },
+      },
+      select: { assistantId: true },
+      distinct: ["assistantId"],
+    }),
+    prisma.taskCollaborator.findMany({
+      where: {
+        assistantId: { in: assistantIds },
+        status: { in: WORKING_PARTICIPANT_STATUSES },
+        task: {
+          status: { in: [TaskStatus.executing, TaskStatus.paused] },
+        },
+      },
+      select: { assistantId: true },
+      distinct: ["assistantId"],
+    }),
+  ]);
+
+  const ids = new Set<string>();
+  for (const task of tasks) {
+    if (task.assistantId) ids.add(task.assistantId);
+  }
+  for (const participant of participants) {
+    ids.add(participant.assistantId);
+  }
+  return ids;
+}
+
 function isIroningTaskCategory(category: { name?: string | null } | null | undefined): boolean {
   return isIroningCategoryName(category?.name);
 }
@@ -888,9 +923,6 @@ export async function updateTaskParticipantStatus(
 
   await syncTaskAggregateFromParticipants(taskId);
   await syncProfileStatus();
-  if (nextStatus === "completed") {
-    await sweepWaitingTasks();
-  }
 }
 
 /**
@@ -1034,11 +1066,9 @@ export async function reassignOverdueStandbyTasks(): Promise<number> {
     },
     orderBy: [{ name: "asc" }, { id: "asc" }],
   });
-  if (idleAssistants.length === 0) return 0;
 
   const collaboratorIds = await activeCollaboratorAssistantIds(idleAssistants.map((a) => a.id));
   const trulyIdle = idleAssistants.filter((a) => !collaboratorIds.includes(a.id));
-  if (trulyIdle.length === 0) return 0;
 
   const assistantsByBuilding = new Map<number, typeof trulyIdle>();
   for (const assistant of trulyIdle) {
@@ -1085,15 +1115,19 @@ export async function reassignOverdueStandbyTasks(): Promise<number> {
 
   const candidates = overdueTasks.flatMap((task) => {
     if (!task.assistantId || !task.assistant) return [];
+    if (isIroningTaskCategory(task.category) && task.ironingStage !== IroningTaskStage.notified) return [];
     const primary = task.collaborators.find((participant) => participant.assistantId === task.assistantId);
     if (!primary) return [];
-    const waitedMinutes = Math.floor((now.getTime() - primary.joinedAt.getTime()) / 60000);
+    const waitingSince = isIroningTaskCategory(task.category) && task.ironingStage === IroningTaskStage.notified
+      ? task.ironingNotifiedAt ?? primary.joinedAt
+      : primary.joinedAt;
+    const waitedMinutes = Math.floor((now.getTime() - waitingSince.getTime()) / 60000);
     if (waitedMinutes < thresholdMinutes) return [];
     const buildingId = task.locationBuildingId ?? task.photographer.buildingId;
     return [{
       task,
       buildingId,
-      waitingSince: primary.joinedAt,
+      waitingSince,
       waitedMinutes,
       score: standbyReassignmentScore(task.priority, waitedMinutes, thresholdMinutes),
     }];
@@ -1107,12 +1141,48 @@ export async function reassignOverdueStandbyTasks(): Promise<number> {
   let reassignedCount = 0;
   for (const candidate of candidates) {
     const available = availableByBuilding.get(candidate.buildingId);
-    if (!available || available.length === 0) continue;
+    const oldAssistantId = candidate.task.assistantId;
+    if (!oldAssistantId || !candidate.task.assistant) continue;
+    if (!available || available.length === 0) {
+      if (!isIroningTaskCategory(candidate.task.category) || candidate.task.ironingStage !== IroningTaskStage.notified) {
+        continue;
+      }
+      const hasActiveWork = await assistantHasActiveNonPassiveWork(oldAssistantId);
+      if (hasActiveWork) continue;
+
+      await prisma.$transaction(async (tx) => {
+        await tx.profile.update({
+          where: { id: oldAssistantId },
+          data: { status: ProfileStatus.idle, onlineStatus: OnlineStatus.offline, isOnline: false },
+        });
+        await tx.standbyReassignmentNotice.create({
+          data: {
+            taskId: candidate.task.id,
+            oldAssistantId,
+            oldAssistantName: candidate.task.assistant!.name,
+            newAssistantId: oldAssistantId,
+            newAssistantName: candidate.task.assistant!.name,
+            taskRoomNumber: candidate.task.roomNumber,
+            taskCategoryName: candidate.task.category.name,
+            taskPriority: candidate.task.priority,
+            waitedMinutes: candidate.waitedMinutes,
+            thresholdMinutes,
+            score: candidate.score,
+            reason: "standby_timeout_no_replacement_offline",
+            oldAssistantSetOffline: true,
+          },
+        });
+      });
+      reassignedCount++;
+      console.log(
+        `[reassignOverdueStandbyTasks] ${candidate.task.id} ${candidate.task.assistant.name} 准备熨烫超时且无可替换助理，已离线`
+      );
+      continue;
+    }
 
     const newAssistantId = available.shift()!;
     const newAssistant = trulyIdle.find((assistant) => assistant.id === newAssistantId);
-    const oldAssistantId = candidate.task.assistantId;
-    if (!newAssistant || !oldAssistantId || newAssistant.id === oldAssistantId || !candidate.task.assistant) continue;
+    if (!newAssistant || newAssistant.id === oldAssistantId) continue;
     if (!isIroningTaskCategory(candidate.task.category) && await assistantHasPendingIroningWait(oldAssistantId)) {
       continue;
     }
@@ -1425,6 +1495,144 @@ export async function balanceIroningWaitAssignments(): Promise<number> {
   return movedCount;
 }
 
+export async function releaseUnselectedStandbyTasks(): Promise<number> {
+  const now = new Date();
+  const standbyTasks = await prisma.bookingTask.findMany({
+    where: {
+      status: TaskStatus.waiting,
+      assistantId: { not: null },
+      parentTaskId: null,
+      ironingStage: IroningTaskStage.none,
+      AND: [
+        NOT_PHOTOGRAPHER_LIMIT_QUEUE_WHERE,
+        { category: { name: { not: { contains: "熨" } } } },
+      ],
+    },
+    include: {
+      photographer: { select: { buildingId: true } },
+      assistant: { select: { id: true, name: true } },
+      category: { select: { name: true } },
+      collaborators: {
+        where: { role: "primary", status: "waiting" },
+        select: { assistantId: true, joinedAt: true },
+        orderBy: { joinedAt: "asc" },
+      },
+    },
+    orderBy: [{ priority: "asc" }, { createdAt: "asc" }],
+  });
+  if (standbyTasks.length === 0) return 0;
+
+  const ownerIds = Array.from(new Set(standbyTasks.map((task) => task.assistantId).filter((id): id is string => Boolean(id))));
+  const busyOwners = await activeWorkingAssistantIds(ownerIds);
+  if (busyOwners.size === 0) return 0;
+
+  const releasableByBuilding = new Map<number, typeof standbyTasks>();
+  for (const task of standbyTasks) {
+    if (!task.assistantId || !task.assistant || !busyOwners.has(task.assistantId)) continue;
+    const buildingId = taskEffectiveBuildingId(task);
+    if (buildingId == null) continue;
+    const list = releasableByBuilding.get(buildingId) || [];
+    list.push(task);
+    releasableByBuilding.set(buildingId, list);
+  }
+  if (releasableByBuilding.size === 0) return 0;
+
+  let movedCount = 0;
+  for (const [buildingId, tasks] of releasableByBuilding) {
+    const dispatchable = await dispatchableAssistantsForBuilding(buildingId);
+    const availableTargets = (await buildIdleDispatchOrder(
+      buildingId,
+      dispatchable.filter((assistant) => !busyOwners.has(assistant.id))
+    )).map((assistant) => assistant.id);
+    if (availableTargets.length === 0) continue;
+
+    for (const task of tasks) {
+      if (availableTargets.length === 0) break;
+      const oldAssistantId = task.assistantId;
+      if (!oldAssistantId || !task.assistant || !busyOwners.has(oldAssistantId)) continue;
+
+      const newAssistantId = availableTargets.shift()!;
+      const newAssistant = dispatchable.find((assistant) => assistant.id === newAssistantId);
+      if (!newAssistant || newAssistant.id === oldAssistantId) continue;
+
+      const oldPrimary = task.collaborators.find((participant) => participant.assistantId === oldAssistantId);
+      const waitedMinutes = oldPrimary
+        ? Math.floor((now.getTime() - oldPrimary.joinedAt.getTime()) / 60000)
+        : Math.floor((now.getTime() - task.createdAt.getTime()) / 60000);
+
+      await prisma.$transaction(async (tx) => {
+        await tx.bookingTask.update({
+          where: { id: task.id },
+          data: { assistantId: newAssistant.id },
+        });
+        await tx.taskCollaborator.updateMany({
+          where: {
+            taskId: task.id,
+            assistantId: oldAssistantId,
+            role: "primary",
+            status: { not: "left" },
+          },
+          data: { status: "left", leftAt: now },
+        });
+        await tx.taskCollaborator.upsert({
+          where: { taskId_assistantId: { taskId: task.id, assistantId: newAssistant.id } },
+          create: {
+            taskId: task.id,
+            assistantId: newAssistant.id,
+            role: "primary",
+            status: "waiting",
+            joinedAt: now,
+          },
+          update: {
+            role: "primary",
+            status: "waiting",
+            joinedAt: now,
+            startedAt: null,
+            completedAt: null,
+            effectiveWorkSeconds: 0,
+            workSegmentStartedAt: null,
+            leftAt: null,
+          },
+        });
+        await tx.profile.update({
+          where: { id: newAssistant.id },
+          data: { status: ProfileStatus.assigned },
+        });
+        await tx.standbyReassignmentNotice.create({
+          data: {
+            taskId: task.id,
+            oldAssistantId,
+            oldAssistantName: task.assistant!.name,
+            newAssistantId: newAssistant.id,
+            newAssistantName: newAssistant.name,
+            taskRoomNumber: task.roomNumber,
+            taskCategoryName: task.category.name,
+            taskPriority: task.priority,
+            waitedMinutes,
+            thresholdMinutes: 0,
+            score: 0,
+            reason: "unselected_standby_release",
+            oldAssistantSetOffline: false,
+            oldAssistantActiveTaskStatus: "executing_or_paused",
+          },
+        });
+      });
+
+      await recordIdleDispatchRoundRobin(buildingId, newAssistant.id);
+      movedCount++;
+      console.log(
+        `[releaseUnselectedStandbyTasks] 未选待就位释放 ${task.id} ${task.assistant.name} → ${newAssistant.name}`
+      );
+    }
+  }
+
+  if (movedCount > 0) {
+    await syncProfileStatus();
+  }
+
+  return movedCount;
+}
+
 export async function sweepIroningMachineQueue(): Promise<number> {
   const now = new Date();
   const cfg = await getIroningRuntimeConfig();
@@ -1551,6 +1759,7 @@ export async function sweepWaitingTasks(): Promise<number> {
 	    assignedCount += await reassignOverdueStandbyTasks();
       assignedCount += await sweepIroningMachineQueue();
       assignedCount += await balanceIroningWaitAssignments();
+      assignedCount += await releaseUnselectedStandbyTasks();
 
 	    // —— 阶段 A：空闲助理 ↔ 未派单 waiting（原逻辑）——
     const waitingTasks = await prisma.bookingTask.findMany({
@@ -1983,6 +2192,45 @@ export async function escalatePriorities(): Promise<number> {
   return escalatedCount;
 }
 
+type TaskMaintenanceResult = {
+  cleaned: number;
+  escalated: number;
+  assigned: number;
+  skipped: boolean;
+};
+
+let _maintenanceRunning: Promise<TaskMaintenanceResult> | null = null;
+let _lastMaintenanceAt = 0;
+const TASK_MAINTENANCE_THROTTLE_MS = 2_000;
+
+/**
+ * 统一任务维护入口。
+ * 用于写入型操作或显式扫描接口，避免高频列表读取反复触发调度写入。
+ */
+export async function runTaskMaintenance(options: { force?: boolean } = {}): Promise<TaskMaintenanceResult> {
+  if (_maintenanceRunning) return _maintenanceRunning;
+
+  const now = Date.now();
+  if (!options.force && now - _lastMaintenanceAt < TASK_MAINTENANCE_THROTTLE_MS) {
+    return { cleaned: 0, escalated: 0, assigned: 0, skipped: true };
+  }
+
+  _maintenanceRunning = (async () => {
+    try {
+      const cleaned = await cleanupStaleTasks();
+      await syncProfileStatus();
+      const escalated = await escalatePriorities();
+      const assigned = await sweepWaitingTasks();
+      _lastMaintenanceAt = Date.now();
+      return { cleaned, escalated, assigned, skipped: false };
+    } finally {
+      _maintenanceRunning = null;
+    }
+  })();
+
+  return _maintenanceRunning;
+}
+
 /**
  * 获取即将结束的任务（2分钟内）
  * 用于触发结项预警
@@ -2072,9 +2320,6 @@ export async function completeTask(taskId: string): Promise<void> {
 
   await syncTaskAggregateFromParticipants(taskId);
   await syncProfileStatus();
-
-  // 全局扫描：将所有空闲助理与等待中的任务匹配
-  await sweepWaitingTasks();
 }
 
 /**
@@ -2151,7 +2396,10 @@ export async function syncProfileStatus(): Promise<void> {
 
   try {
     const assistants = await prisma.profile.findMany({
-      where: { role: { in: ["assistant", "assistant_leader"] } },
+      where: {
+        role: { in: ["assistant", "assistant_leader"] },
+        onlineStatus: OnlineStatus.online,
+      },
       select: { id: true, status: true },
     });
 
