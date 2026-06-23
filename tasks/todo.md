@@ -1,5 +1,90 @@
 # 需求：熨烫机单机队列、助理预分配与空档任务匹配
 
+## 当前阶段：修正顶部地理坐标切换口径
+
+### 本次问题
+
+- 现象：顶部身份信息区切换楼座/地理坐标后，当前显示楼座、当前位置和下拉剩余可选项的口径不够一致。
+- 用户确认规则：
+  - 助理切换楼座后，顶部显示应立即切到新楼座；楼座下拉里只保留其它楼座。
+  - 摄影师切换楼座后也同理，顶部显示当前切到的楼座；楼座下拉里只保留其它楼座。
+  - 摄影师切回后台人员信息绑定的本楼座时，位置优先显示自己的办公室。
+  - 工作台切换地点不影响后台人员管理中的备案工作区域与房间。
+  - 助理切换楼座后，空闲态顶部默认只显示楼座，不额外显示当前楼座公共区域；接了任务并进入进行中/暂停中后才显示具体任务房间。
+  - 摄影师切换到其它楼座后，默认显示该区域的公共区域；切回备案本楼座时优先显示自己的办公室。
+- 边界：本次只修顶部地理坐标展示、楼座可选项和当前场地派生；不改派单、任务状态、数据库结构、备案字段和 UI 视觉风格。
+
+### 本次计划
+
+- [x] `src/app/photographer/page.tsx`：收敛顶部展示用的当前楼座 ID / 楼座对象 / 场地文本，避免登记楼座、实际服务楼座和任务地点互相覆盖。
+- [x] `src/app/photographer/page.tsx`：助理楼座下拉按当前显示/实际服务楼座过滤，切换后剩余选项只显示其它楼座。
+- [x] `src/app/photographer/page.tsx`：摄影师楼座下拉按当前显示楼座过滤，切回登记本楼座时优先使用后台绑定的办公室。
+- [x] `src/app/photographer/page.tsx`：检查 `switchPhotographerBuilding()`、`switchAssistantBuilding()`、`switchVenue()` 的本地状态同步，确保切换后顶部展示和任务创建位置一致。
+- [x] 验证：运行 TypeScript 检查；必要时用浏览器验证摄影师/助理切换 A/B/本楼座后顶部文字与下拉剩余楼座一致。
+
+### 可选项
+
+- 方案 A：在现有变量上修正过滤和场地派生，改动最小。
+- 方案 B：抽出一组顶部位置派生变量，如 `displayBuildingId/displayBuilding/displayVenue`，让摄影师和助理共用同一套展示口径；改动稍多，但更不容易再混口径。
+
+### 本次评审
+
+- 已采用方案 B：新增 `workbenchRoom` 作为工作台当前场地，避免摄影师工作台地点切换复用后台备案字段。
+- 已修复：摄影师切换楼座只更新工作台当前楼座 `activeBuildingId` 和本地 `workbenchRoom`，不写 `buildingId/currentRoom`，因此不影响后台人员管理中的备案工作区域与房间。
+- 已修复：摄影师切回备案本楼座时，`workbenchRoom` 优先回到 `originalRoomRef` 记录的本人办公室；切到其它楼座时使用该楼座默认场地。
+- 已修复：助理顶部楼座和剩余可选项按实际服务楼座 `activeBuildingId` 判断；空闲态只显示楼座，不自动显示公共区域；执行中/暂停中时顶部位置仍展示真实任务地点。
+- 已修复：助理从工作台切换楼座时只保存 `activeBuildingId`，不会自动把该楼座默认公共区域写入 `activeRoom`。
+- 已修复：桌面快捷发单和移动端快捷发单都使用工作台当前楼座与场地创建任务，不再回退到后台备案位置。
+- 已确认：工作台切换地点不会向人员接口提交 `buildingId/currentRoom`，因此不会改后台人员管理里的备案工作区域与房间。
+- 验证：`npx tsc --noEmit --pretty false` 通过；仅有 npm `enable-pre-post-scripts` 配置警告。
+
+## 当前阶段：修复助理切换身份后顶部位置不刷新
+
+### 本次问题
+
+- 现象：在摄影师工作台切换到另一个助理身份后，顶部身份信息区的当前位置仍可能显示切换前或登记位置，没有显示切换后助理的实际服务位置。
+- 初步定位：助理当前位置有两套字段，登记位置是 `buildingId/currentRoom`，实际服务位置是 `activeBuildingId/activeRoom`；顶部展示和身份切换弹窗的楼座过滤需要统一按助理实际服务位置派生。
+- 边界：本次只修身份切换后的人员位置展示和本地状态同步，不改核心派单逻辑、任务状态流转、数据库结构或 UI 视觉风格。
+
+### 本次计划
+
+- [x] `src/app/photographer/page.tsx`：梳理顶部位置文案 `workbenchLocationText`，确保空闲助理优先展示 `activeBuildingId/activeRoom`，有任务时仍展示任务地点。
+- [x] `src/app/photographer/page.tsx`：修正切换身份弹窗当前楼座过滤，助理按实际服务楼座而不是登记楼座高亮。
+- [x] `src/app/photographer/page.tsx`：检查 `applyWorkbenchProfile()`、`switchAssistantBuilding()`、`updateAssistantBuilding()` 的本地状态同步，避免切换身份后拿旧位置。
+- [x] 验证：运行 TypeScript 检查；必要时用浏览器手动验证助理 A/B 身份切换后顶部位置和弹窗分组一致。
+
+### 可选项
+
+- 方案 A：只修显示派生逻辑，不改 API 和数据库；风险最低，适合本次问题。
+- 方案 B：新增一个统一的 `displayServiceLocation` 工具函数，把顶部、弹窗、地图候选共用同一口径；代码更清晰，但改动稍多。
+
+### 本次评审
+
+- 已采用方案 A：只修显示派生逻辑，不改 API、数据库和派单逻辑。
+- 已修复：空闲助理顶部位置优先显示当前身份的实际服务位置 `activeBuildingId/activeRoom`，不再被登记房间 `currentRoom` 覆盖。
+- 已修复：切换身份弹窗的当前楼座过滤按助理实际服务楼座判断，和弹窗分组口径一致。
+- 已检查：`applyWorkbenchProfile()` 已在切换身份时把助理工作台状态映射到实际服务楼座和场地；`switchAssistantBuilding()`、`updateAssistantBuilding()` 已同步更新 `activeBuildingId/activeRoom` 与当前页面状态。
+- 验证：`npx tsc --noEmit --pretty false` 通过；仅有 npm `enable-pre-post-scripts` 配置警告。
+
+## 当前阶段：修复管理登录切换身份后后台入口丢失
+
+### 本次问题
+
+- 现象：用管理工号 `WG955` 登录后，可以切换到非助理身份，但右侧管理可用入口会跟着变成被切换身份对应的可用按钮。
+- 根因：前端把 `localStorage.user` 同时当“登录账号”和“当前工作台身份”使用；身份切换时覆盖了 `user.role`，刷新后 `loginRole` 不再是管理。
+- 目标：登录账号权限和当前查看/操作身份分离；管理账号切换到摄影师或其他身份后，仍保留后台管理入口。
+
+### 本次计划
+
+- [x] `src/app/photographer/page.tsx`：身份切换只更新 `currentProfileId` 和 URL，不再覆盖登录账号 `user`。
+- [x] 验证：运行 TypeScript 检查。
+
+### 本次评审
+
+- 已修复：`applyWorkbenchProfile()` 不再把 `loginRole` 改为当前工作台身份角色。
+- 已修复：`switchIdentity()` 不再覆盖 `localStorage.user`，登录账号继续作为权限来源；`currentProfileId` 继续作为当前工作台身份来源。
+- 验证：`npx tsc --noEmit --pretty false` 通过；仅有 npm `enable-pre-post-scripts` 配置警告。
+
 ## 当前阶段：老王主控同步职责调整
 
 ### 本次问题

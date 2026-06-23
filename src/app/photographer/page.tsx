@@ -954,7 +954,7 @@ function profileServiceBuildingId(profile: { role: string; buildingId: number; a
 }
 
 function profileServiceRoom(profile: { role: string; currentRoom: string | null; activeRoom?: string | null }): string | null {
-  return isAssistantRole(profile.role) ? profile.activeRoom ?? profile.currentRoom : profile.currentRoom;
+  return isAssistantRole(profile.role) ? profile.activeRoom ?? null : profile.currentRoom;
 }
 
 function taskListUrlForProfile(profile: { id: string; role: string }): string {
@@ -1520,6 +1520,7 @@ export default function PhotographerPage() {
     eatingStartedAt?: string | null;
     eatingEndedAt?: string | null;
   } | null>(null);
+  const [workbenchRoom, setWorkbenchRoom] = useState<string | null>(null);
   const [hoveredMapAssistant, setHoveredMapAssistant] = useState<string | null>(null);
   const [notePopupTaskId, setNotePopupTaskId] = useState<string | null>(null);
   const [notePopupValue, setNotePopupValue] = useState("");
@@ -2037,25 +2038,20 @@ export default function PhotographerPage() {
     originalRoomRef.current = selected.currentRoom;
     originalBuildingIdRef.current = selected.buildingId;
     const selectedServiceBuildingId = profileServiceBuildingId(selected);
+    const selectedServiceRoom = profileServiceRoom(selected);
     const selectedForWorkbench = isAssistantRole(selected.role)
       ? {
         ...selected,
         buildingId: selectedServiceBuildingId,
-        currentRoom: profileServiceRoom(selected),
+        currentRoom: selectedServiceRoom,
       }
       : selected;
     setNeedsIdentitySelection(false);
     setShowIdentityModal(false);
     setProfile(selectedForWorkbench);
-    setLoginRole(selectedForWorkbench.role);
+    setWorkbenchRoom(selectedServiceRoom);
     setActiveBuildingId(selectedServiceBuildingId);
     safeLocalStorageSet("currentProfileId", selectedForWorkbench.id);
-    safeLocalStorageSet("user", JSON.stringify({
-      id: selectedForWorkbench.id,
-      name: selectedForWorkbench.name,
-      employeeId: selectedForWorkbench.employeeId,
-      role: selectedForWorkbench.role,
-    }));
     const url = new URL(window.location.href);
     if (url.searchParams.get("profileId") !== selectedForWorkbench.id || url.searchParams.has("employeeId")) {
       url.searchParams.set("profileId", selectedForWorkbench.id);
@@ -2133,12 +2129,19 @@ export default function PhotographerPage() {
     () => assistants.find((assistant) => assistant.id === profile?.id) ?? null,
     [assistants, profile?.id],
   );
+  const profileCurrentWorkbenchRoom = isAssistantRole(profile?.role) && profile
+    ? profileServiceRoom({
+      role: profile.role,
+      currentRoom: profile.currentRoom,
+      activeRoom: profile.activeRoom,
+    })
+    : workbenchRoom ?? profile?.currentRoom ?? null;
   const mapFocusSignature = [
     profile?.id ?? "",
     profile?.role ?? "",
-    profile?.currentRoom ?? "",
+    profileCurrentWorkbenchRoom ?? "",
     profile?.activeRoom ?? "",
-    profile?.buildingId ?? "",
+    activeBuildingId ?? "",
     profile?.activeBuildingId ?? "",
     currentMapAssistant?.currentRoom ?? "",
     currentMapAssistant?.pendingRoom ?? "",
@@ -3207,7 +3210,7 @@ export default function PhotographerPage() {
 
   const switchVenue = useCallback(async (venue: string) => {
     if (!profile) return;
-    setProfile((p) => p ? { ...p, currentRoom: venue } : p);
+    setWorkbenchRoom(venue);
     setShowVenueMenu(false);
     setLocationMenu(null);
     cancelLocationMenuClose();
@@ -3215,6 +3218,7 @@ export default function PhotographerPage() {
       return;
     }
     try {
+      setProfile((p) => p ? { ...p, currentRoom: venue } : p);
       setAllProfiles((prev) => prev.map((p) => p.id === profile.id ? { ...p, activeRoom: venue } : p));
       const res = await fetch(`/api/profiles/${profile.id}`, {
         method: "PATCH",
@@ -3223,7 +3227,9 @@ export default function PhotographerPage() {
       });
       if (res.ok) {
         const updated = await res.json();
-        setProfile((p) => p ? { ...p, currentRoom: updated.activeRoom ?? updated.currentRoom, activeRoom: updated.activeRoom } : p);
+        const updatedServiceRoom = updated.activeRoom ?? updated.currentRoom;
+        setProfile((p) => p ? { ...p, currentRoom: updatedServiceRoom, activeRoom: updated.activeRoom } : p);
+        setWorkbenchRoom(updatedServiceRoom);
         setAllProfiles((prev) => prev.map((p) => p.id === profile.id ? { ...p, activeRoom: updated.activeRoom } : p));
       }
       if (isAssistantRole(profile.role)) {
@@ -3250,12 +3256,7 @@ export default function PhotographerPage() {
     setLocationMenu(null);
     setShowVenueMenu(false);
     cancelLocationMenuClose();
-    setProfile((p) => p ? {
-      ...p,
-      buildingId: bld.id,
-      building: { id: bld.id, name: bld.name, extraVenues: bld.extraVenues },
-      currentRoom: nextVenue,
-    } : p);
+    setWorkbenchRoom(nextVenue);
     setActiveBuildingId(bld.id);
   }, [buildings, cancelLocationMenuClose, profile]);
 
@@ -3268,8 +3269,7 @@ export default function PhotographerPage() {
 
     const bld = buildings.find((b) => b.id === newBuildingId);
     if (!bld) return;
-    const registeredBuildingId = originalBuildingIdRef.current ?? profile.buildingId;
-    const nextVenue = newBuildingId === registeredBuildingId ? originalRoomRef.current : defaultBuildingVenue(bld);
+    const nextVenue = null;
     setShowVenueMenu(false);
 
     try {
@@ -3286,7 +3286,8 @@ export default function PhotographerPage() {
 
       const updated = await res.json();
       const updatedServiceBuildingId = updated.activeBuildingId ?? updated.buildingId;
-      const updatedServiceRoom = updated.activeRoom ?? updated.currentRoom;
+      const updatedServiceRoom = updated.activeRoom ?? null;
+      setWorkbenchRoom(updatedServiceRoom);
       setProfile((p) => p ? {
         ...p,
         buildingId: updatedServiceBuildingId,
@@ -3342,12 +3343,6 @@ export default function PhotographerPage() {
 
   const switchIdentity = useCallback((p: typeof allProfiles[0]) => {
     safeLocalStorageSet("currentProfileId", p.id);
-    safeLocalStorageSet("user", JSON.stringify({
-      id: p.id,
-      name: p.name,
-      employeeId: p.employeeId,
-      role: p.role,
-    }));
     const url = new URL(window.location.href);
     url.searchParams.set("profileId", p.id);
     url.searchParams.delete("employeeId");
@@ -3602,10 +3597,11 @@ export default function PhotographerPage() {
   const updateAssistantBuilding = useCallback(async (profileId: string, newBuildingId: number) => {
     const bld = buildings.find((b) => b.id === newBuildingId);
     if (!bld) return;
-    const nextVenue = defaultBuildingVenue(bld);
+    const nextVenue = null;
     // 乐观更新本地
     setAllProfiles((prev) => prev.map((p) => p.id === profileId ? { ...p, activeBuildingId: newBuildingId, activeRoom: nextVenue } : p));
     if (profile?.id === profileId) {
+      setWorkbenchRoom(nextVenue);
       setProfile((p) => p ? {
         ...p,
         buildingId: newBuildingId,
@@ -4021,8 +4017,8 @@ export default function PhotographerPage() {
     if (genie.phase === 1) {
       const timer = setTimeout(async () => {
         // 任务地点就是摄影师当前所在的房间/公共区域；没有当前位置时退到当前楼座默认场地。
-        const room = profile?.currentRoom || defaultBuildingVenue(activeBuilding);
-        const locationBuildingId = activeBuilding?.id ?? profile?.buildingId ?? null;
+        const room = profileCurrentWorkbenchRoom || defaultBuildingVenue(activeBuilding);
+        const locationBuildingId = activeBuilding?.id ?? activeBuildingId ?? null;
         if (!room) {
           setGenie(null);
           showTaskCreateError("当前楼座没有可用场地，无法创建任务");
@@ -4098,7 +4094,7 @@ export default function PhotographerPage() {
       }, 550);
       return () => clearTimeout(timer);
     }
-  }, [genie, activeBuilding, photographerMaxActiveTasks, profile, refreshAssistants, showTaskCreateError]);
+  }, [genie, activeBuilding, activeBuildingId, photographerMaxActiveTasks, profile, profileCurrentWorkbenchRoom, refreshAssistants, showTaskCreateError]);
 
   const notePopupStyle = notePopupPosition(notePopupAnchor);
   const notePopupTaskIsExecuting = notePopupTaskId ? noteTaskIsExecuting(notePopupTaskId) : false;
@@ -4176,40 +4172,46 @@ export default function PhotographerPage() {
   const eatingIsOvertime = assistantPresence === "eating" && eatingOvertimeSeconds > 0;
   const assistantPresenceDotColor = eatingIsOvertime ? "#dc2626" : assistantPresenceInfo.dot;
   const assistantLocationTask = isAssistantProfile
-    ? currentRawTask ?? pendingRawTask ?? pausedRawTask ?? deferredWaitingRawTask
+    ? [currentRawTask, pausedRawTask].find((task) => {
+      const status = taskStatusForProfile(task, profile?.id);
+      return status === "executing" || status === "paused";
+    }) ?? null
     : null;
+  const profileDisplayBuildingId = profile
+    ? isAssistantProfile
+      ? profile.activeBuildingId ?? profile.buildingId
+      : activeBuildingId ?? profile.buildingId
+    : null;
+  const profileBuildingForDisplay = buildings.find((b) => b.id === profileDisplayBuildingId);
+  const profileBuildingName = profileBuildingForDisplay?.name ?? profile?.building?.name ?? "—";
   const assistantLocationBuilding =
     assistantLocationTask
       ? buildings.find((b) => b.id === taskLocationBuildingId(assistantLocationTask))?.name ?? profile?.building?.name
-      : profile?.building?.name;
-  const assistantDisplayedBuildingId =
-    taskLocationBuildingId(assistantLocationTask) ?? profile?.buildingId;
-  const profileBuildingForDisplay = buildings.find((b) => b.id === profile?.buildingId);
-  const profileBuildingName = profileBuildingForDisplay?.name ?? profile?.building?.name ?? "—";
+      : profileBuildingName;
   const isAtRegisteredBuilding =
     originalBuildingIdRef.current == null ||
-    profile?.buildingId === originalBuildingIdRef.current;
-  const currentRoomBelongsToDisplayBuilding = venueBelongsToBuilding(profileBuildingForDisplay, profile?.currentRoom);
-  const idleDisplayVenue = isAtRegisteredBuilding
-    ? isAssistantProfile
-      ? originalRoomRef.current ?? profile?.currentRoom ?? defaultBuildingVenue(profileBuildingForDisplay)
-      : currentRoomBelongsToDisplayBuilding
-        ? profile?.currentRoom
-        : profile?.currentRoom
+    profileDisplayBuildingId === originalBuildingIdRef.current;
+  const currentRoomBelongsToDisplayBuilding = venueBelongsToBuilding(profileBuildingForDisplay, profileCurrentWorkbenchRoom);
+  const idleDisplayVenue = isAssistantProfile
+    ? null
+    : isAtRegisteredBuilding
+      ? currentRoomBelongsToDisplayBuilding
+        ? profileCurrentWorkbenchRoom
+        : profileCurrentWorkbenchRoom
           ? null
           : originalRoomRef.current && venueBelongsToBuilding(profileBuildingForDisplay, originalRoomRef.current)
             ? originalRoomRef.current
             : defaultBuildingVenue(profileBuildingForDisplay)
-    : currentRoomBelongsToDisplayBuilding
-      ? profile?.currentRoom
-      : null;
+      : currentRoomBelongsToDisplayBuilding
+        ? profileCurrentWorkbenchRoom
+        : null;
   const workbenchLocationText =
     assistantLocationTask
       ? `${assistantLocationBuilding || "—"} ${formatRoomOrVenue(assistantLocationTask.roomNumber)}`
       : `${profileBuildingName}${idleDisplayVenue ? ` · ${formatRoomOrVenue(idleDisplayVenue)}` : ""}`;
   const photographerBuildingOptions =
     !isAssistantProfile && profile
-      ? buildings.filter((b) => b.id !== profile.buildingId)
+      ? buildings.filter((b) => b.id !== profileDisplayBuildingId)
       : [];
   const photographerVenueOptions = (() => {
     if (isAssistantProfile || !profile || !profileBuildingForDisplay) return [];
@@ -4222,10 +4224,10 @@ export default function PhotographerPage() {
       isOriginal: false,
     }));
     const ownRoomOption =
-      profile.buildingId === registeredBuildingId && origRoom
+      profileDisplayBuildingId === registeredBuildingId && origRoom
         ? [{ name: `${origRoom}室`, value: origRoom, type: undefined, isOriginal: true }]
         : [];
-    return [...publicVenues, ...ownRoomOption].filter((venue) => venue.value !== profile.currentRoom);
+    return [...publicVenues, ...ownRoomOption].filter((venue) => venue.value !== profileCurrentWorkbenchRoom);
   })();
   const canSwitchAssistantBuilding =
     isAssistantProfile &&
@@ -4234,7 +4236,7 @@ export default function PhotographerPage() {
     taskStatusForProfile(currentRawTask, profile?.id) !== "executing";
   const assistantBuildingOptions =
     isAssistantProfile && canSwitchAssistantBuilding
-      ? buildings.filter((b) => b.id !== assistantDisplayedBuildingId)
+      ? buildings.filter((b) => b.id !== profileDisplayBuildingId)
       : [];
   const publicQueueBuildingId = activeBuildingId ?? profile?.buildingId ?? null;
   const collabTask = collabTaskId ? taskListRaw.find((task) => task.id === collabTaskId) ?? null : null;
@@ -5154,8 +5156,8 @@ export default function PhotographerPage() {
     dur: BuiltCategory["durations"][number],
   ) => {
     if (!profile) return;
-    const room = profile.currentRoom || defaultBuildingVenue(activeBuilding);
-    const locationBuildingId = activeBuilding?.id ?? profile.buildingId ?? null;
+    const room = profileCurrentWorkbenchRoom || defaultBuildingVenue(activeBuilding);
+    const locationBuildingId = activeBuilding?.id ?? activeBuildingId ?? null;
     if (!room || !locationBuildingId) {
       showTaskCreateError("当前楼座没有可用场地，无法创建任务");
       return;
@@ -5224,7 +5226,7 @@ export default function PhotographerPage() {
       showTaskCreateError("任务创建失败，请检查网络后重试");
       console.error("Failed to create mobile task", error);
     }
-  }, [activeBuilding, photographerMaxActiveTasks, profile, refreshAssistants, showTaskCreateError]);
+  }, [activeBuilding, activeBuildingId, photographerMaxActiveTasks, profile, profileCurrentWorkbenchRoom, refreshAssistants, showTaskCreateError]);
 
   const mobileTaskStatusForProfile = useCallback((task: TaskFromAPI) => (
     taskStatusForProfile(task, isAssistantProfile ? profile?.id : undefined) ?? task.status
@@ -6694,7 +6696,7 @@ export default function PhotographerPage() {
             {activeBuilding ? `${activeBuilding.name} - 暂无平面图` : "加载中..."}
           </div>
         )}
-            <div className={`readable-glass-label absolute bottom-4 right-6 z-20 flex items-center gap-4 rounded-full px-4 py-2.5 text-[11px] font-extrabold ${
+            <div className={`map-status-legend readable-glass-label absolute bottom-4 right-6 z-20 flex items-center gap-4 rounded-full px-4 py-2.5 text-[11px] font-extrabold max-[1740px]:hidden ${
               resolvedTheme === "dark"
                 ? "bg-slate-900/58 text-slate-200 ring-1 ring-white/[0.08]"
                 : "bg-white/48 text-slate-600 ring-1 ring-white/70"
@@ -6762,7 +6764,7 @@ export default function PhotographerPage() {
               : "pointer-events-none translate-y-8 scale-[0.985] opacity-0"
           }`}
           >
-            <div className="area-data-layout grid h-full min-h-0 grid-cols-[32%_minmax(0,1fr)] gap-[22px]">
+            <div className="area-data-layout grid h-full min-h-0 grid-cols-[30fr_minmax(0,70fr)] gap-[22px]">
               <div className={`area-public-queue min-h-0 rounded-[34px] border p-4 ${
                 resolvedTheme === "dark"
                   ? "border-white/[0.10] bg-white/[0.06] shadow-[inset_0_1px_0_rgba(255,255,255,0.08)]"
@@ -6782,18 +6784,19 @@ export default function PhotographerPage() {
                       当前区域暂无公共队列任务
                     </div>
                   ) : (
-                    <div className="space-y-2.5">
+                    <div className="area-public-queue-list space-y-2.5">
                       {areaPublicQueueRows.map((queueTask, index) => {
                         const display = apiTaskToDisplay(queueTask);
                         const statusInfo = publicQueueStatusInfo(queueTask, publicQueueRaw);
-                        const actualLine = taskListActualLine(display, queueTask, now.getTime(), true);
+                        const compactStatusLabel = statusInfo.assignedWaiting ? "待就位" : statusInfo.label.replace("待派发", "待派");
+                        const queuedWaitingMinutes = Math.floor((now.getTime() - new Date(queueTask.createdAt).getTime()) / 60000);
+                        const actualLine = taskListActualLine(display, queueTask, now.getTime(), true) ?? `已等待${fmtMin(queuedWaitingMinutes)}`;
                         const assigneeNames = [
                           queueTask.assistant?.name,
                           ...helperParticipants(queueTask).map((c) => c.assistant.name),
                         ].filter(Boolean);
                         const escalated = Boolean(queueTask.escalatedAt);
                         const escalationLabel = priorityTransitionLabel(queueTask);
-                        const queuedWaitingMinutes = Math.floor((now.getTime() - new Date(queueTask.createdAt).getTime()) / 60000);
                         const isAssignedWaitingOverdue =
                           !escalated &&
                           queueTask.status === "waiting" &&
@@ -6804,10 +6807,10 @@ export default function PhotographerPage() {
                         return (
                           <div
                             key={`area-public-${queueTask.id}`}
-                            className="overflow-visible px-3"
+                            className="area-public-queue-card-wrap overflow-visible px-3"
                           >
                           <div
-                            className={`flex origin-right gap-2 rounded-xl border py-3 pl-3 pr-4 shadow-sm transition-all duration-200 hover:translate-x-0.5 hover:scale-[1.012] hover:bg-white/75 hover:shadow-md ${
+                            className={`area-public-queue-card flex origin-right gap-2 rounded-xl border py-3 pl-3 pr-4 shadow-sm transition-all duration-200 hover:translate-x-0.5 hover:scale-[1.012] hover:bg-white/75 hover:shadow-md ${
                               isOwnPhotographerQueueTask
                                 ? "public-queue-own-task border-transparent bg-white/55 shadow-amber-100/60"
                                 : "border-white/60 bg-white/55"
@@ -6817,10 +6820,10 @@ export default function PhotographerPage() {
                               {publicQueueRankLabel(index, queueTask.priority)}
                             </span>
                             <div className="min-w-0 flex-1">
-                              <div className="flex items-center justify-between gap-2">
-                                <div className="min-w-0">
-                                  <span className="text-[11px] font-extrabold text-[--text-primary]">{display.name}</span>
-                                  <span className="ml-1.5 text-[10px] font-medium text-[--text-muted]">{display.durationSlotLabel}</span>
+                              <div className="area-public-queue-card-top flex items-center justify-between gap-2">
+                                <div className="area-public-queue-title min-w-0">
+                                  <span className="area-public-queue-task-name text-[11px] font-extrabold text-[--text-primary]">{display.name}</span>
+                                  <span className="area-public-queue-duration ml-1.5 text-[10px] font-medium text-[--text-muted]">{display.durationSlotLabel}</span>
                                   {escalated && (
                                     <span className="ml-1.5 rounded bg-red-50 px-1 py-0.5 align-middle text-[8px] font-extrabold text-red-500">
                                       {escalationLabel}
@@ -6832,11 +6835,14 @@ export default function PhotographerPage() {
                                     </span>
                                   )}
                                 </div>
-                                <span className={`mr-1 shrink-0 rounded-md px-1.5 py-0.5 text-[9px] font-extrabold ${statusInfo.cls}`}>
-                                  {statusInfo.label}
+                                <span
+                                  className={`area-public-queue-status mr-1 shrink-0 rounded-md px-1.5 py-0.5 text-[9px] font-extrabold ${statusInfo.cls}`}
+                                  data-compact-label={compactStatusLabel}
+                                >
+                                  <span className="area-public-queue-status-text">{statusInfo.label}</span>
                                 </span>
                               </div>
-                              <div className="mt-1.5 flex h-4 min-w-0 w-full items-baseline gap-1.5 overflow-hidden pr-1">
+                              <div className="area-public-queue-detail-row mt-1.5 flex h-4 min-w-0 w-full items-baseline gap-1.5 overflow-hidden pr-1">
                                 <span
                                   className="public-queue-detail-marquee-container min-w-0 flex-1 translate-y-[3px] text-[10px] text-[--text-muted]"
                                   onMouseEnter={(e) => {
@@ -6851,10 +6857,12 @@ export default function PhotographerPage() {
                                     title={`${display.room}室 · ${queuePhotographerLabel}${assigneeNames.length > 0 ? ` · ${assigneeNames.join("、")}` : ""}`}
                                   >
                                     {display.room}室 · <span className={isOwnPhotographerQueueTask ? "font-extrabold text-amber-600" : undefined}>{queuePhotographerLabel}</span>
-                                    {assigneeNames.length > 0 ? ` · ${assigneeNames.join("、")}` : ""}
+                                    {assigneeNames.length > 0 ? (
+                                      <span className="area-public-queue-assignees"> · {assigneeNames.join("、")}</span>
+                                    ) : null}
                                   </span>
                                 </span>
-                                <span className="mr-1 shrink-0 whitespace-nowrap text-[10px] font-medium leading-[16px] text-[--text-muted]">{actualLine}</span>
+                                <span className="area-public-queue-time mr-1 shrink-0 whitespace-nowrap text-[10px] font-medium leading-[16px] text-[--text-muted]">{actualLine}</span>
                               </div>
                             </div>
                           </div>
@@ -6868,13 +6876,13 @@ export default function PhotographerPage() {
 
 	              <div className="grid h-full min-h-0 grid-rows-[auto_minmax(0,1fr)] gap-y-3 overflow-visible">
 	                <div aria-hidden="true" className="h-[16px]" />
-	                <div className="area-data-main-grid relative grid min-h-0 grid-cols-[minmax(0,1fr)_minmax(220px,0.78fr)] grid-rows-[136px_minmax(0,1fr)] gap-x-5 gap-y-3 2xl:grid-cols-[minmax(0,1.36fr)_minmax(0,0.62fr)_minmax(220px,0.74fr)] 2xl:grid-rows-[minmax(0,1fr)]">
-                  <div className="col-span-2 row-start-1 grid min-h-0 grid-rows-[auto_minmax(0,1fr)] overflow-visible 2xl:col-span-1 2xl:row-start-1">
-                    <div className="relative z-20 flex shrink-0 items-center justify-between gap-2 pl-[4.5rem]">
-                      <h2 className="whitespace-nowrap text-[12px] font-extrabold tracking-wide text-[--text-primary]">{activeBuilding?.name ?? "当前"}区域 任务数据</h2>
+	                <div className="area-data-main-grid relative grid min-h-0 grid-cols-[minmax(0,1fr)_minmax(220px,0.78fr)] grid-rows-[136px_minmax(0,1fr)] gap-x-5 gap-y-3 max-[1228px]:block min-[1741px]:grid-cols-[minmax(0,30fr)_minmax(0,17fr)_minmax(0,23fr)] min-[1741px]:grid-rows-[minmax(0,1fr)]">
+                    <div className="col-span-2 row-start-1 grid min-h-0 grid-rows-[auto_minmax(0,1fr)] overflow-visible min-[1741px]:col-span-1 min-[1741px]:row-start-1">
+                    <div className="area-data-title-row relative z-20 flex shrink-0 items-center justify-between gap-2 pl-[4.5rem]">
+                      <h2 className="area-data-title whitespace-nowrap text-[12px] font-extrabold tracking-wide text-[--text-primary]">{activeBuilding?.name ?? "当前"}区域 任务数据</h2>
                     </div>
-                    <div className="relative flex h-full items-center justify-center rounded-2xl px-5 py-3 2xl:px-6 2xl:py-5">
-                      <div className={`area-metrics-grid group relative grid h-full w-full max-w-[460px] grid-cols-6 grid-rows-3 content-center gap-x-4 gap-y-2.5 rounded-[28px] border px-4 py-3 transition-all duration-200 2xl:max-w-[520px] 2xl:gap-x-6 2xl:gap-y-5 2xl:px-5 2xl:py-5 ${
+                    <div className="relative flex h-full items-center justify-center rounded-2xl px-5 py-3 min-[1741px]:px-6 min-[1741px]:py-5">
+                      <div className={`area-metrics-grid group relative grid h-full w-full max-w-[460px] grid-cols-6 grid-rows-3 content-center gap-x-4 gap-y-2.5 rounded-[28px] border px-4 py-3 transition-all duration-200 min-[1741px]:max-w-[520px] min-[1741px]:gap-x-6 min-[1741px]:gap-y-5 min-[1741px]:px-5 min-[1741px]:py-5 ${
                         resolvedTheme === "dark"
                           ? "border-transparent hover:border-white/[0.10] hover:bg-white/[0.04]"
                           : "border-transparent hover:border-white/70 hover:bg-white/28 hover:shadow-[0_14px_34px_rgba(56,68,89,0.08)]"
@@ -6934,19 +6942,19 @@ export default function PhotographerPage() {
                             emptyText: "暂无离线助理",
                           },
                         ] as AreaMetricCard[]).map((item) => (
-                          <div key={item.caption} className={`relative min-w-0 ${item.caption === "今日已完成" ? "z-[3]" : "z-[1]"} ${item.span}`}>
+                          <div key={item.caption} className={`area-metric-card relative min-w-0 ${item.caption === "今日已完成" ? "z-[3]" : "z-[1]"} ${item.span}`}>
                             {hasAreaMetricDetail(item) ? (
                               <button
                                 type="button"
-                                className="relative mx-auto flex min-h-0 w-full max-w-[190px] flex-col items-center justify-center gap-1 rounded-2xl px-3 py-2 text-center outline-none transition-colors hover:bg-white/30 focus-visible:bg-white/36"
+                                className="area-metric-control relative mx-auto flex min-h-0 w-full max-w-[190px] flex-col items-center justify-center gap-1 rounded-2xl px-3 py-2 text-center outline-none transition-colors hover:bg-white/30 focus-visible:bg-white/36"
                                 onMouseEnter={(e) => showAreaMetricBubble(item.detailKey, e.currentTarget, item.people.length, item.bubbleAnchorMode)}
                                 onFocus={(e) => showAreaMetricBubble(item.detailKey, e.currentTarget, item.people.length, item.bubbleAnchorMode)}
                                 onMouseLeave={hideAreaMetricBubble}
                                 onBlur={hideAreaMetricBubble}
                                 aria-expanded={expandedAreaMetricKey === item.detailKey}
                               >
-                                <span className="whitespace-nowrap text-[10px] font-bold text-[--text-muted] 2xl:text-[11px]">{item.caption}</span>
-                                <span data-area-metric-value className="area-metric-value text-[24px] font-extrabold leading-none tabular-nums text-[--text-primary] 2xl:text-[32px]">{item.value}</span>
+                                <span className="whitespace-nowrap text-[10px] font-bold text-[--text-muted] min-[1741px]:text-[11px]">{item.caption}</span>
+                                <span data-area-metric-value className="area-metric-value text-[24px] font-extrabold leading-none tabular-nums text-[--text-primary] min-[1741px]:text-[32px]">{item.value}</span>
                                 {expandedAreaMetricKey === item.detailKey ? renderAreaMetricBubble({
                                   key: item.detailKey,
                                   caption: item.caption,
@@ -6956,8 +6964,8 @@ export default function PhotographerPage() {
                                 }) : null}
                               </button>
                             ) : (
-                              <div className="flex min-h-0 flex-col items-center justify-center gap-1 text-center">
-                                <span className="whitespace-nowrap text-[10px] font-bold text-[--text-muted] 2xl:text-[11px]">{item.caption}</span>
+                              <div className="area-metric-control flex min-h-0 w-full max-w-[190px] flex-col items-center justify-center gap-1 text-center">
+                                <span className="whitespace-nowrap text-[10px] font-bold text-[--text-muted] min-[1741px]:text-[11px]">{item.caption}</span>
                                 {item.caption === "今日已完成" ? (
                                   <button
                                     type="button"
@@ -6968,13 +6976,13 @@ export default function PhotographerPage() {
                                       setAreaCompletedStatsHoveredDay(null);
                                       setShowAreaCompletedStatsModal(true);
                                     }}
-                                    className="area-metric-value rounded-xl px-2 text-[24px] font-extrabold leading-none tabular-nums text-[--text-primary] transition-colors hover:bg-white/34 focus-visible:bg-white/40 focus-visible:outline-none 2xl:text-[32px]"
+                                    className="area-metric-value rounded-xl px-2 text-[24px] font-extrabold leading-none tabular-nums text-[--text-primary] transition-colors hover:bg-white/34 focus-visible:bg-white/40 focus-visible:outline-none min-[1741px]:text-[32px]"
                                     aria-label="打开区域完成统计"
                                   >
                                     {item.value}
                                   </button>
                                 ) : (
-                                  <span className="area-metric-value text-[24px] font-extrabold leading-none tabular-nums text-[--text-primary] 2xl:text-[32px]">{item.value}</span>
+                                  <span className="area-metric-value text-[24px] font-extrabold leading-none tabular-nums text-[--text-primary] min-[1741px]:text-[32px]">{item.value}</span>
                                 )}
                               </div>
                             )}
@@ -6985,7 +6993,7 @@ export default function PhotographerPage() {
                   </div>
 
 			                  <div
-			                    className="area-assistant-rank relative z-[90] col-start-2 row-start-2 grid h-full min-h-0 min-w-0 grid-rows-[auto_minmax(0,1fr)] gap-y-2 overflow-visible px-0 py-0 2xl:col-start-3 2xl:row-start-1"
+	                    className="area-assistant-rank relative z-[90] col-start-2 row-start-2 grid h-full min-h-0 min-w-0 grid-rows-[auto_minmax(0,1fr)] gap-y-2 overflow-visible px-0 py-0 max-[1740px]:hidden min-[1741px]:col-start-3 min-[1741px]:row-start-1"
 			                    onWheelCapture={(e) => {
 			                      const list = assistantRankingScrollRef.current;
 			                      if (!list || list.scrollHeight <= list.clientHeight) return;
@@ -7137,7 +7145,7 @@ export default function PhotographerPage() {
 	                    </div>
                   </div>
 
-	                  <div className="area-task-types relative z-10 col-start-1 row-start-2 grid min-h-0 grid-rows-[auto_minmax(0,1fr)] overflow-visible px-0 py-0 2xl:col-start-2 2xl:row-start-1">
+	                  <div className="area-task-types relative z-10 col-start-1 row-start-2 grid min-h-0 grid-rows-[auto_minmax(0,1fr)] overflow-visible px-0 py-0 max-[1228px]:hidden min-[1741px]:col-start-2 min-[1741px]:row-start-1">
                     <div className="relative z-20 flex shrink-0 items-center justify-between gap-2">
                       <h3 className="whitespace-nowrap text-[12px] font-extrabold tracking-wide text-[--text-primary]">任务类型</h3>
                     </div>
@@ -9238,38 +9246,34 @@ export default function PhotographerPage() {
 
         {/* 右上按钮区域 */}
         <div
-          className={`absolute top-3 right-3 z-20 hidden lg:flex ${
-            loginRole === "admin" || loginRole === "assistant_leader"
-              ? "flex-col items-end gap-1.5"
-              : "items-center gap-2"
-          }`}
+          className="absolute top-3 right-3 z-20 hidden flex-col items-end gap-1.5 lg:flex"
         >
           {/* 返回登录：非管理账号独立显示；管理账号收纳到后台管理菜单 */}
           {!(loginRole === "admin" || loginRole === "assistant_leader") && (
             <a
               href="/"
               onClick={() => { safeLocalStorageRemove("user"); safeLocalStorageRemove("currentProfileId"); }}
-              className={`rounded-xl px-3 py-2 flex items-center gap-2 cursor-pointer hover:bg-white/70 transition-colors ${glass}`}
+              className={`readable-glass-dark flex w-[112px] cursor-pointer items-center justify-start gap-1.5 rounded-lg px-2.5 py-1.5 transition-colors ${glass}`}
             >
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--text-secondary)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <svg className="text-current opacity-90" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                 <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" /><polyline points="16 17 21 12 16 7" /><line x1="21" y1="12" x2="9" y2="12" />
               </svg>
-              <span className="text-xs font-medium text-[--text-secondary]">返回登录</span>
+              <span className="text-[11px] font-extrabold">返回登录</span>
             </a>
           )}
           {/* 数据统计：仅摄影师/助理可见 */}
           {(loginRole === "photographer" || loginRole === "assistant") && (
-          <a href="/stats" className={`rounded-xl px-3 py-2 flex items-center gap-2 cursor-pointer hover:bg-white/70 transition-colors ${glass}`}>
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--text-secondary)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <a href="/stats" className={`readable-glass-dark flex w-[112px] cursor-pointer items-center justify-start gap-1.5 rounded-lg px-2.5 py-1.5 transition-colors ${glass}`}>
+            <svg className="text-current opacity-90" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <line x1="18" y1="20" x2="18" y2="10" /><line x1="12" y1="20" x2="12" y2="4" /><line x1="6" y1="20" x2="6" y2="14" />
             </svg>
-            <span className="text-xs font-medium text-[--text-secondary]">数据统计</span>
+            <span className="text-[11px] font-extrabold">数据统计</span>
           </a>
           )}
           {(loginRole === "admin" || loginRole === "assistant_leader") && (
             <button
               onClick={() => setShowIdentityModal(true)}
-              className={`readable-glass-dark w-[106px] rounded-lg px-2.5 py-1.5 flex items-center justify-start gap-1.5 cursor-pointer transition-colors ${glass}`}
+              className={`readable-glass-dark flex w-[112px] cursor-pointer items-center justify-start gap-1.5 rounded-lg px-2.5 py-1.5 transition-colors ${glass}`}
             >
               <svg className="text-current opacity-90" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                 <path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" /><circle cx="8.5" cy="7" r="4" /><line x1="20" y1="8" x2="20" y2="14" /><line x1="23" y1="11" x2="17" y2="11" />
@@ -9282,7 +9286,7 @@ export default function PhotographerPage() {
             <div className="group/admin-menu relative">
               <a
                 href="/admin"
-                className={`readable-glass-dark w-[106px] rounded-lg px-2.5 py-1.5 flex items-center justify-start gap-1.5 cursor-pointer transition-colors ${glass}`}
+                className={`readable-glass-dark flex w-[112px] cursor-pointer items-center justify-start gap-1.5 rounded-lg px-2.5 py-1.5 transition-colors ${glass}`}
               >
                 <svg className="text-current opacity-90" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                   <path d="M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z" />
@@ -9290,7 +9294,7 @@ export default function PhotographerPage() {
                 </svg>
                 <span className="text-[11px] font-extrabold">后台管理</span>
               </a>
-              <div className="pointer-events-none absolute right-0 top-full w-[106px] translate-y-[-6px] pt-2 opacity-0 transition-all duration-200 group-hover/admin-menu:pointer-events-auto group-hover/admin-menu:translate-y-0 group-hover/admin-menu:opacity-100">
+              <div className="pointer-events-none absolute right-0 top-full w-[112px] translate-y-[-6px] pt-2 opacity-0 transition-all duration-200 group-hover/admin-menu:pointer-events-auto group-hover/admin-menu:translate-y-0 group-hover/admin-menu:opacity-100">
                 <div className="rounded-2xl border border-white/70 bg-white/95 p-1.5 shadow-xl shadow-black/10 backdrop-blur-xl">
                   <a
                     href="/"
@@ -9432,7 +9436,7 @@ export default function PhotographerPage() {
                 identityBuildingFilter ??
                 (profile
                   ? isAssistantRole(profile.role)
-                    ? profile.buildingId
+                    ? profile.activeBuildingId ?? profile.buildingId
                     : originalBuildingIdRef.current ?? profile.buildingId
                   : null) ??
                 orderedEntries[0]?.[0] ??
