@@ -1,5 +1,31 @@
 # 需求：熨烫机单机队列、助理预分配与空档任务匹配
 
+## 当前阶段：新增一键 commit/push/同步 Mac mini 部署脚本
+
+### 本次问题
+
+- 用户确认“compact”指的是 `commit`。
+- 目标：主控会话验收后，可以一键执行本地检查、提交、推送，并通过 SSH 同步部署到本地 Mac mini。
+- 边界：不把 Mac mini IP、用户名或密码写死到仓库；不擅自提交本地 SQLite 开发数据库覆盖 Mac mini 生产数据库；不改变业务规则。
+
+### 本次计划
+
+- [x] 新增 `scripts/release-to-mini.sh`：通过环境变量配置 `MINI_HOST`、`MINI_USER`、`MINI_PROJECT_DIR`。
+- [x] 脚本默认执行 TypeScript 检查、本地生产构建、本地 SQLite 备份、git commit/push、远程 pull/build/backup/restart、健康检查。
+- [x] 脚本默认检测并阻止提交 `prisma/dev.db`，只有显式 `ALLOW_DB_COMMIT=1` 才允许同步数据库。
+- [x] 更新 `MAC_MINI_DEPLOY.md`：补充一键发布用法、参数、数据库保护和发布步骤。
+- [x] 支持本地 `.mini-deploy.env` 保存 Mac mini 连接配置，并把该文件加入 `.gitignore`。
+- [x] 验证：运行 `bash -n scripts/release-to-mini.sh`。
+
+### 本次评审
+
+- 已完成：一键脚本支持 `./scripts/release-to-mini.sh "本次更新说明"` 形式提交并部署。
+- 已完成：脚本不会提交 `database-backups/`，并默认保护 `prisma/dev.db`。
+- 已完成：远程部署使用 `git pull --ff-only`，避免 Mac mini 上产生隐式合并。
+- 已完成：Mac mini 端会先备份 SQLite，再安装依赖、构建并重启/安装 `launchd`。
+- 已完成：SSH 私钥方式连通 Mac mini；健康检查接口 `http://192.168.31.171:3000/api/config` 可访问。
+- 已记录：首次同步如 Mac mini 工作区存在非数据库本地文件，可用 `REMOTE_DIRTY_ACTION=stash` 暂存后继续；脚本默认保护 Mac mini 生产 SQLite。
+
 ## 当前阶段：修正顶部地理坐标切换口径
 
 ### 本次问题

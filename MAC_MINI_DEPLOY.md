@@ -106,6 +106,79 @@ launchctl load ~/Library/LaunchAgents/com.spad.local.plist
 ./scripts/backup-sqlite.sh
 ```
 
+## 一键 commit + push + 同步部署
+
+老王主控会话统一验收后，可以使用一键发布脚本把当前改动提交、推送并同步到 Mac mini：
+
+```bash
+MINI_HOST=192.168.1.50 \
+MINI_USER=ljuuuu \
+MINI_PROJECT_DIR=/Volumes/PortableSSD/liujun-portable/liujun \
+./scripts/release-to-mini.sh "本次更新说明"
+```
+
+也可以在本机项目根目录创建 `.mini-deploy.env` 保存常用配置。该文件已加入 `.gitignore`，不会提交到远程仓库：
+
+```bash
+MINI_HOST=192.168.1.50
+MINI_USER=ljuuuu
+MINI_PROJECT_DIR=/Volumes/PortableSSD/liujun-portable/liujun
+SSH_OPTS="-i /Users/你的用户名/.ssh/spad_release -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new"
+PRESERVE_REMOTE_DB=1
+REMOTE_DIRTY_ACTION=abort
+```
+
+配置好以后，日常只需要运行：
+
+```bash
+./scripts/release-to-mini.sh "本次更新说明"
+```
+
+参数说明：
+
+- `MINI_HOST`：Mac mini 固定局域网 IP 或主机名，必填。
+- `MINI_USER`：Mac mini SSH 用户名；如果本机 SSH 配置已包含用户名，可以不填。
+- `MINI_PROJECT_DIR`：Mac mini 上项目目录，默认 `/Volumes/PortableSSD/liujun-portable/liujun`。
+- `MINI_PORT`：健康检查端口，默认 `3000`。
+- `RUN_TYPECHECK=0`：跳过本地 TypeScript 检查。
+- `RUN_BUILD=0`：跳过本地生产构建。
+- `RUN_REMOTE_BUILD=0`：跳过 Mac mini 上的生产构建。
+- `SSH_OPTS`：SSH 私钥和连接参数，例如 `-i /Users/你的用户名/.ssh/spad_release`。
+- `PRESERVE_REMOTE_DB=1`：默认保护 Mac mini 上的 SQLite，并在拉取代码后恢复。
+- `REMOTE_DIRTY_ACTION=stash`：首次同步时如 Mac mini 上已有本地部署文件，可确认后暂存非数据库改动再拉取。
+
+脚本会依次执行：
+
+1. 检查 `prisma/dev.db` 是否有本地改动。
+2. 本地运行 TypeScript 检查和生产构建。
+3. 本地备份 SQLite。
+4. `git add / commit / push`。
+5. SSH 到 Mac mini 执行 `git pull --ff-only`。
+6. 在 Mac mini 上备份 SQLite、安装依赖、生产构建。
+7. 重启或安装 `launchd` 服务。
+8. 检查 `http://<MINI_HOST>:3000/api/config`。
+
+### 数据库保护
+
+`release-to-mini.sh` 默认不会提交 `prisma/dev.db` 的本地改动，也不会提交 `database-backups/`。
+
+如果检测到 `prisma/dev.db` 有改动，脚本会停止，避免把本地开发数据库推送并覆盖 Mac mini 生产数据库。只有明确需要同步数据库时，才使用：
+
+```bash
+ALLOW_DB_COMMIT=1 \
+MINI_HOST=192.168.1.50 \
+MINI_USER=ljuuuu \
+./scripts/release-to-mini.sh "同步数据库和代码"
+```
+
+正式使用时更推荐：代码走 Git 同步，Mac mini 的生产 SQLite 留在 Mac mini 本机，通过 `database-backups/` 做备份和恢复。
+
+首次从已有 Mac mini 项目切换到一键发布时，如果远程工作区已有本地部署脚本或文档改动，脚本会停止并提示。确认这些非数据库改动可以暂存后，再临时使用：
+
+```bash
+REMOTE_DIRTY_ACTION=stash ./scripts/release-to-mini.sh "首次同步部署脚本"
+```
+
 ## SQLite 风险边界
 
 当前不迁移 PostgreSQL。SQLite 在 Mac mini 单机试运行可以继续使用，但要遵守：
