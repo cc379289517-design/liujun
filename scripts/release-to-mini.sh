@@ -19,6 +19,8 @@ MINI_USER="${MINI_USER:-}"
 MINI_PROJECT_DIR="${MINI_PROJECT_DIR:-/Volumes/PortableSSD/liujun-portable/liujun}"
 MINI_PORT="${MINI_PORT:-3000}"
 MINI_HEALTH_PATH="${MINI_HEALTH_PATH:-/api/config}"
+HEALTH_RETRIES="${HEALTH_RETRIES:-20}"
+HEALTH_RETRY_DELAY="${HEALTH_RETRY_DELAY:-2}"
 RUN_BUILD="${RUN_BUILD:-1}"
 RUN_TYPECHECK="${RUN_TYPECHECK:-1}"
 RUN_REMOTE_BUILD="${RUN_REMOTE_BUILD:-1}"
@@ -179,8 +181,21 @@ REMOTE_SCRIPT
 
 print_step "健康检查"
 if command -v curl >/dev/null 2>&1; then
-  if curl -fsS --max-time 12 "http://${MINI_HOST}:${MINI_PORT}${MINI_HEALTH_PATH}" >/dev/null; then
-    echo "健康检查通过：http://${MINI_HOST}:${MINI_PORT}${MINI_HEALTH_PATH}"
+  HEALTH_URL="http://${MINI_HOST}:${MINI_PORT}${MINI_HEALTH_PATH}"
+  HEALTH_OK=0
+  attempt=1
+  while [ "${attempt}" -le "${HEALTH_RETRIES}" ]; do
+    if curl -fsS --max-time 5 "${HEALTH_URL}" >/dev/null 2>&1; then
+      HEALTH_OK=1
+      break
+    fi
+    echo "等待服务启动中... (${attempt}/${HEALTH_RETRIES})"
+    sleep "${HEALTH_RETRY_DELAY}"
+    attempt=$((attempt + 1))
+  done
+
+  if [ "${HEALTH_OK}" = "1" ]; then
+    echo "健康检查通过：${HEALTH_URL}"
   else
     echo "健康检查未通过，请到 Mac mini 查看 logs/launchd.err.log。"
     exit 1

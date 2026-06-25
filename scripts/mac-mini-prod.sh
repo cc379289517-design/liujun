@@ -11,6 +11,7 @@ LOG_DIR="${LOG_DIR:-${PROJECT_DIR}/logs}"
 BACKUP_ON_START="${BACKUP_ON_START:-1}"
 
 cd "${PROJECT_DIR}"
+export PATH="/opt/homebrew/bin:/usr/local/bin:${PATH}"
 mkdir -p "${LOG_DIR}"
 
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] SPAD production start"

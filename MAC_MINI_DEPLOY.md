@@ -144,6 +144,8 @@ REMOTE_DIRTY_ACTION=abort
 - `RUN_BUILD=0`：跳过本地生产构建。
 - `RUN_REMOTE_BUILD=0`：跳过 Mac mini 上的生产构建。
 - `SSH_OPTS`：SSH 私钥和连接参数，例如 `-i /Users/你的用户名/.ssh/spad_release`。
+- `HEALTH_RETRIES`：健康检查重试次数，默认 `20`。
+- `HEALTH_RETRY_DELAY`：健康检查重试间隔秒数，默认 `2`。
 - `PRESERVE_REMOTE_DB=1`：默认保护 Mac mini 上的 SQLite，并在拉取代码后恢复。
 - `REMOTE_DIRTY_ACTION=stash`：首次同步时如 Mac mini 上已有本地部署文件，可确认后暂存非数据库改动再拉取。
 
