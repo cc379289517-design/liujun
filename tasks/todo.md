@@ -26,6 +26,7 @@
 - 已完成：SSH 私钥方式连通 Mac mini；健康检查接口 `http://192.168.31.171:3000/api/config` 可访问。
 - 已记录：首次同步如 Mac mini 工作区存在非数据库本地文件，可用 `REMOTE_DIRTY_ACTION=stash` 暂存后继续；脚本默认保护 Mac mini 生产 SQLite。
 - 修正中：首次部署发现 Mac mini 拉取到的脚本权限为 `100644`，导致 `./scripts/backup-sqlite.sh` 无法执行；已将部署脚本权限改为可执行并加入本次修复提交。
+- 修正中：SSH 非交互环境未加载 Homebrew PATH，导致 Mac mini 找不到 `npm`；发布脚本已显式补充 `/opt/homebrew/bin:/usr/local/bin` 并增加 npm 检查。
 
 ## 当前阶段：修正顶部地理坐标切换口径
 

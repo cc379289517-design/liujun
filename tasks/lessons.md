@@ -1,5 +1,6 @@
 # Lessons
 
+- Mac mini 通过 SSH 执行非交互脚本时，不一定加载用户终端里的 PATH；即使登录终端能用 `npm`，远程 `bash -s` 也可能找不到。部署脚本应显式补 `/opt/homebrew/bin:/usr/local/bin` 并检查 `command -v npm`。
 - 部署脚本如果需要在远端通过 `./scripts/*.sh` 直接执行，必须把可执行权限提交进 git；只在本机 chmod 但没有形成 mode change，Mac mini 拉取后仍会是 `100644` 并报 `Permission denied`。
 - 一键发布脚本里不要用 `git add -A -- ':!ignored-dir'` 排除已忽略目录；Git 可能把 ignored pathspec 当成错误。更稳的做法是先 `git add -A`，再用 `git reset -q -- path` 从暂存区移出数据库或备份目录。
 - 小刘职责调整后只主责业务逻辑、API、文档、测试；部署、生产环境、发布流程、服务器、域名 HTTPS、进程管理、数据库生产化迁移等事项应反馈给老王或转给小张，不要主动接部署任务。

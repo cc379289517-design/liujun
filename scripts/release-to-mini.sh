@@ -114,9 +114,14 @@ PRESERVE_REMOTE_DB="$5"
 REMOTE_DIRTY_ACTION="$6"
 
 cd "${PROJECT_DIR}"
+export PATH="/opt/homebrew/bin:/usr/local/bin:${PATH}"
 
 echo "Mac mini 项目目录：${PROJECT_DIR}"
 echo "分支：${BRANCH}"
+command -v npm >/dev/null 2>&1 || {
+  echo "Mac mini 远程环境未找到 npm，请确认 Node.js 已安装并在 PATH 中。" >&2
+  exit 127
+}
 
 PRESERVED_DB=""
 if [ "${PRESERVE_REMOTE_DB}" = "1" ] && [ -f "prisma/dev.db" ]; then
