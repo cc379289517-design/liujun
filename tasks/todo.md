@@ -20,9 +20,18 @@
 
 ### 阶段 0：当前成果冻结与验收
 
-- [ ] 老王验收当前未提交改动：指定助理、暗黑主题、等待熨烫可取消、待就位维护、熨烫插单保护。
-- [ ] 排除 `prisma/dev.db`，只提交代码、样式、文档和规则改动。
-- [ ] 通过一键发布同步到 Mac mini，确认生产健康检查通过。
+- [x] 老王验收当前未提交改动：指定助理、暗黑主题、等待熨烫可取消、待就位维护、熨烫插单保护。
+- [x] 排除 `prisma/dev.db`，只提交代码、样式、文档和规则改动。
+- [x] 通过手动保护 SQLite 的方式同步到 Mac mini，确认生产健康检查通过。
+
+### 阶段 0 评审
+
+- 已完成提交：`594db8a feat: stabilize workbench assignment and dark mode updates`。
+- 已推送：`origin/后台管理`。
+- 已部署：Mac mini `/Users/lj/liujun-portable/liujun` 已同步到 `594db8a`。
+- 已保护：本机和 Mac mini 的 `prisma/dev.db` 均未提交，Mac mini 部署前后已保留生产 SQLite 并生成备份。
+- 验证通过：`npx tsc --noEmit --pretty false`、`npm run build`、`git diff --check`。
+- 线上健康检查通过：`http://192.168.31.171:3000/api/config` 返回 32 个配置项，`com.spad.local` 正在监听 `3000`。
 
 ### 阶段 1：建立工作台模块边界
 
