@@ -1,6 +1,6 @@
 import { NextRequest } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { TaskStatus } from "@/generated/prisma/client";
+import { OnlineStatus, Role, TaskStatus } from "@/generated/prisma/client";
 import {
   assignTask,
   buildP1InterruptCandidateOrderFromFiltered,
@@ -10,6 +10,7 @@ import {
   getSchedulerRuntimeConfig,
   interruptAssistant,
   interruptWaitingPreempt,
+  isIroningInterruptProtected,
   recordP1InterruptRoundRobin,
   runTaskMaintenance,
   taskCategoryCanBeInterrupted,
@@ -46,6 +47,46 @@ const TASK_INCLUDE = {
 async function createdTaskResponse(task: unknown) {
   await runTaskMaintenance();
   return Response.json(task, { status: 201 });
+}
+
+function specifiedAssistantError(error: string, code: string, status = 409) {
+  return Response.json({ error, code }, { status });
+}
+
+async function validateSpecifiedAssistant(
+  assistantId: string,
+  taskBuildingId: number
+): Promise<Response | null> {
+  const assistant = await prisma.profile.findUnique({
+    where: { id: assistantId },
+    select: {
+      id: true,
+      role: true,
+      onlineStatus: true,
+      subStatus: true,
+      buildingId: true,
+      activeBuildingId: true,
+    },
+  });
+
+  if (!assistant) {
+    return specifiedAssistantError("指定助理不存在，请重新选择", "SPECIFIED_ASSISTANT_NOT_FOUND", 404);
+  }
+  if (assistant.role !== Role.assistant && assistant.role !== Role.assistant_leader) {
+    return specifiedAssistantError("只能指定助理或助理组长", "SPECIFIED_ASSISTANT_INVALID_ROLE", 400);
+  }
+  if (assistant.onlineStatus !== OnlineStatus.online) {
+    return specifiedAssistantError("指定助理当前不在线，无法指定", "SPECIFIED_ASSISTANT_OFFLINE");
+  }
+  if (assistant.subStatus) {
+    return specifiedAssistantError("指定助理当前暂不可接单，请重新选择", "SPECIFIED_ASSISTANT_UNAVAILABLE");
+  }
+
+  const assistantBuildingId = assistant.activeBuildingId ?? assistant.buildingId;
+  if (assistantBuildingId !== taskBuildingId) {
+    return specifiedAssistantError("指定助理不在当前任务区域，请重新选择", "SPECIFIED_ASSISTANT_WRONG_BUILDING");
+  }
+  return null;
 }
 
 /**
@@ -118,8 +159,10 @@ export async function DELETE(request: NextRequest) {
 
     const where: Record<string, unknown> = {};
     if (photographerId) where.photographerId = photographerId;
-    // 排除已完成的任务，只清空进行中/等待中的
-    where.status = { not: TaskStatus.completed };
+    // 只清空助理尚未点击开始、且不在插单链路中的 waiting 任务。
+    where.status = TaskStatus.waiting;
+    where.parentTaskId = null;
+    where.interruptTasks = { none: { status: { in: [TaskStatus.waiting, TaskStatus.executing, TaskStatus.paused] } } };
 
     // 先释放被分配的助理与协作助理
     const tasksToDelete = await prisma.bookingTask.findMany({
@@ -170,12 +213,17 @@ export async function POST(request: NextRequest) {
       estMinutes,
       note,
     } = body;
+    const wantsSpecifiedAssistant = isSpecified === true;
+    const specifiedAssistantId = typeof assistantId === "string" ? assistantId.trim() : "";
 
     if (!photographerId || !roomNumber || !categoryId) {
       return Response.json(
         { error: "photographerId, roomNumber, categoryId are required" },
         { status: 400 }
       );
+    }
+    if (wantsSpecifiedAssistant && !specifiedAssistantId) {
+      return specifiedAssistantError("指定助理不能为空，请重新选择", "SPECIFIED_ASSISTANT_REQUIRED", 400);
     }
 
     await runTaskMaintenance({ force: true });
@@ -216,6 +264,32 @@ export async function POST(request: NextRequest) {
       return Response.json({ error: "Invalid categoryId" }, { status: 400 });
     }
 
+    const photographer = await prisma.profile.findUnique({
+      where: { id: photographerId },
+      select: { buildingId: true },
+    });
+    if (!photographer) {
+      return Response.json({ error: "Invalid photographerId" }, { status: 400 });
+    }
+
+    const parsedLocationBuildingId =
+      locationBuildingId != null && locationBuildingId !== ""
+        ? parseInt(String(locationBuildingId), 10)
+        : null;
+    const normalizedLocationBuildingId =
+      typeof parsedLocationBuildingId === "number" && Number.isFinite(parsedLocationBuildingId)
+        ? parsedLocationBuildingId
+        : null;
+    const effectiveTaskBuildingId = normalizedLocationBuildingId ?? photographer.buildingId;
+
+    if (wantsSpecifiedAssistant && !queuedByPhotographerLimit) {
+      const specifiedAssistantValidation = await validateSpecifiedAssistant(
+        specifiedAssistantId,
+        effectiveTaskBuildingId
+      );
+      if (specifiedAssistantValidation) return specifiedAssistantValidation;
+    }
+
     // 锁定开关打开时必须填写原因
     if (isLocked && !lockReason && !queuedByPhotographerLimit) {
       return Response.json(
@@ -228,19 +302,15 @@ export async function POST(request: NextRequest) {
       ? new Date(Date.now() + estMinutes * 60 * 1000)
       : null;
 
-    const parsedLocationBuildingId =
-      locationBuildingId != null && locationBuildingId !== ""
-        ? parseInt(String(locationBuildingId), 10)
-        : null;
     const task = await prisma.bookingTask.create({
       data: {
         photographerId,
-        locationBuildingId: Number.isFinite(parsedLocationBuildingId) ? parsedLocationBuildingId : null,
+        locationBuildingId: normalizedLocationBuildingId,
         roomNumber,
         categoryId,
         priority: category.priorityLevel,
-        isSpecified: queuedByPhotographerLimit ? false : isSpecified ?? false,
-        assistantId: !queuedByPhotographerLimit && isSpecified ? assistantId : null,
+        isSpecified: queuedByPhotographerLimit ? false : wantsSpecifiedAssistant,
+        assistantId: !queuedByPhotographerLimit && wantsSpecifiedAssistant ? specifiedAssistantId : null,
         isLocked: queuedByPhotographerLimit ? true : isLocked ?? false,
         lockReason: queuedByPhotographerLimit
           ? PHOTOGRAPHER_LIMIT_QUEUE_LOCK_REASON
@@ -257,15 +327,15 @@ export async function POST(request: NextRequest) {
       return createdTaskResponse(task);
     }
 
-    if (isSpecified && assistantId) {
+    if (wantsSpecifiedAssistant) {
       await prisma.$transaction([
         prisma.taskCollaborator.upsert({
-          where: { taskId_assistantId: { taskId: task.id, assistantId } },
-          create: { taskId: task.id, assistantId, role: "primary", status: "waiting" },
+          where: { taskId_assistantId: { taskId: task.id, assistantId: specifiedAssistantId } },
+          create: { taskId: task.id, assistantId: specifiedAssistantId, role: "primary", status: "waiting" },
           update: { role: "primary", status: "waiting", leftAt: null },
         }),
-        prisma.profile.update({
-          where: { id: assistantId },
+        prisma.profile.updateMany({
+          where: { id: specifiedAssistantId, status: "idle" },
           data: { status: "assigned" },
         }),
       ]);
@@ -277,7 +347,7 @@ export async function POST(request: NextRequest) {
     }
 
     // 自动派单（非指定助理模式）：先空闲助理；无空闲则对「更紧急的短时单」尝试插单
-    if (!isSpecified) {
+    if (!wantsSpecifiedAssistant) {
       const buildingId = task.locationBuildingId ?? task.photographer.buildingId;
       const taskPriority = task.priority;
       /** 新任务「离场」保守上界：优先用类型 maxDuration（与快捷预约时段一致），否则 estDuration */
@@ -343,7 +413,8 @@ export async function POST(request: NextRequest) {
           status: TaskStatus.executing,
         },
         include: {
-          category: { select: { canBeInterrupted: true, maxDuration: true, maxInterruptMinutes: true } },
+          category: { select: { name: true, canBeInterrupted: true, maxDuration: true, maxInterruptMinutes: true } },
+          photographer: { select: { buildingId: true } },
           collaborators: {
             where: { role: "helper", status: { in: ["waiting", "executing", "paused"] } },
             select: { id: true },
@@ -351,16 +422,18 @@ export async function POST(request: NextRequest) {
         },
       });
 
-      const filteredCandidates = assistantCurrentTasks.filter((t) => {
-        if (!t.assistantId || pendingInterruptAssistantIds.has(t.assistantId) || t.parentTaskId) return false;
-        if (t.collaborators.length > 0) return false;
-        if (t.isLocked || !taskCategoryCanBeInterrupted(t.category)) return false;
+      const filteredCandidates: typeof assistantCurrentTasks = [];
+      for (const t of assistantCurrentTasks) {
+        if (!t.assistantId || pendingInterruptAssistantIds.has(t.assistantId) || t.parentTaskId) continue;
+        if (t.collaborators.length > 0) continue;
+        if (await isIroningInterruptProtected(t)) continue;
+        if (t.isLocked || !taskCategoryCanBeInterrupted(t.category)) continue;
         // 当前执行单须比新单「更低优先」（数值更大），P1 进行中不可作为被插对象
-        if (t.priority <= taskPriority) return false;
+        if (t.priority <= taskPriority) continue;
         const cap = effectiveInterruptLeaveCapMinutes(globalInterruptCap, t.category.maxInterruptMinutes);
-        if (newTaskLeaveUpperMin > cap) return false;
-        return true;
-      });
+        if (newTaskLeaveUpperMin > cap) continue;
+        filteredCandidates.push(t);
+      }
 
       const interruptOrder = await buildP1InterruptCandidateOrderFromFiltered(buildingId, filteredCandidates);
 

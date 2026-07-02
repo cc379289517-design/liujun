@@ -92,10 +92,19 @@ export async function DELETE(_request: NextRequest, { params }: RouteContext) {
 
     const task = await prisma.bookingTask.findUnique({
       where: { id },
-      include: { collaborators: { where: { status: { in: ["waiting", "executing", "paused"] } }, select: { assistantId: true } } },
+      include: {
+        collaborators: { where: { status: { in: ["waiting", "executing", "paused"] } }, select: { assistantId: true } },
+        interruptTasks: { where: { status: { in: [TaskStatus.waiting, TaskStatus.executing, TaskStatus.paused] } }, select: { id: true } },
+      },
     });
     if (!task) {
       return Response.json({ error: "Task not found" }, { status: 404 });
+    }
+    if (task.status !== TaskStatus.waiting || task.parentTaskId != null || task.interruptTasks.length > 0) {
+      return Response.json(
+        { error: "任务已开始或处于插单链路中，不能直接取消", code: "TASK_ALREADY_STARTED_CANNOT_CANCEL" },
+        { status: 409 }
+      );
     }
 
     const releasedIds = [task.assistantId, ...task.collaborators.map((c) => c.assistantId)]

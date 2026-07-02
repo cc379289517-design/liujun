@@ -1,5 +1,337 @@
 # 需求：熨烫机单机队列、助理预分配与空档任务匹配
 
+## 当前阶段：全项目拆解与可维护性优化主控计划
+
+### 本次问题
+
+- 用户要求：根据当前项目情况，把所有内容做更优拆解和更好维护，进行全方面优化。
+- 当前风险：`src/app/photographer/page.tsx` 已超过 11000 行，承载身份、地图、快捷预约、任务状态、移动端、轮询和大量业务判断，是主要维护风险。
+- 当前工作区已有小李/小刘未提交成果，涉及指定助理、暗黑 UI、待就位维护、熨烫保护等；不能在未验收前直接大规模重构，避免覆盖或混入风险。
+- 当前验证状态：`npx tsc --noEmit --pretty false`、`npm run build`、`git diff --check` 均通过；`prisma/dev.db` 有本地改动，默认不提交。
+
+### 总体原则
+
+- 先稳定、再拆分、再优化性能，最后做依赖和数据库生产化。
+- 每个阶段只改一类问题，避免 UI、业务规则、部署、安全升级混在同一个提交。
+- 小李负责 UI/UX/移动端/PWA 视觉交互；小刘负责业务逻辑/API/文档/测试；小张负责性能/并发/数据库/架构/部署；老王负责主控、验收和统一 commit。
+- 不改业务规则的阶段，必须只做等价拆分；拆分前后 TypeScript、生产构建和关键流程表现要一致。
+- 后续维护必须减少板块互相交错影响：UI 组件只依赖清晰的 props 和展示派生函数，业务规则集中在 `src/lib/*Service`，API 只做请求解析和服务编排，部署脚本不改业务逻辑。
+- 每次改动都要标注所属板块：UI / API / 调度 / 数据库 / 部署 / 文档；跨板块改动必须由老王确认后拆成小提交。
+
+### 阶段 0：当前成果冻结与验收
+
+- [ ] 老王验收当前未提交改动：指定助理、暗黑主题、等待熨烫可取消、待就位维护、熨烫插单保护。
+- [ ] 排除 `prisma/dev.db`，只提交代码、样式、文档和规则改动。
+- [ ] 通过一键发布同步到 Mac mini，确认生产健康检查通过。
+
+### 阶段 1：建立工作台模块边界
+
+- [ ] 新增 `src/app/photographer/types.ts`：迁移 `TaskFromAPI`、`DisplayTask`、角色/状态等页面共享类型。
+- [ ] 新增 `src/app/photographer/taskDisplay.ts`：迁移任务状态文案、排序、任务时长、指定/提权/队列展示等纯展示派生函数。
+- [ ] 新增 `src/app/photographer/locationDisplay.ts`：迁移楼座、房间、工作台服务位置、默认场地等位置派生函数。
+- [ ] 新增 `src/app/photographer/mobileWorkflows.ts` 或同级工具文件：收拢移动端身份入口、URL profileId/employeeId、手机任务卡派生。
+- [ ] 验证：纯函数迁移后页面行为不变，`page.tsx` 行数先降到 9000 行以内。
+
+### 阶段 2：拆分摄影工作台 UI 组件
+
+- [ ] `QuickBookingPanel.tsx`：快捷预约、指定助理按钮、桌面/手机复用所需 UI 片段。
+- [ ] `CurrentTaskPanel.tsx`：助理当前任务状态、准备熨烫、等待熨烫机、暂停/继续/取消入口。
+- [ ] `TaskListPanel.tsx`：我的任务、公共队列、任务标签、指定/提权/备注展示。
+- [ ] `WorkbenchHeaderCard.tsx`：个人信息、身份切换入口、楼座/场地展示。
+- [ ] `MapWorkbench.tsx`：地图、楼座切换、熨烫机状态、地图头像和图例。
+- [ ] 验证：每拆一个组件单独跑 TypeScript 和桌面/手机核心路径检查，避免一次性大重构。
+
+### 阶段 3：业务逻辑服务化
+
+- [ ] `src/lib/taskAssignment.ts`：收拢指定助理校验、普通派单、待就位让行、执行中插单的入口编排。
+- [ ] `src/lib/taskCancellation.ts`：收拢纯未开始任务取消规则、插单链路保护和批量删除规则。
+- [ ] `src/lib/ironingQueueService.ts`：收拢熨烫机排队、notified 使用权、等待机器保护、机器释放推进。
+- [ ] `src/lib/profileAvailability.ts`：统一助理在线、服务楼座、微标签、是否可派发/可指定的判断。
+- [ ] 目标：`src/app/api/tasks/route.ts` 从编排型大文件降到只负责请求解析、调用服务和返回响应。
+
+### 阶段 4：数据请求与并发优化
+
+- [ ] `/api/tasks` 增加更明确的查询边界：楼座、今天/本周、角色视图、是否需要 collaborators。
+- [ ] 后台统计页避免全量拉取所有任务，改为专用聚合接口或分页/日期范围。
+- [ ] 工作台轮询继续保持 `GET` 纯读取，维护扫描由 `/api/tasks/sweep` 节流触发。
+- [ ] 评估 Socket/SSE：优先只推送任务状态变化和人员状态变化，减少 8 秒全量轮询压力。
+- [ ] SQLite 阶段增加写入压力观察指标；上百人长期使用前再推进 PostgreSQL。
+
+### 阶段 5：样式系统整理
+
+- [ ] 从 `src/app/globals.css` 抽出工作台暗黑玻璃、后台暗黑表格、浮层、按钮、状态标签的语义类命名清单。
+- [ ] 小李建立“暗黑可读性检查表”：浅色底、绿色卡片、红/橙/蓝状态、玻璃浮层、移动端按钮文字。
+- [ ] 避免 Tailwind 半透明白底散落覆盖全局主题；新增组件优先使用语义类。
+
+### 阶段 6：依赖与安全升级
+
+- [ ] 小张单独升级 `next` / `eslint-config-next` 到当前安全补丁版本，例如 `16.2.10`，单独提交和发布。
+- [ ] 评估 `xlsx` 高危风险：如果只用于后台人员导入导出，应限制文件入口、大小和字段；中期替换为更安全的解析方案。
+- [ ] `better-sqlite3`、Tailwind、Prisma、React 升级分开做，不和业务功能同批。
+
+### 阶段 7：本地环境与发布维护
+
+- [ ] 增加安全清理脚本：清理 `._*`、`.next` 缓存、Turbopack 伴生文件，不触碰 `prisma/dev.db` 和备份。
+- [ ] 一键发布继续保护 Mac mini 生产 SQLite，默认不提交本地 `prisma/dev.db`。
+- [ ] Mac mini 保持 launchd 托管、健康检查重试、SQLite 启动备份。
+
+### 推荐执行顺序
+
+1. 阶段 0：先验收并提交当前成果。
+2. 阶段 6 的 Next 安全补丁可作为小张独立任务优先处理。
+3. 阶段 1 和阶段 2 分小步拆 `photographer/page.tsx`，每一步保持行为等价。
+4. 阶段 3 再拆业务服务，避免 UI 拆分和业务重构同时发生。
+5. 阶段 4 到阶段 7 按实际并发和发布压力推进。
+
+## 当前阶段：待就位超时维护触发与等待时长口径
+
+### 本次问题
+
+- 待就位任务长时间没有应答时，系统没有稳定触发维护扫描，导致自动转派/离线依赖创建任务、切换地点等事件。
+- 转派后的待就位任务如果仍按任务 `createdAt` 展示等待时长，会把旧负责人等待时间算到新负责人身上，造成“新助理刚接手却显示等了很久”的误导。
+
+### 实施计划
+
+- [x] `src/app/photographer/page.tsx`：在工作台轮询中节流触发 `/api/tasks/sweep`，保持 `GET /api/tasks` 纯读取。
+- [x] `src/app/photographer/page.tsx`：待就位/已分配等待时长优先按当前负责人 primary `joinedAt` 计算，未分配队列仍按 `createdAt`。
+- [x] 验证：TypeScript 检查、diff 空白检查，并用本地库确认 sweep 会推动超时待就位处理。
+
+### 小刘实施评审
+
+- 已完成：工作台 8 秒轮询中增加维护扫描触发，但客户端节流到 30 秒一次；扫描先执行，随后再刷新助理和任务数据。
+- 已保持：`GET /api/tasks` 仍是纯读取接口，不重新引入列表轮询写库。
+- 已完成：任务列表“已等待”对已分配待就位任务优先按当前负责人 primary `joinedAt` 计算；未分配队列仍回退 `createdAt`。
+- 已同步：`摄影助理自动派单系统.md` 补充待就位扫描触发和等待时长口径；`tasks/lessons.md` 记录经验。
+- 验证通过：`npx tsc --noEmit --pretty false`。
+- 验证通过：`git diff --check -- src/app/photographer/page.tsx tasks/todo.md tasks/lessons.md 摄影助理自动派单系统.md`。
+- 验证通过：复制临时库后释放同楼座空闲助理，`runTaskMaintenance({ force: true })` 将超时待就位任务从罗美琪转给吴晓婷，返回 `assigned=1`；正式 `prisma/dev.db` 未被该验证修改。
+
+## 当前阶段：指定助理允许选择忙碌助理发单
+
+### 本次问题
+
+- 指定助理时，如果该助理身上已有任务，也应允许摄影师发布任务。
+- 新任务应进入指定助理的待执行队列，不应因为助理正在进行中而被前端或 API 拦截。
+
+### 实施计划
+
+- [x] `src/app/api/tasks/route.ts`：指定助理校验移除空闲/可派发限制，只保留存在、角色、在线、同区域和微标签基础校验。
+- [x] `src/app/api/tasks/route.ts`：创建指定任务后只在助理当前 `idle` 时改为 `assigned`，避免覆盖正在执行/忙碌状态。
+- [x] `src/app/photographer/page.tsx`：快捷预约指定助理选择和提交不再因 `executing/busy/finishing/assigned` 阻止。
+- [x] 验证：TypeScript 检查、diff 空白检查、临时库接口验证忙碌助理可被指定且状态不被覆盖。
+
+### 小刘实施评审
+
+- 已完成：指定助理 API 不再要求 `Profile.status=idle/assigned`，也不再调用 `dispatchableAssistantIds()` 拦截已有任务的助理。
+- 已完成：指定任务仍校验助理存在、角色、在线、无微标签和当前服务楼座一致；这些基础条件失败仍返回 4xx。
+- 已完成：指定到忙碌/执行中助理时，新任务创建为 `waiting`、写入 `isSpecified=true` 和 `assistantId`，并维护 primary 参与记录。
+- 已完成：只有助理当前 `idle` 时才把人员状态改为 `assigned`；如果助理正在执行，保持 `executing` 不被覆盖。
+- 已完成：前端快捷预约指定助理不再因 `executing/busy/finishing/assigned` 禁选或阻止提交。
+- 验证通过：`npx tsc --noEmit --pretty false`。
+- 验证通过：临时库构造正在执行任务的助理后发指定任务，接口返回 201，新任务 `waiting/isSpecified=true/assistantId=该助理`，助理状态仍为 `executing`。
+- 验证通过：`git diff --check -- src/app/api/tasks/route.ts src/app/photographer/page.tsx tasks/todo.md tasks/lessons.md 摄影助理自动派单系统.md`。
+
+## 当前阶段：指定助理发单遵守摄影师个人队列
+
+### 本次问题
+
+- 指定助理发单不应在摄影师达到发布上限后直接失败。
+- 新规则：指定助理和常规发单一样，前 2 条正常发布；第 3 条进入摄影师自己的任务列表队列。
+
+### 实施计划
+
+- [x] `src/app/api/tasks/route.ts`：移除“达到摄影师上限时指定助理直接 409”的特殊拦截。
+- [x] `src/app/api/tasks/route.ts`：当任务进入摄影师限流队列时，不校验也不占用指定助理，保持 `assistantId=null` 的个人队列任务。
+- [x] 验证：TypeScript 检查、diff 空白检查、临时库接口验证指定助理第 3 条进入个人队列。
+
+### 小刘实施评审
+
+- 已完成：摄影师达到发布上限时，指定助理发单不再返回 `PHOTOGRAPHER_ACTIVE_TASK_LIMIT_REACHED`，而是复用常规个人队列创建逻辑。
+- 已完成：个人队列中的第 3 条任务保持 `assistantId=null`、`isLocked=true`、`lockReason=photographer_active_task_limit_queue`，不会提前占用所选助理。
+- 已确认：如果该摄影师已有 1 条个人队列任务，继续发布仍按现有规则返回 `409 / PHOTOGRAPHER_LIMIT_QUEUE_FULL`。
+- 验证通过：`npx tsc --noEmit --pretty false`。
+- 验证通过：临时库将摄影师发布上限设为 2，已有 2 条活跃任务后指定助理发布第 3 条，接口返回 201，任务进入个人队列，所选助理保持 `idle`。
+
+## 当前阶段：等待熨烫机任务允许取消
+
+### 本次问题
+
+- 等待熨烫机时，若助理还没有点击开始，任务应可随时取消。
+- 纠正口径：暂停中、执行中、以及被插单/插单链路中的任务都属于已经进入执行流程，不能直接取消。
+
+### 实施计划
+
+- [x] `src/app/api/tasks/[id]/route.ts`：单任务取消只允许纯 `waiting`、非插单父子链路任务；其他状态返回 409。
+- [x] `src/app/api/tasks/route.ts`：批量删除只清理纯未开始 `waiting` 任务，避免误删暂停、执行中或插单链路任务。
+- [x] `src/app/photographer/page.tsx`：取消入口统一按纯未开始任务判断；等待熨烫机当前卡片保留“取消任务”入口；取消失败不再乐观移除页面任务。
+- [x] 验证：TypeScript 检查、diff 空白检查、临时库接口验证 `waiting_machine` 可删，`paused/executing/插单链路` 拒删。
+
+### 小刘实施评审
+
+- 已完成：`DELETE /api/tasks/[id]` 只允许取消助理还没点击开始的 `waiting` 任务；`paused/executing/completed/parentTaskId != null/存在未完成子插单` 都返回 `409 TASK_ALREADY_STARTED_CANNOT_CANCEL`。
+- 已完成：`DELETE /api/tasks` 批量清理时只删除纯 `waiting` 且不在插单链路中的任务。
+- 已完成：工作台取消入口统一按纯未开始任务判断；等待熨烫机状态卡补了“取消任务”，任务标签 hover 也可切为“取消”。
+- 已完成：取消失败时不再从页面乐观移除任务，会展示后端错误提示。
+- 验证通过：`npx tsc --noEmit --pretty false`。
+- 验证通过：临时库直接调用删除接口，`waiting_machine` 返回 200 且助理释放为 `idle`；`paused/executing/父任务被插单/子插单` 均返回 `409 TASK_ALREADY_STARTED_CANNOT_CANCEL` 且任务保留。
+
+## 当前阶段：执行中插单增加熨烫机排队保护
+
+### 本次问题
+
+- 当前楼座/区域熨烫机已有 `waiting_machine/notified` 排队压力时，正在执行熨烫任务的助理不应被紧急任务执行中插单。
+- 保护范围只限“执行中插单离场”路径，不影响待就位让行、熨烫等待均衡、熨烫机队列推进和空闲助理正常派发。
+
+### 实施计划
+
+- [x] `src/lib/scheduler.ts`：新增同楼座熨烫排队压力判断，并在 `canInterrupt()` 内兜底保护执行中熨烫任务。
+- [x] `src/app/api/tasks/route.ts`：执行中插单候选筛选时先排除受熨烫排队保护的助理。
+- [x] `摄影助理自动派单系统.md`：同步 3.4 执行中插单与 9.3 熨烫机长期规则。
+- [x] `tasks/lessons.md`：记录 API 与 scheduler 双层兜底经验。
+- [x] 验证：TypeScript 检查、diff 空白检查、临时库脚本覆盖“有/无熨烫队列压力”两种 `canInterrupt()` 结果。
+
+### 小刘实施评审
+
+- 已完成：同楼座存在 `waiting_machine/notified` 熨烫等待时，`POST /api/tasks` 的执行中插单候选池会跳过正在执行熨烫任务的助理。
+- 已完成：`canInterrupt()` 也会调用同一保护判断，避免 sweep 或其他入口绕过 API 筛选。
+- 已确认：待就位让行 `interruptWaitingPreempt()`、熨烫机队列推进、熨烫等待均衡、空闲助理派发未改动。
+- 验证通过：`npx tsc --noEmit --pretty false`。
+- 验证通过：临时库脚本构造两栋测试楼，结果为有 `waiting_machine` 熨烫队列压力时 `canInterrupt=false`，无队列压力时 `canInterrupt=true`。
+- 验证通过：临时库直接调用 `POST /api/tasks`，有熨烫队列压力时新 P1 保持未分配，无压力时仍按执行中插单写入 `assistantId` 和 `parentTaskId`。
+- 验证通过：`git diff --check -- src/app/api/tasks/route.ts src/lib/scheduler.ts tasks/todo.md tasks/lessons.md 摄影助理自动派单系统.md`。
+
+## 当前阶段：摄影工作台快捷预约新增一次性指定助理
+
+### 本次问题
+
+- 用户希望在摄影师“快捷预约”窗口添加一个“指定助理”按钮。
+- 点击后可选择当前区域/楼座内在线助理；选择后按钮显示为助理标签。
+- 再点击某个快捷预约任务类型时，本次任务指定分配给该助理。
+- 任务发布成功后，指定助理选择恢复初始状态；一次选择只对应一个任务，不影响后续任务。
+- 任务标签/任务卡片中需要有“指定”标识。
+
+### 本次分派
+
+- [x] 已派给小李：只负责 UI / UX / 移动端 / PWA 视觉交互方案，不改核心派单逻辑。
+- [x] 已派给小刘：只负责业务逻辑 / API / 文档 / 测试方案，不重做 UI。
+- [x] 老王确认后，小刘先实施 API/业务校验部分；前端入口和视觉交互仍由老王/小李后续接入。
+
+### 后续排队任务
+
+- [ ] 等“快捷预约指定助理”任务完成并汇报后，再派给小李统一修复暗黑模式可读性问题；只改 UI 可读性，不碰派单/API/业务逻辑。
+- [ ] 暗黑模式下左侧“当前任务状态”的绿色“准备熨烫”状态卡文字对比度不足：提高主标题、提示文字与背景之间的对比度，同时保持绿色准备熨烫语义。
+- [x] 暗黑模式下右侧快捷按钮区“返回登录 / 系统风格”等按钮文字过浅：提高按钮文字与玻璃背景对比度，保持当前暗黑玻璃风格一致。
+- [x] 工作台鼠标展开/下拉标签浓度不统一：统一地图楼座、顶部位置/场地、熨烫机状态、右侧管理菜单的白天/暗黑玻璃浮层口径。
+
+### 初步技术判断
+
+- 后端 `BookingTask` 已有 `isSpecified` 字段，创建任务接口也已读取 `isSpecified` / `assistantId`。
+- 当前快捷预约前端创建任务时尚未传入指定助理参数，桌面端和移动端分别有任务创建入口。
+- 本次优先复用现有字段，不新增数据库字段；但需要补后端校验，避免指定离线、跨楼座或不符合接单条件的助理。
+- 指定助理应只影响本次创建请求，任务创建成功后前端清空选择；创建失败时倾向保留选择，方便用户换任务类型或重试。
+
+### 实施计划
+
+- [x] `src/app/photographer/page.tsx`：新增一次性指定助理状态、指定助理按钮、在线助理选择弹层/菜单。
+- [x] `src/app/photographer/page.tsx`：桌面端 `handleBook` / genie 创建请求携带 `isSpecified: true`、`assistantId`，成功后清空选择。
+- [x] `src/app/photographer/page.tsx`：移动端 `createMobileTask` 同步支持指定助理，保持功能一致。
+- [x] `src/app/photographer/page.tsx`：任务列表/任务卡片展示 “指定” 标识，优先使用 `task.isSpecified`。
+- [x] `src/app/api/tasks/route.ts`：补充指定助理校验，同楼座、在线、助理角色、可接任务边界明确返回错误。
+- [x] 验证：运行 TypeScript 检查和 diff 空白检查；浏览器轻量检查新增入口。
+
+### 可选项
+
+- 方案 A：只允许指定“在线且空闲/可待就位”的助理；最稳，避免指定忙碌助理造成插单和公平性混乱。
+- 方案 B：允许指定在线忙碌助理，但仍走现有插单/待就位让行规则；功能更强，但边界更复杂。
+- 老王初步建议：先采用方案 A，后续如确实需要“指定忙碌助理插单”，再单独做规则设计。
+
+### 小刘 API 实施评审
+
+- 已完成：`src/app/api/tasks/route.ts` 在 `isSpecified === true` 且有 `assistantId` 时先校验指定助理，再创建任务。
+- 已完成：指定助理必须存在，且角色为助理/助理组长、在线、无子状态、当前服务楼座匹配任务发生楼座。
+- 已调整：指定助理不再通过调度器 `dispatchableAssistantIds()` 可派发判断；已有待执行、进行中、暂停中或协作任务的在线同楼座助理也允许被指定。
+- 已完成：摄影师达到发布上限时，指定助理任务返回 409，不绕过上限，也不退化成个人队列指定任务。
+- 已完成：校验通过后继续写入 `isSpecified=true`、`assistantId`，维护 primary `TaskCollaborator`，并将助理 `profile.status` 置为 `assigned`。
+- 已确认：非指定任务仍走原自动派单、待就位让行和执行中插单分支。
+- 已同步：长期规则 `摄影助理自动派单系统.md` 已补充指定助理 API 校验口径。
+- 验证：`npx tsc --noEmit --pretty false` 通过；`git diff --check -- src/app/api/tasks/route.ts src/lib/scheduler.ts` 通过。
+- 待老王/小李配合：前端快捷预约创建请求需在本次任务里传 `isSpecified: true` 与 `assistantId`；任务卡片若要显示“指定”，可读取返回任务的 `isSpecified`。
+
+### 小李 UI 实施评审
+
+- 已完成：桌面端“快捷预约”面板右上角新增“指定助理”入口；选中后显示助理头像/姓名标签，并支持清除后重新选择。
+- 已完成：桌面端在线助理弹层按当前楼座 `assistants` 展示，在线但不可接单的助理灰显并显示状态；无在线助理时显示空态。
+- 已完成：指定助理弹层改为窄列长列表，去掉顶部说明行，只展示头像、姓名和状态，一列尽量显示 5-6 个助理位。
+- 已微调：桌面端指定助理弹层上移到快捷预约面板顶部附近，并与左侧容器保留更清楚的横向间隔。
+- 已完成：手机端“快捷发单”卡片新增同样的一次性指定助理入口、选中提示和展开列表。
+- 已完成：桌面端 genie 发单和手机端快捷发单均向现有接口传入 `assistantId` 与 `isSpecified`；发布成功后清空选择，发布失败保留选择方便重试。
+- 已完成：切换工作台楼座时自动清空已选助理；已选助理离线、忙碌或暂不可接时阻止发布并提示重新选择。
+- 已完成：任务列表、公共队列和手机任务卡基于 `task.isSpecified` 展示“指定”小标识。
+- 已调整：我的任务卡片里的“指定”标签改为紧跟助理名字后方展示，避免和任务名、时长挤在同一段。
+- 已修复：暗夜模式下左侧「当前任务状态」里的待就位/点击开始任务/房间与时长字段提亮，并统一「我的任务」状态小标签的暗夜底色和文字对比。
+- 已确认：小李本次只修改 `src/app/photographer/page.tsx` 和 `tasks/todo.md`，未改 API、scheduler、Prisma 或核心派单逻辑。
+- 验证：`npx tsc --noEmit --pretty false` 通过；`git diff --check -- src/app/photographer/page.tsx` 通过。
+
+### 小李 UI 暗黑浮层评审
+
+- 已完成：地图楼座下拉、顶部位置/场地下拉、熨烫机状态展开、右侧后台管理下拉统一使用同一套工作台浮层浓度。
+- 已微调：顶部位置/楼座/场地下拉常叠在深色名片上，改为更亮的 slate 雾面玻璃，避免背景越深浮层越黑。
+- 已微调：地图右上角楼座切换去掉“区域平面图”字段，下拉宽度收窄并与按钮对齐。
+- 已微调：地图楼座切换按钮/下拉宽度再收窄约 1/3，展开垂直间隙缩小一半。
+- 已微调：地图楼座切换与熨烫机状态展开统一使用同一套箭头图标和展开旋转方式。
+- 已微调：地图楼座切换与熨烫机状态入口的底框浓度对齐“指定助理”容器，降低暗黑底色压重感。
+- 已修复：地图右下角状态图例移除浅色强制玻璃类，暗黑模式下改为轻量深色玻璃底。
+- 已完成：熨烫机展开中的机器小卡和助理 hover 气泡同步暗黑玻璃化，避免一处白底一处深底。
+- 已完成：右侧快捷标签 `readable-glass-dark` 调整为真正的深色半透明玻璃，提高暗黑和复杂底图上的文字对比度。
+- 已确认：本次只改 UI 样式文件 `src/app/photographer/page.tsx`、`src/app/globals.css` 和进度文档，不碰派单/API/数据库逻辑。
+
+## 当前阶段：修复后台管理页面暗黑主题适配
+
+### 本次问题
+
+- 用户反馈：后台管理页面在系统暗黑模式下仍大面积保持浅色，顶部标签、统计卡片、筛选区、表格和弹窗没有完整跟随暗黑化。
+- 当前身份为小李，只处理后台 UI / UX / 视觉主题适配，不改核心派单逻辑、接口、任务状态或数据库。
+- 追加检查：各个后台标签页都需要检查文字对比、底框容器、展开额外信息和表格/工具条的暗黑浓度是否统一。
+
+### 本次计划
+
+- [x] `src/app/admin/page.tsx`：确认后台页面会读取工作台主题偏好，并同步 `data-theme`。
+- [x] `src/app/globals.css`：补全 `.admin-shell` 暗黑变量与后台通用组件暗黑样式。
+- [x] 覆盖后台常见浅色工具类冲突：表格行、表头、筛选输入、弹窗、浮层、工具条和返回按钮。
+- [x] 逐页检查：人员管理、空间管理、审批管理、逻辑设置、数据统计的文字、底框容器和展开/浮层暗黑表现。
+- [x] 验证：运行 TypeScript 检查、diff 空白检查，并用浏览器检查 `/admin` 的暗黑计算样式。
+
+### 本次评审
+
+- 已完成：后台页面读取 `localStorage.themeMode` 并同步 `data-theme`，自定义背景图下暗黑模式使用深色遮罩，不再沿用白天浅色蒙层。
+- 已完成：后台外壳、标签页、主容器、卡片、表头、表格行、弹窗、popover、输入框、分段控件、地图工具条和返回按钮接入统一暗黑玻璃浓度。
+- 已完成：补齐 `bg-white/90、82、76、72、56、45` 等后台常见半透明白底工具类，以及浅灰/浅白 hover、ring、border 的暗黑覆盖。
+- 已完成：人员管理、空间管理、审批管理、逻辑设置、数据统计 5 个标签页逐页扫描，可见区域未再检出明显白底或暗色低对比文字。
+- 验证通过：`npx tsc --noEmit --pretty false`。
+- 验证通过：`git diff --check -- src/app/globals.css src/app/admin/page.tsx tasks/todo.md`。
+- 验证通过：`npm run build`。
+
+## 当前阶段：修复左侧工作台面板暗黑主题适配
+
+### 本次问题
+
+- 用户反馈：系统切到暗黑模式后，左侧工作台区域仍保持浅色，没有跟随右侧地图与区域数据一起暗黑化。
+- 当前身份为小李，只处理 UI / UX / 视觉适配，不改核心派单逻辑。
+
+### 本次计划
+
+- [x] `src/app/globals.css`：为左侧工作台高层面板补充暗黑主题语义样式，避免浅色 Tailwind 背景覆盖全局 glass 暗色规则。
+- [x] `src/app/photographer/page.tsx`：给左侧三面板接入 `left-workbench-panel` 与暗黑显式 class。
+- [x] `src/app/photographer/page.tsx`：给空闲 / 离线状态卡片接入暗黑卡片样式，保留空闲绿色语义但降低浅色感。
+- [x] 验证：运行 TypeScript 检查与 diff 空白检查。
+
+### 本次评审
+
+- 已完成：左侧个人信息、当前任务状态 / 快捷预约、我的任务三个面板在暗黑主题下使用深色玻璃背景。
+- 已完成：空闲与离线状态卡片在暗黑主题下不再出现突兀浅色块。
+- 已确认：本次只改 UI 样式与组件 class，不涉及派单、任务状态、接口或数据库。
+- 验证结果：`npx tsc --noEmit --pretty false` 通过；`git diff --check -- src/app/globals.css src/app/photographer/page.tsx tasks/todo.md tasks/lessons.md` 通过。
+
 ## 当前阶段：新增一键 commit/push/同步 Mac mini 部署脚本
 
 ### 本次问题

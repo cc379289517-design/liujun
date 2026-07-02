@@ -16,6 +16,7 @@ type Building = { id: number; name: string; floorPlanUrl: string | null; cropX?:
 type Profile = { id: string; employeeId: string | null; name: string; avatar: string | null; role: "photographer" | "assistant" | "assistant_leader" | "admin"; buildingId: number; currentRoom: string | null; status: string; onlineStatus: string; isOnline: boolean; department: string | null; group: string | null; building: { id: number; name: string } };
 type Category = { id: number; name: string; description: string | null; priorityLevel: number; minDuration: number; maxDuration: number; estDuration: number; hexColor: string; sortRank: number; canBeInterrupted: boolean; maxInterruptMinutes: number | null };
 type SystemConfigMap = Record<string, { value: string; label: string | null }>;
+type ThemeMode = "light" | "dark" | "auto";
 
 const TABS: { key: TabKey; label: string; color: string; bg: string; activeBg: string }[] = [
   { key: "profiles", label: "人员管理", color: "#3b82f6", bg: "#dbeafe", activeBg: "#eff6ff" },
@@ -26,7 +27,12 @@ const TABS: { key: TabKey; label: string; color: string; bg: string; activeBg: s
 ];
 
 /* Chrome-style tab SVG — bottom edge is a flat line so it seamlessly connects to content */
-function ChromeTab({ fill }: { fill: string }) {
+function getAutoTheme(): "light" | "dark" {
+  const h = new Date().getHours();
+  return h >= 6 && h < 18 ? "light" : "dark";
+}
+
+function ChromeTab({ fill, stroke }: { fill: string; stroke: string }) {
   return (
     <svg
       viewBox="0 0 200 40"
@@ -36,7 +42,7 @@ function ChromeTab({ fill }: { fill: string }) {
       <path
         d="M 0 40 L 0 40 C 4 40, 8 36, 12 10 C 14 2, 18 0, 24 0 L 176 0 C 182 0, 186 2, 188 10 C 192 36, 196 40, 200 40 L 200 40 Z"
         fill={fill}
-        stroke="rgba(255,255,255,0.72)"
+        stroke={stroke}
         strokeWidth="1"
       />
     </svg>
@@ -45,16 +51,21 @@ function ChromeTab({ fill }: { fill: string }) {
 
 export default function AdminPage() {
   const [tab, setTab] = useState<TabKey>("profiles");
+  const [themeMode, setThemeMode] = useState<ThemeMode>("light");
+  const [resolvedTheme, setResolvedTheme] = useState<"light" | "dark">("light");
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [buildings, setBuildings] = useState<Building[]>([]);
   const [categories, setCategories] = useState<Category[]>([]);
   const [config, setConfig] = useState<SystemConfigMap>({});
   const [loading, setLoading] = useState(true);
+  const isDark = resolvedTheme === "dark";
   const adminPageBackground = String(config[WORKBENCH_PAGE_BACKGROUND_CONFIG_KEY]?.value ?? "");
   const adminShellStyle: CSSProperties | undefined = adminPageBackground
     ? {
-        backgroundColor: "#eef1f5",
-        backgroundImage: `linear-gradient(135deg, rgba(255, 255, 255, 0.38), rgba(255, 255, 255, 0.18) 48%, rgba(255, 250, 244, 0.28)), url("${adminPageBackground}")`,
+        backgroundColor: isDark ? "#0f1117" : "#eef1f5",
+        backgroundImage: isDark
+          ? `linear-gradient(135deg, rgba(15, 23, 42, 0.78), rgba(15, 23, 42, 0.56) 48%, rgba(2, 6, 23, 0.72)), url("${adminPageBackground}")`
+          : `linear-gradient(135deg, rgba(255, 255, 255, 0.38), rgba(255, 255, 255, 0.18) 48%, rgba(255, 250, 244, 0.28)), url("${adminPageBackground}")`,
         backgroundSize: "auto, cover",
         backgroundPosition: "center, center",
         backgroundRepeat: "no-repeat, no-repeat",
@@ -83,6 +94,26 @@ export default function AdminPage() {
     }
     setLoading(false);
   }, []);
+
+  useEffect(() => {
+    try {
+      const saved = window.localStorage.getItem("themeMode") as ThemeMode | null;
+      if (saved === "light" || saved === "dark" || saved === "auto") {
+        setThemeMode(saved);
+      }
+    } catch {}
+  }, []);
+
+  useEffect(() => {
+    const apply = () => {
+      const next = themeMode === "auto" ? getAutoTheme() : themeMode;
+      setResolvedTheme(next);
+      document.documentElement.setAttribute("data-theme", next);
+    };
+    apply();
+    const timer = window.setInterval(apply, 1000);
+    return () => window.clearInterval(timer);
+  }, [themeMode]);
 
   useEffect(() => { fetchData(); }, [fetchData]);
 
@@ -125,7 +156,14 @@ export default function AdminPage() {
                     transformOrigin: "bottom center",
                   } as CSSProperties}
                 >
-                  <ChromeTab fill={isActive ? "rgba(255,255,255,0.66)" : t.bg} />
+	                  <ChromeTab
+	                    fill={isDark
+	                      ? isActive
+	                        ? "rgba(30,41,59,0.82)"
+	                        : "rgba(15,23,42,0.62)"
+	                      : isActive ? "rgba(255,255,255,0.66)" : t.bg}
+	                    stroke={isDark ? "rgba(255,255,255,0.16)" : "rgba(255,255,255,0.72)"}
+	                  />
                   <span
                     className="relative z-10 font-extrabold select-none whitespace-nowrap"
                     style={{

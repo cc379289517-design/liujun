@@ -240,6 +240,7 @@ type TaskFromAPI = {
   categoryId: number;
   priority: number;
   status: "waiting" | "executing" | "paused" | "completed";
+  isSpecified?: boolean;
   ironingStage?: IroningTaskStage;
   ironingQueuedAt?: string | null;
   ironingNotifiedAt?: string | null;
@@ -260,6 +261,7 @@ type TaskFromAPI = {
   parentTaskId: string | null;
   photographer: { id: string; name: string; currentRoom: string | null; buildingId: number };
   assistant: { id: string; name: string; currentRoom: string | null } | null;
+  specifiedAssistant?: { id: string; name: string; avatar?: string | null } | null;
   collaborators?: {
     id: string;
     taskId: string;
@@ -329,6 +331,8 @@ type DisplayTask = {
   statusCls: string;
   tagCls: string;
   hasProgress: boolean;
+  isSpecified: boolean;
+  specifiedAssistantName: string | null;
   assistantName: string | null;
   photographerName: string | null;
   createdAt: string;
@@ -469,6 +473,14 @@ function taskTimingForProfile(
   profileId: string | null | undefined
 ): TaskFromAPI | TaskParticipant {
   return taskParticipantForProfile(task, profileId) ?? task;
+}
+
+function taskWaitingStartedAt(task: TaskFromAPI, profileId: string | null | undefined): string {
+  const participant = taskParticipantForProfile(task, profileId);
+  if (participant?.status === "waiting") return participant.joinedAt;
+  const primaryWaiting = taskParticipants(task).find((c) => c.role === "primary" && c.status === "waiting");
+  if (primaryWaiting) return primaryWaiting.joinedAt;
+  return task.createdAt;
 }
 
 function participantStatusText(status: string): string {
@@ -747,6 +759,8 @@ function apiTaskToDisplay(t: TaskFromAPI, profileId?: string): DisplayTask {
     durationSlotLabel,
     actualTime,
     progress,
+    isSpecified: Boolean(t.isSpecified),
+    specifiedAssistantName: t.specifiedAssistant?.name ?? (t.isSpecified ? t.assistant?.name ?? null : null),
     assistantName: t.assistant?.name || null,
     photographerName: t.photographer?.name || null,
     createdAt: t.createdAt,
@@ -777,7 +791,8 @@ function taskListActualLine(
     return `已进行${fmtMin(m)}`;
   }
   if (d.statusLabel === "队列中" || d.statusLabel === "等待中" || d.statusLabel === "待就位") {
-    const m = Math.max(0, Math.floor((nowMs - new Date(d.createdAt).getTime()) / 60000));
+    const startedAt = raw ? taskWaitingStartedAt(raw, profileId) : d.createdAt;
+    const m = Math.max(0, Math.floor((nowMs - new Date(startedAt).getTime()) / 60000));
     return `已等待${fmtMin(m)}`;
   }
   if (d.statusLabel === "已完成" && d.actualTime) {
@@ -994,6 +1009,21 @@ function isPublicQueueTaskForBuilding(task: TaskFromAPI, buildingId: number | nu
 function getAutoTheme(): "light" | "dark" {
   const h = new Date().getHours();
   return h >= 6 && h < 18 ? "light" : "dark";
+}
+
+function canSpecifyQuickBookAssistant(assistant: DockAssistant): boolean {
+  return assistant.onlineStatus === "online" &&
+    !assistant.subStatus;
+}
+
+function quickBookAssistantStatusText(assistant: DockAssistant): string {
+  if (assistant.onlineStatus !== "online") return "离线";
+  if (assistant.subStatus === "eating") return "吃饭中";
+  if (assistant.subStatus) return "暂不可接";
+  if (assistant.status === "idle") return "空闲";
+  if (assistant.status === "assigned") return "待就位";
+  if (assistant.status === "executing" || assistant.status === "busy" || assistant.status === "finishing") return "忙碌中";
+  return "在线";
 }
 
 const glass =
@@ -1490,10 +1520,17 @@ export default function PhotographerPage() {
   const [buildings, setBuildings] = useState<WorkbenchBuilding[]>([]);
   const [activeBuildingId, setActiveBuildingId] = useState<number | null>(null);
   const [assistants, setAssistants] = useState<DockAssistant[]>([]);
+  const [specifiedQuickBookAssistantId, setSpecifiedQuickBookAssistantId] = useState<string | null>(null);
+  const [quickBookAssistantPickerOpen, setQuickBookAssistantPickerOpen] = useState(false);
+  const [mobileQuickBookAssistantPickerOpen, setMobileQuickBookAssistantPickerOpen] = useState(false);
+  const quickBookAssistantPickerRef = useRef<HTMLDivElement | null>(null);
   const [genie, setGenie] = useState<{
     sx: number; sy: number; sw: number; sh: number;
     tx: number; ty: number; tw: number; th: number;
     label: string; priority: string; cls: string; catName: string; categoryId: number;
+    specifiedAssistantId: string | null;
+    specifiedAssistantName: string | null;
+    specifiedAssistantAvatar: string | null;
     phase: number;
   } | null>(null);
   const [enteringTaskId, setEnteringTaskId] = useState<string | null>(null);
@@ -1629,6 +1666,51 @@ export default function PhotographerPage() {
     pendingRawTaskRef.current = pendingRawTask;
   }, [pendingRawTask]);
 
+  const quickBookAreaAssistants = useMemo(
+    () => [...assistants].sort((a, b) => {
+      const aSelectable = canSpecifyQuickBookAssistant(a) ? 0 : 1;
+      const bSelectable = canSpecifyQuickBookAssistant(b) ? 0 : 1;
+      return aSelectable - bSelectable || a.name.localeCompare(b.name);
+    }),
+    [assistants],
+  );
+  const quickBookOnlineAssistants = useMemo(
+    () => quickBookAreaAssistants.filter((assistant) => assistant.onlineStatus === "online"),
+    [quickBookAreaAssistants],
+  );
+  const selectedQuickBookAssistant = useMemo(
+    () => quickBookAreaAssistants.find((assistant) => assistant.id === specifiedQuickBookAssistantId) ?? null,
+    [quickBookAreaAssistants, specifiedQuickBookAssistantId],
+  );
+  const selectedQuickBookAssistantCanSubmit =
+    !!selectedQuickBookAssistant && canSpecifyQuickBookAssistant(selectedQuickBookAssistant);
+
+  useEffect(() => {
+    setSpecifiedQuickBookAssistantId(null);
+    setQuickBookAssistantPickerOpen(false);
+    setMobileQuickBookAssistantPickerOpen(false);
+  }, [activeBuildingId]);
+
+  useEffect(() => {
+    if (!specifiedQuickBookAssistantId || quickBookAreaAssistants.length === 0) return;
+    if (!quickBookAreaAssistants.some((assistant) => assistant.id === specifiedQuickBookAssistantId)) {
+      setSpecifiedQuickBookAssistantId(null);
+      setQuickBookAssistantPickerOpen(false);
+      setMobileQuickBookAssistantPickerOpen(false);
+    }
+  }, [quickBookAreaAssistants, specifiedQuickBookAssistantId]);
+
+  useEffect(() => {
+    if (!quickBookAssistantPickerOpen) return;
+    const closePicker = (event: PointerEvent) => {
+      const target = event.target;
+      if (target instanceof Node && quickBookAssistantPickerRef.current?.contains(target)) return;
+      setQuickBookAssistantPickerOpen(false);
+    };
+    document.addEventListener("pointerdown", closePicker);
+    return () => document.removeEventListener("pointerdown", closePicker);
+  }, [quickBookAssistantPickerOpen]);
+
   useEffect(() => {
     if (!assistantRankingHelpOpen) return;
     const closeHelp = () => setAssistantRankingHelpOpen(null);
@@ -1664,13 +1746,6 @@ export default function PhotographerPage() {
       ironingQueueHoverCloseTimer.current = setTimeout(() => setIroningQueueHoverOpen(false), 900);
     }
   }, [ironingQueueMode]);
-
-  const resetIroningQueueAutoAfterLabelLeave = useCallback(() => {
-    if (ironingQueueMode === "fixed" && !ironingQueueFixedOpen) {
-      setIroningQueueMode("auto");
-      setIroningQueueHoverOpen(false);
-    }
-  }, [ironingQueueFixedOpen, ironingQueueMode]);
 
   const showAssistantScoreBubble = useCallback((assistantId: string, element: HTMLElement, detailCount = 0) => {
     const rect = element.getBoundingClientRect();
@@ -2815,9 +2890,16 @@ export default function PhotographerPage() {
     if (!pollingProfile) return;
     let cancelled = false;
     let inFlight = false;
+    let lastMaintenanceSweepAt = 0;
     const poll = async () => {
       if (cancelled || inFlight) return;
       inFlight = true;
+      const nowMs = Date.now();
+      const shouldSweep = nowMs - lastMaintenanceSweepAt >= 30_000;
+      if (shouldSweep) {
+        lastMaintenanceSweepAt = nowMs;
+        await fetch("/api/tasks/sweep", { method: "POST" }).catch(() => null);
+      }
       // 刷新助理数据（状态栏 + 地图标记）
       const assistantTasksData = await refreshAssistants();
       Promise.all([
@@ -3324,22 +3406,36 @@ export default function PhotographerPage() {
     }
   }, [buildings, currentRawTask?.status, profile, refreshAssistants]);
 
-  const handleCancelTask = useCallback((taskId: string) => {
+  const handleCancelTask = useCallback(async (taskId: string) => {
     if (removingTaskId) return;
     setRemovingTaskId(taskId);
-    // 调用 API 删除任务
-    if (!taskId.startsWith("temp-")) {
-      fetch(`/api/tasks/${taskId}`, { method: "DELETE" })
-        .then(() => refreshAssistants())
-        .catch(console.error);
-    }
-    setTimeout(() => {
-      setTasks((prev) => prev.filter((t) => t.id !== taskId));
-      setTaskListRaw((prev) => prev.filter((t) => t.id !== taskId));
+    try {
+      // 调用 API 删除任务
+      if (!taskId.startsWith("temp-")) {
+        const res = await fetch(`/api/tasks/${taskId}`, { method: "DELETE" });
+        if (!res.ok) {
+          const data = await res.json().catch(() => null) as { error?: string } | null;
+          showTaskCreateError(data?.error || "任务取消失败，请稍后重试");
+          setRemovingTaskId(null);
+          setHoveredTagId(null);
+          return;
+        }
+        refreshAssistants();
+      }
+      setTimeout(() => {
+        setTasks((prev) => prev.filter((t) => t.id !== taskId));
+        setTaskListRaw((prev) => prev.filter((t) => t.id !== taskId));
+        setAssistantRawTasks((prev) => prev.filter((t) => t.id !== taskId));
+        setRemovingTaskId(null);
+        setHoveredTagId(null);
+      }, 450);
+    } catch (error) {
+      console.error("Failed to cancel task", error);
+      showTaskCreateError("任务取消失败，请检查网络后重试");
       setRemovingTaskId(null);
       setHoveredTagId(null);
-    }, 450);
-  }, [removingTaskId, refreshAssistants]);
+    }
+  }, [removingTaskId, refreshAssistants, showTaskCreateError]);
 
   const switchIdentity = useCallback((p: typeof allProfiles[0]) => {
     safeLocalStorageSet("currentProfileId", p.id);
@@ -3977,6 +4073,11 @@ export default function PhotographerPage() {
   const handleBook = useCallback(
     (catName: string, dur: { label: string; priority: string; cls: string; categoryId: number }, e: React.MouseEvent) => {
       if (genie) return;
+      if (selectedQuickBookAssistant && !selectedQuickBookAssistantCanSubmit) {
+        showTaskCreateError("指定助理当前暂不可接单，请重新选择");
+        setQuickBookAssistantPickerOpen(true);
+        return;
+      }
       const btn = e.currentTarget.getBoundingClientRect();
       const listEl = taskListRef.current;
       if (!listEl) return;
@@ -3987,9 +4088,12 @@ export default function PhotographerPage() {
         tx: listRect.left, ty: listRect.top, tw: listRect.width, th: 38,
         label: dur.label, priority: dur.priority, cls: dur.cls,
         catName, categoryId: dur.categoryId, phase: 0,
+        specifiedAssistantId: selectedQuickBookAssistant?.id ?? null,
+        specifiedAssistantName: selectedQuickBookAssistant?.name ?? null,
+        specifiedAssistantAvatar: selectedQuickBookAssistant?.avatar ?? null,
       });
     },
-    [genie],
+    [genie, selectedQuickBookAssistant, selectedQuickBookAssistantCanSubmit, showTaskCreateError],
   );
 
   const clampTaskListScroll = useCallback((next: number) => {
@@ -4042,6 +4146,8 @@ export default function PhotographerPage() {
             statusLabel: "等待中",
             statusCls: "bg-white/30 border-white/40",
             tagCls: "bg-gray-100/60 text-gray-500",
+            isSpecified: Boolean(genie.specifiedAssistantId),
+            specifiedAssistantName: genie.specifiedAssistantName,
             assistantName: null,
             photographerName: profile?.name || null,
             createdAt: new Date().toISOString(),
@@ -4066,12 +4172,17 @@ export default function PhotographerPage() {
                 roomNumber: room,
                 categoryId,
                 priority: parseInt(genie.priority.replace("P", "")),
+                assistantId: genie.specifiedAssistantId ?? undefined,
+                isSpecified: Boolean(genie.specifiedAssistantId),
               }),
             });
             if (res.ok) {
               const saved = await res.json() as TaskFromAPI;
               setTasks((prev) => sortTasksByStatus(prev.map((t) => t.id === tempId ? apiTaskToDisplay(saved) : t)));
               setTaskListRaw((prev) => [...prev.filter((t) => t.id !== tempId && t.id !== saved.id), saved]);
+              setSpecifiedQuickBookAssistantId(null);
+              setQuickBookAssistantPickerOpen(false);
+              setMobileQuickBookAssistantPickerOpen(false);
               if (isPhotographerLimitQueuedTask(saved)) {
                 showTaskCreateError(photographerLimitQueuePrompt(photographerMaxActiveTasks), true);
               }
@@ -4506,15 +4617,15 @@ export default function PhotographerPage() {
       return 2;
     };
     return rows.sort((a, b) => rowRank(a) - rowRank(b) || a.machine.sortRank - b.machine.sortRank || a.machine.id - b.machine.id);
-  }, [activeIroningWorkItems, availableIroningMachines.length, displayIroningMachines, sortedWaitingIroningWorkItems]);
-  const queuedIroningWorkItems = useMemo(
-    () => ironingMachineRows.flatMap((row) => row.queuedItems),
-    [ironingMachineRows],
-  );
-  const ironingQueueOverview = useMemo(() => {
-    const totalNormalMachines = displayIroningMachines.filter((machine) => machine.status === "normal").length;
-    const activeCount = activeIroningWorkItems.length;
-    const waitingCount = waitingIroningWorkItems.length;
+	  }, [activeIroningWorkItems, availableIroningMachines.length, displayIroningMachines, sortedWaitingIroningWorkItems]);
+	  const queuedIroningWorkItems = useMemo(
+	    () => ironingMachineRows.flatMap((row) => row.queuedItems),
+	    [ironingMachineRows],
+	  );
+	  const ironingQueueOverview = useMemo(() => {
+	    const totalNormalMachines = displayIroningMachines.filter((machine) => machine.status === "normal").length;
+	    const activeCount = activeIroningWorkItems.length;
+	    const waitingCount = waitingIroningWorkItems.length;
     const freeMachines = Math.max(0, totalNormalMachines - activeCount);
     let tone: "busy" | "queue" | "moderate" | "idle" = "idle";
     if (totalNormalMachines > 0) {
@@ -4529,13 +4640,34 @@ export default function PhotographerPage() {
       totalMachines: totalNormalMachines,
       freeMachines,
       waitingCount,
-      activeCount,
-    };
-  }, [activeIroningWorkItems.length, displayIroningMachines.length, waitingIroningWorkItems.length]);
-  const ironingWorkByAssistantId = useMemo(
-    () => new Map(activeIroningWorkItems.map((item) => [item.assistantId, item])),
-    [activeIroningWorkItems],
-  );
+	      activeCount,
+	    };
+	  }, [activeIroningWorkItems.length, displayIroningMachines.length, waitingIroningWorkItems.length]);
+	  const workbenchFloatingSurfaceCls = resolvedTheme === "dark"
+	    ? "border-white/[0.14] bg-slate-900/72 text-slate-100 shadow-black/40"
+	    : "border-white/75 bg-white/84 text-slate-700 shadow-slate-900/10";
+	  const workbenchSoftFloatingSurfaceCls = resolvedTheme === "dark"
+	    ? "border-white/[0.16] bg-slate-900/58 text-slate-100 shadow-black/25"
+	    : "border-white/70 bg-white/92 text-slate-700 shadow-slate-300/40";
+	  const workbenchFloatingItemCls = resolvedTheme === "dark"
+	    ? "text-slate-200/90 hover:bg-white/[0.10] hover:text-white"
+	    : "text-slate-600 hover:bg-slate-100/80 hover:text-slate-950";
+	  const workbenchLocationMenuSurfaceCls = resolvedTheme === "dark"
+	    ? "border-white/[0.18] bg-slate-700/68 text-slate-50 shadow-black/30 ring-1 ring-white/[0.08]"
+	    : "border-white/75 bg-white/84 text-slate-700 shadow-slate-900/10";
+	  const workbenchLocationMenuItemCls = resolvedTheme === "dark"
+	    ? "text-slate-50/95 hover:bg-white/[0.13] hover:text-white"
+	    : "text-slate-600 hover:bg-slate-100/80 hover:text-slate-950";
+	  const workbenchHoverTooltipCls = resolvedTheme === "dark"
+	    ? "bg-slate-900/82 text-slate-100 ring-white/[0.14] shadow-black/40"
+	    : "bg-white/94 text-slate-700 ring-slate-200/80 shadow-slate-900/10";
+	  const workbenchSmallGlassCls = resolvedTheme === "dark"
+	    ? "bg-slate-900/68 ring-white/[0.14] shadow-black/25"
+	    : "bg-white/72 ring-white/80 shadow-slate-900/10";
+	  const ironingWorkByAssistantId = useMemo(
+	    () => new Map(activeIroningWorkItems.map((item) => [item.assistantId, item])),
+	    [activeIroningWorkItems],
+	  );
   const renderIroningQueueDetailPanel = useCallback(
     () => ironingMachineRows.map(({ machine, workItem, readyItem, queuedItems }) => {
         const tone = machine.status === "maintenance" ? "maintenance" : workItem ? "busy" : "idle";
@@ -4562,10 +4694,10 @@ export default function PhotographerPage() {
                       </span>
                     )}
                   </span>
-                  <span className="pointer-events-none absolute right-full top-1/2 z-[90] mr-2 hidden min-w-[132px] -translate-y-1/2 rounded-xl bg-white/96 px-3 py-2 text-left text-[11px] font-extrabold text-slate-700 shadow-lg ring-1 ring-slate-200/80 backdrop-blur group-hover:block">
-                    <span className="block text-slate-900">{queuedItem.durationLabel}熨烫任务</span>
-                    <span className="mt-0.5 block text-blue-600">{queuedStatusLabel(queuedItem)}</span>
-                  </span>
+	                  <span className={`pointer-events-none absolute right-full top-1/2 z-[90] mr-2 hidden min-w-[132px] -translate-y-1/2 rounded-xl px-3 py-2 text-left text-[11px] font-extrabold shadow-lg ring-1 backdrop-blur group-hover:block ${workbenchHoverTooltipCls}`}>
+	                    <span className={resolvedTheme === "dark" ? "block text-slate-50" : "block text-slate-900"}>{queuedItem.durationLabel}熨烫任务</span>
+	                    <span className="mt-0.5 block text-blue-600">{queuedStatusLabel(queuedItem)}</span>
+	                  </span>
                 </span>
               ))}
               {workItem && (
@@ -4579,12 +4711,12 @@ export default function PhotographerPage() {
                       </span>
                     )}
                   </span>
-                  <span className="pointer-events-none absolute right-full top-1/2 z-[90] mr-2 hidden min-w-[156px] -translate-y-1/2 rounded-xl bg-white/96 px-3 py-2 text-left text-[11px] font-extrabold text-slate-700 shadow-lg ring-1 ring-slate-200/80 backdrop-blur group-hover:block">
-                    <span className="block text-slate-900">{workItem.durationLabel}熨烫任务</span>
-                    {workItem.overtimeMin == null && (
-                      <span className="mt-0.5 block text-orange-500">已进行{fmtIroningHoverTime(workItem.elapsedMin)}</span>
-                    )}
-                    <span className={workItem.overtimeMin != null ? "mt-0.5 block text-red-600" : "mt-0.5 block text-slate-900"}>
+	                  <span className={`pointer-events-none absolute right-full top-1/2 z-[90] mr-2 hidden min-w-[156px] -translate-y-1/2 rounded-xl px-3 py-2 text-left text-[11px] font-extrabold shadow-lg ring-1 backdrop-blur group-hover:block ${workbenchHoverTooltipCls}`}>
+	                    <span className={resolvedTheme === "dark" ? "block text-slate-50" : "block text-slate-900"}>{workItem.durationLabel}熨烫任务</span>
+	                    {workItem.overtimeMin == null && (
+	                      <span className="mt-0.5 block text-orange-500">已进行{fmtIroningHoverTime(workItem.elapsedMin)}</span>
+	                    )}
+	                    <span className={workItem.overtimeMin != null ? "mt-0.5 block text-red-600" : resolvedTheme === "dark" ? "mt-0.5 block text-slate-100" : "mt-0.5 block text-slate-900"}>
                       {workItem.overtimeMin != null
                         ? `已超时${fmtIroningHoverTime(workItem.overtimeMin)}`
                         : workItem.remainingMin == null
@@ -4595,19 +4727,19 @@ export default function PhotographerPage() {
                 </span>
               )}
             </div>
-            <span className="group relative grid h-9 w-9 shrink-0 place-items-center justify-self-end rounded-xl bg-white/72 shadow-sm ring-1 ring-white/80 backdrop-blur transition-transform hover:scale-105">
-              <IroningMachineIcon className="h-6 w-6" tone={tone} />
-              {tone === "maintenance" && (
-                <span className="pointer-events-none absolute right-full top-1/2 mr-2 hidden -translate-y-1/2 whitespace-nowrap rounded-xl bg-white/96 px-3 py-2 text-[11px] font-extrabold text-slate-700 shadow-lg ring-1 ring-slate-200/80 backdrop-blur group-hover:block">
-                  {machineStatusText}
-                </span>
+	            <span className={`group relative grid h-9 w-9 shrink-0 place-items-center justify-self-end rounded-xl shadow-sm ring-1 backdrop-blur transition-transform hover:scale-105 ${workbenchSmallGlassCls}`}>
+	              <IroningMachineIcon className="h-6 w-6" tone={tone} />
+	              {tone === "maintenance" && (
+	                <span className={`pointer-events-none absolute right-full top-1/2 mr-2 hidden -translate-y-1/2 whitespace-nowrap rounded-xl px-3 py-2 text-[11px] font-extrabold shadow-lg ring-1 backdrop-blur group-hover:block ${workbenchHoverTooltipCls}`}>
+	                  {machineStatusText}
+	                </span>
               )}
             </span>
           </div>
         );
       }),
-    [ironingMachineRows],
-  );
+	    [ironingMachineRows, resolvedTheme, workbenchHoverTooltipCls, workbenchSmallGlassCls],
+	  );
   const areaPublicQueueRows = useMemo(
     () => publicQueueDisplayTasks.slice(0, 10),
     [publicQueueDisplayTasks],
@@ -5156,6 +5288,11 @@ export default function PhotographerPage() {
     dur: BuiltCategory["durations"][number],
   ) => {
     if (!profile) return;
+    if (selectedQuickBookAssistant && !selectedQuickBookAssistantCanSubmit) {
+      showTaskCreateError("指定助理当前暂不可接单，请重新选择");
+      setMobileQuickBookAssistantPickerOpen(true);
+      return;
+    }
     const room = profileCurrentWorkbenchRoom || defaultBuildingVenue(activeBuilding);
     const locationBuildingId = activeBuilding?.id ?? activeBuildingId ?? null;
     if (!room || !locationBuildingId) {
@@ -5181,6 +5318,8 @@ export default function PhotographerPage() {
         statusLabel: "等待中",
         statusCls: "bg-white/30 border-white/40",
         tagCls: "bg-gray-100/60 text-gray-500",
+        isSpecified: Boolean(selectedQuickBookAssistant),
+        specifiedAssistantName: selectedQuickBookAssistant?.name ?? null,
         assistantName: null,
         photographerName: profile.name,
         createdAt,
@@ -5202,6 +5341,8 @@ export default function PhotographerPage() {
           roomNumber: room,
           categoryId: dur.categoryId,
           priority,
+          assistantId: selectedQuickBookAssistant?.id ?? undefined,
+          isSpecified: Boolean(selectedQuickBookAssistant),
         }),
       });
       if (!response.ok) {
@@ -5217,6 +5358,9 @@ export default function PhotographerPage() {
       const saved = await response.json() as TaskFromAPI;
       setTasks((prev) => sortTasksByStatus(prev.map((task) => task.id === tempId ? apiTaskToDisplay(saved) : task)));
       setTaskListRaw((prev) => [...prev.filter((task) => task.id !== saved.id), saved]);
+      setSpecifiedQuickBookAssistantId(null);
+      setQuickBookAssistantPickerOpen(false);
+      setMobileQuickBookAssistantPickerOpen(false);
       if (isPhotographerLimitQueuedTask(saved)) {
         showTaskCreateError(photographerLimitQueuePrompt(photographerMaxActiveTasks), true);
       }
@@ -5226,7 +5370,7 @@ export default function PhotographerPage() {
       showTaskCreateError("任务创建失败，请检查网络后重试");
       console.error("Failed to create mobile task", error);
     }
-  }, [activeBuilding, activeBuildingId, photographerMaxActiveTasks, profile, profileCurrentWorkbenchRoom, refreshAssistants, showTaskCreateError]);
+  }, [activeBuilding, activeBuildingId, photographerMaxActiveTasks, profile, profileCurrentWorkbenchRoom, refreshAssistants, selectedQuickBookAssistant, selectedQuickBookAssistantCanSubmit, showTaskCreateError]);
 
   const mobileTaskStatusForProfile = useCallback((task: TaskFromAPI) => (
     taskStatusForProfile(task, isAssistantProfile ? profile?.id : undefined) ?? task.status
@@ -5269,6 +5413,11 @@ export default function PhotographerPage() {
     const display = apiTaskToDisplay(task, isAssistantProfile ? profile?.id : undefined);
     return taskListActualLine(display, task, now.getTime(), true, isAssistantProfile ? profile?.id : undefined);
   }, [isAssistantProfile, now, profile?.id]);
+
+  const canCancelRawTask = useCallback((task: TaskFromAPI | null | undefined) => {
+    if (task == null || task.status !== "waiting" || task.parentTaskId != null) return false;
+    return !taskListRaw.some((item) => item.parentTaskId === task.id && item.status !== "completed");
+  }, [taskListRaw]);
 
   const mobileIcon = useCallback((name: MobileWorkbenchTab | "admin" | "logout" | "stats" | "identity") => {
     const common = "h-5 w-5";
@@ -5317,6 +5466,8 @@ export default function PhotographerPage() {
     const meta = mobileTaskStatusMeta(task);
     const status = mobileTaskStatusForProfile(task);
     const timeLine = mobileTaskTimeLine(task);
+    const specifiedTask = Boolean(task.isSpecified);
+    const specifiedName = task.specifiedAssistant?.name ?? (task.isSpecified ? task.assistant?.name ?? null : null);
     const primaryAction = options?.primaryAction ?? null;
     const actionLabel =
       primaryAction === "complete"
@@ -5341,6 +5492,14 @@ export default function PhotographerPage() {
               <h3 className="truncate text-[18px] font-extrabold leading-tight text-[--text-primary]">
                 {formatRoomOrVenue(task.roomNumber)} {task.category?.name ?? "任务"}
               </h3>
+              {specifiedTask && (
+                <span
+                  className="shrink-0 rounded-md bg-orange-500/10 px-1.5 py-0.5 text-[9px] font-extrabold text-orange-500"
+                  title={specifiedName ? `指定 ${specifiedName}` : "指定助理"}
+                >
+                  指定
+                </span>
+              )}
             </div>
             <p className="mt-1 truncate text-[12px] font-semibold text-[--text-secondary]">{mobileTaskSubtitle(task)}</p>
           </div>
@@ -5473,11 +5632,11 @@ export default function PhotographerPage() {
       if (currentRawTask) {
         const status = mobileTaskStatusForProfile(currentRawTask);
         const primaryAction = status === "executing" ? "complete" : status === "waiting" ? "start" : null;
-        return renderMobileTaskCard(currentRawTask, { primaryAction });
+        return renderMobileTaskCard(currentRawTask, { primaryAction, showCancel: canCancelRawTask(currentRawTask) });
       }
 
       if (pausedRawTask) {
-        return renderMobileTaskCard(pausedRawTask, { primaryAction: "resume" });
+        return renderMobileTaskCard(pausedRawTask, { primaryAction: "resume", showCancel: canCancelRawTask(pausedRawTask) });
       }
 
       return null;
@@ -5493,8 +5652,94 @@ export default function PhotographerPage() {
                 <h2 className="text-[17px] font-extrabold text-[--text-primary]">快捷发单</h2>
                 <p className="mt-1 text-[12px] font-semibold text-[--text-muted]">{workbenchLocationText}</p>
               </div>
-              <span className="rounded-full bg-orange-500/10 px-2.5 py-1 text-[11px] font-extrabold text-orange-500">P档</span>
+              <button
+                type="button"
+                onClick={() => setMobileQuickBookAssistantPickerOpen((open) => !open)}
+                className={`flex min-h-[34px] max-w-[132px] items-center gap-1.5 rounded-full border px-2.5 text-[11px] font-extrabold ${
+                  selectedQuickBookAssistant
+                    ? selectedQuickBookAssistantCanSubmit
+                      ? "border-orange-300/70 bg-orange-500/12 text-orange-600"
+                      : "border-gray-300/70 bg-gray-400/12 text-gray-500"
+                    : resolvedTheme === "dark"
+                      ? "border-white/[0.12] bg-white/[0.07] text-orange-200"
+                      : "border-white/70 bg-white/60 text-orange-600"
+                }`}
+              >
+                {selectedQuickBookAssistant ? (
+                  <>
+                    <span className="flex h-5 w-5 shrink-0 items-center justify-center overflow-hidden rounded-full bg-orange-100 text-[9px] text-orange-600">
+                      {selectedQuickBookAssistant.avatar ? (
+                        <img src={selectedQuickBookAssistant.avatar} alt={selectedQuickBookAssistant.name} className="h-full w-full object-cover" />
+                      ) : selectedQuickBookAssistant.name.slice(0, 1)}
+                    </span>
+                    <span className="min-w-0 truncate">{selectedQuickBookAssistant.name}</span>
+                  </>
+                ) : (
+                  <span>指定助理</span>
+                )}
+              </button>
             </div>
+            {selectedQuickBookAssistant && (
+              <div className={`mb-2 flex items-center justify-between rounded-2xl border px-3 py-2 ${
+                selectedQuickBookAssistantCanSubmit
+                  ? resolvedTheme === "dark" ? "border-orange-300/20 bg-orange-400/10" : "border-orange-200/70 bg-orange-50/80"
+                  : resolvedTheme === "dark" ? "border-white/[0.10] bg-white/[0.06]" : "border-gray-200/80 bg-gray-50/80"
+              }`}>
+                <span className={`min-w-0 truncate text-[12px] font-extrabold ${selectedQuickBookAssistantCanSubmit ? "text-orange-500" : "text-gray-500"}`}>
+                  本次指定：{selectedQuickBookAssistant.name}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setSpecifiedQuickBookAssistantId(null)}
+                  className="ml-2 shrink-0 rounded-full px-2 py-1 text-[11px] font-extrabold text-[--text-muted]"
+                >
+                  清除
+                </button>
+              </div>
+            )}
+            {mobileQuickBookAssistantPickerOpen && (
+              <div className={`mb-3 rounded-[20px] border p-2 ${mobileSoftPanel}`}>
+                {quickBookOnlineAssistants.length === 0 ? (
+                  <p className="rounded-2xl bg-white/32 px-3 py-4 text-center text-[12px] font-semibold text-[--text-muted]">当前区域暂无在线助理</p>
+                ) : (
+                  <div className="grid grid-cols-1 gap-1.5">
+                    {quickBookOnlineAssistants.map((assistant) => {
+                      const selectable = canSpecifyQuickBookAssistant(assistant);
+                      const selected = specifiedQuickBookAssistantId === assistant.id;
+                      return (
+                        <button
+                          type="button"
+                          key={`mobile-quick-assistant-${assistant.id}`}
+                          disabled={!selectable}
+                          onClick={() => {
+                            setSpecifiedQuickBookAssistantId(assistant.id);
+                            setMobileQuickBookAssistantPickerOpen(false);
+                          }}
+                          className={`flex min-h-[44px] items-center gap-2 rounded-2xl px-3 text-left ${
+                            selected
+                              ? "bg-orange-500 text-white"
+                              : selectable
+                                ? resolvedTheme === "dark" ? "bg-white/[0.07] text-slate-100" : "bg-white/58 text-slate-700"
+                                : resolvedTheme === "dark" ? "bg-white/[0.035] text-slate-500" : "bg-slate-100/70 text-slate-400"
+                          } disabled:opacity-70`}
+                        >
+                          <span className="relative flex h-8 w-8 shrink-0 items-center justify-center overflow-visible">
+                            <span className="flex h-8 w-8 items-center justify-center overflow-hidden rounded-full bg-slate-200 text-[12px] font-extrabold text-white">
+                              {assistant.avatar ? <img src={assistant.avatar} alt={assistant.name} className="h-full w-full object-cover" /> : assistant.name.slice(0, 1)}
+                            </span>
+                            <span className="absolute -bottom-0.5 -right-0.5 z-10 h-3 w-3 rounded-full ring-2 ring-white" style={{ backgroundColor: assistantDockDotColor(assistant) }} />
+                          </span>
+                          <span className="min-w-0 flex-1">
+                            <span className="block truncate text-[13px] font-extrabold">{assistant.name}</span>
+                            <span className={`block text-[10px] font-bold ${selected ? "text-white/75" : "text-[--text-muted]"}`}>{quickBookAssistantStatusText(assistant)}</span>
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
             <div className="grid grid-cols-2 gap-2">
               {categories.map((cat) => (
                 <button
@@ -5535,7 +5780,7 @@ export default function PhotographerPage() {
             <div className="space-y-2">
               {taskListRaw.filter((task) => task.status !== "completed").slice(0, 4).map((task) => renderMobileTaskCard(task, {
                 compact: true,
-                showCancel: task.status === "waiting" || isPhotographerLimitQueuedTask(task),
+                showCancel: canCancelRawTask(task) || isPhotographerLimitQueuedTask(task),
               }))}
               {taskListRaw.filter((task) => task.status !== "completed").length === 0 && (
                 <p className="rounded-2xl bg-white/42 px-4 py-6 text-center text-[12px] font-semibold text-[--text-muted]">暂无进行中的发布任务</p>
@@ -5577,6 +5822,7 @@ export default function PhotographerPage() {
     areaRealtimeStats.executing,
     areaRealtimeStats.overtime,
     assistantPresence,
+    canCancelRawTask,
     categories,
     createMobileTask,
     eatingElapsedSeconds,
@@ -5588,6 +5834,7 @@ export default function PhotographerPage() {
     mobileGlassPanel,
     mobileIcon,
     mobileQuickBookCategory,
+    mobileQuickBookAssistantPickerOpen,
     mobileSoftPanel,
     mobileTaskStatusForProfile,
     pausedRawTask,
@@ -5596,6 +5843,10 @@ export default function PhotographerPage() {
     reassignmentNoticeSavingId,
     renderMobileTaskCard,
     resolvedTheme,
+    quickBookOnlineAssistants,
+    selectedQuickBookAssistant,
+    selectedQuickBookAssistantCanSubmit,
+    specifiedQuickBookAssistantId,
     currentRawTask,
     taskListRaw,
     tasks,
@@ -5761,7 +6012,7 @@ export default function PhotographerPage() {
           {taskListRaw.slice(0, 8).map((task) => renderMobileTaskCard(task, {
             compact: true,
             primaryAction: isAssistantProfile && mobileTaskStatusForProfile(task) === "waiting" ? "start" : null,
-            showCancel: !isAssistantProfile && (task.status === "waiting" || isPhotographerLimitQueuedTask(task)),
+            showCancel: canCancelRawTask(task) || isPhotographerLimitQueuedTask(task),
           }))}
           {taskListRaw.length === 0 && (
             <p className="rounded-2xl bg-white/42 px-4 py-8 text-center text-[12px] font-semibold text-[--text-muted]">暂无任务</p>
@@ -5804,7 +6055,7 @@ export default function PhotographerPage() {
         </div>
       </div>
     </div>
-  ), [isAssistantProfile, loginRole, mobileGlassPanel, mobileIcon, mobileTaskStatusForProfile, renderMobileTaskCard, taskListRaw]);
+  ), [canCancelRawTask, isAssistantProfile, loginRole, mobileGlassPanel, mobileIcon, mobileTaskStatusForProfile, renderMobileTaskCard, taskListRaw]);
 
   const renderMobileWorkbench = () => {
     const mobileNavItems: { key: MobileWorkbenchTab; label: string }[] = [
@@ -6048,27 +6299,39 @@ export default function PhotographerPage() {
                 maskImage: "linear-gradient(to bottom, black, rgba(0,0,0,0.82) 72%, transparent 100%)",
               }}
             />
-            <div
-              className={`group/map-building pointer-events-auto absolute left-6 top-5 z-30 inline-flex items-center gap-2.5 rounded-full px-3.5 py-2 text-[12px] font-bold ${
-              resolvedTheme === "dark"
-                ? "bg-slate-900/58 text-slate-100 shadow-[inset_0_1px_0_rgba(255,255,255,0.10)]"
-                : "bg-white/58 text-slate-700 shadow-[inset_0_1px_0_rgba(255,255,255,0.75)]"
-            } backdrop-blur-2xl`}
+	            <div
+		              className={`group/map-building pointer-events-auto absolute left-6 top-5 z-30 inline-flex w-[112px] items-center gap-2 rounded-full border px-3.5 py-2 text-[12px] font-bold ${
+	              resolvedTheme === "dark"
+	                ? "border-white/[0.16] bg-slate-900/58 text-slate-100 shadow-black/25 shadow-sm"
+	                : "border-white/70 bg-white/92 text-slate-700 shadow-slate-300/40 shadow-sm"
+	            } backdrop-blur-2xl`}
               onMouseEnter={mapBuildingOptions.length > 0 ? openMapBuildingMenu : undefined}
               onMouseLeave={mapBuildingOptions.length > 0 ? closeMapBuildingMenuSoon : undefined}
               onMouseDown={(e) => e.stopPropagation()}
-            >
-              <span className="h-2.5 w-2.5 rounded-full bg-blue-400 shadow-[0_0_0_5px_rgba(96,165,250,0.14)]" />
-              区域平面图
-              <span className="text-[--text-muted]">{activeBuilding?.name ?? "加载中"}</span>
-              {mapBuildingOptions.length > 0 && (
-                <svg className={`ml-0.5 text-[--text-muted] transition-transform duration-200 ${showMapBuildingMenu ? "rotate-180" : ""}`} width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                  <path d="m6 9 6 6 6-6" />
-                </svg>
-              )}
+	            >
+	              <span className="h-2.5 w-2.5 rounded-full bg-blue-400 shadow-[0_0_0_5px_rgba(96,165,250,0.14)]" />
+	              <span className="min-w-0 truncate">{activeBuilding?.name ?? "加载中"}</span>
+	              {mapBuildingOptions.length > 0 && (
+	                <span className="ml-0.5 flex h-4 w-4 shrink-0 items-center justify-center text-[--text-muted]">
+	                  <svg
+	                    viewBox="0 0 16 16"
+	                    aria-hidden="true"
+	                    className={`h-3.5 w-3.5 transition-transform duration-200 ${showMapBuildingMenu ? "rotate-180" : "rotate-0"}`}
+	                  >
+	                    <path
+	                      d="M4 6.25L8 10.25L12 6.25"
+	                      fill="none"
+	                      stroke="currentColor"
+	                      strokeWidth="1.8"
+	                      strokeLinecap="round"
+	                      strokeLinejoin="round"
+	                    />
+	                  </svg>
+	                </span>
+	              )}
               {mapBuildingOptions.length > 0 && (
                 <div
-                  className={`absolute left-0 top-full z-50 min-w-full pt-3 transition-all duration-200 ${
+		                  className={`absolute left-0 top-full z-50 w-full pt-1.5 transition-all duration-200 ${
                     showMapBuildingMenu
                       ? "pointer-events-auto translate-y-0 opacity-100"
                       : "pointer-events-none translate-y-[-6px] opacity-0"
@@ -6077,11 +6340,7 @@ export default function PhotographerPage() {
                   onMouseLeave={closeMapBuildingMenuSoon}
                   onMouseDown={(e) => e.stopPropagation()}
                 >
-                  <div className={`rounded-2xl border px-1.5 py-1.5 shadow-xl backdrop-blur-2xl ${
-                    resolvedTheme === "dark"
-                      ? "border-white/[0.10] bg-slate-950/82 shadow-black/40"
-                      : "border-white/75 bg-white/88 shadow-slate-900/10"
-                  }`}>
+			                  <div className={`rounded-2xl border px-1.5 py-1.5 shadow-xl backdrop-blur-2xl ${workbenchSoftFloatingSurfaceCls}`}>
                     <div className="flex flex-col gap-1">
                       {mapBuildingOptions.map((b) => (
                         <button
@@ -6093,11 +6352,7 @@ export default function PhotographerPage() {
                             setActiveBuildingId(b.id);
                             setShowMapBuildingMenu(false);
                           }}
-                          className={`flex w-full items-center justify-between gap-5 whitespace-nowrap rounded-xl px-3 py-2 text-left text-[12px] font-extrabold transition-colors ${
-                            resolvedTheme === "dark"
-                              ? "text-slate-300 hover:bg-white/[0.08] hover:text-white"
-                              : "text-slate-600 hover:bg-slate-100/80 hover:text-slate-950"
-                          }`}
+		                          className={`flex w-full items-center justify-between gap-1 whitespace-nowrap rounded-xl px-2 py-2 text-left text-[12px] font-extrabold transition-colors ${workbenchFloatingItemCls}`}
                         >
                           {b.name}
                         </button>
@@ -6120,6 +6375,8 @@ export default function PhotographerPage() {
                   <button
                     type="button"
                     aria-expanded={ironingQueueMode === "fixed" ? ironingQueueFixedOpen : ironingQueueHoverOpen}
+                    onMouseEnter={openIroningQueueHover}
+                    onFocus={openIroningQueueHover}
                     onClick={(e) => {
                       e.stopPropagation();
                       if (ironingQueueHoverCloseTimer.current) clearTimeout(ironingQueueHoverCloseTimer.current);
@@ -6132,14 +6389,20 @@ export default function PhotographerPage() {
                       setIroningQueueFixedOpen(true);
                       setIroningQueueHoverOpen(false);
                     }}
-                    className={`flex h-9 items-center justify-end gap-1.5 rounded-full px-3.5 py-2 text-left text-[--text-primary] backdrop-blur-2xl transition-all duration-200 ${
-                      resolvedTheme === "dark"
-                        ? "bg-slate-900/58 shadow-[inset_0_1px_0_rgba(255,255,255,0.10)]"
-                        : "bg-white/58 shadow-[inset_0_1px_0_rgba(255,255,255,0.75)]"
-                    }`}
+	                    className={`flex h-9 items-center justify-end gap-1.5 rounded-full border px-3.5 py-2 text-left text-[--text-primary] backdrop-blur-2xl transition-all duration-200 ${
+	                      resolvedTheme === "dark"
+	                        ? "border-white/[0.16] bg-slate-900/58 shadow-black/25 shadow-sm"
+	                        : "border-white/70 bg-white/92 shadow-slate-300/40 shadow-sm"
+	                    }`}
                   >
-                    <span className="ml-0.5 flex h-4 w-4 shrink-0 items-center justify-center text-[--text-muted]">
-                      <svg viewBox="0 0 16 16" aria-hidden="true" className="h-3.5 w-3.5">
+	                    <span className="ml-0.5 flex h-4 w-4 shrink-0 items-center justify-center text-[--text-muted]">
+	                      <svg
+	                        viewBox="0 0 16 16"
+	                        aria-hidden="true"
+	                        className={`h-3.5 w-3.5 transition-transform duration-200 ${
+	                          (ironingQueueMode === "fixed" ? ironingQueueFixedOpen : ironingQueueHoverOpen) ? "rotate-180" : "rotate-0"
+	                        }`}
+	                      >
                         <path
                           d="M4 6.25L8 10.25L12 6.25"
                           fill="none"
@@ -6152,8 +6415,6 @@ export default function PhotographerPage() {
                     </span>
             <span
               className="whitespace-nowrap text-[12px] font-black leading-none drop-shadow-sm"
-              onMouseEnter={openIroningQueueHover}
-              onMouseLeave={resetIroningQueueAutoAfterLabelLeave}
             >
               <span>熨烫机状态 - </span>
               <span className={
@@ -6696,11 +6957,11 @@ export default function PhotographerPage() {
             {activeBuilding ? `${activeBuilding.name} - 暂无平面图` : "加载中..."}
           </div>
         )}
-            <div className={`map-status-legend readable-glass-label absolute bottom-4 right-6 z-20 flex items-center gap-4 rounded-full px-4 py-2.5 text-[11px] font-extrabold max-[1740px]:hidden ${
-              resolvedTheme === "dark"
-                ? "bg-slate-900/58 text-slate-200 ring-1 ring-white/[0.08]"
-                : "bg-white/48 text-slate-600 ring-1 ring-white/70"
-            } backdrop-blur-2xl`}>
+            <div className={`map-status-legend absolute bottom-4 right-6 z-20 flex items-center gap-4 rounded-full border px-4 py-2.5 text-[11px] font-extrabold shadow-lg backdrop-blur-2xl max-[1740px]:hidden ${
+	              resolvedTheme === "dark"
+	                ? "border-white/[0.16] bg-slate-900/58 text-slate-100 shadow-black/25"
+	                : "border-white/70 bg-white/78 text-slate-600 shadow-slate-300/30"
+	            }`}>
               {[
                 { label: "空闲中", color: DOCK_DOT.idle },
                 { label: "待就位", color: DOCK_DOT.assigned },
@@ -6810,10 +7071,14 @@ export default function PhotographerPage() {
                             className="area-public-queue-card-wrap overflow-visible px-3"
                           >
                           <div
-                            className={`area-public-queue-card flex origin-right gap-2 rounded-xl border py-3 pl-3 pr-4 shadow-sm transition-all duration-200 hover:translate-x-0.5 hover:scale-[1.012] hover:bg-white/75 hover:shadow-md ${
-                              isOwnPhotographerQueueTask
-                                ? "public-queue-own-task border-transparent bg-white/55 shadow-amber-100/60"
-                                : "border-white/60 bg-white/55"
+                            className={`area-public-queue-card flex origin-right gap-2 rounded-xl border py-3 pl-3 pr-4 shadow-sm transition-all duration-200 hover:translate-x-0.5 hover:scale-[1.012] hover:shadow-md ${
+                              resolvedTheme === "dark"
+                                ? isOwnPhotographerQueueTask
+                                  ? "public-queue-own-task border-amber-200/18 bg-amber-200/[0.08] shadow-black/10 hover:bg-amber-200/[0.12]"
+                                  : "border-white/[0.22] bg-white/[0.12] hover:bg-white/[0.17]"
+                                : isOwnPhotographerQueueTask
+                                  ? "public-queue-own-task border-transparent bg-white/55 shadow-amber-100/60 hover:bg-white/75"
+                                  : "border-white/60 bg-white/55 hover:bg-white/75"
                             }${publicQueueAnimatingTaskId === queueTask.id ? " public-queue-promote-inserting" : ""}`}
                           >
                             <span className={`mt-0.5 flex shrink-0 items-center justify-center text-[10px] font-extrabold shadow-sm ${publicQueueRankShapeCls(index, queueTask.priority)}`}>
@@ -7880,7 +8145,7 @@ export default function PhotographerPage() {
         {/* 左侧三面板 */}
         <div className="absolute top-3 left-3 bottom-3 z-20 hidden w-[330px] flex-col gap-2 lg:flex">
           {/* 面板1：摄影师信息 + 位置 + 天气 + 时间 */}
-          <div className={`relative z-[80] overflow-visible rounded-2xl px-4 py-3.5 ${glass}`}>
+          <div className={`left-workbench-panel ${resolvedTheme === "dark" ? "left-workbench-panel-dark" : ""} relative z-[80] overflow-visible rounded-2xl px-4 py-3.5 ${glass}`}>
             <div className="relative mb-1" style={{ zIndex: 240 }}>
               <div
                 className="absolute left-0 top-1/2 -translate-y-1/2 w-[95px] h-[95px] overflow-visible"
@@ -8038,7 +8303,7 @@ export default function PhotographerPage() {
                     </button>
                     {showVenueMenu && assistantBuildingOptions.length > 0 && (
                       <div
-                        className="location-menu-drop absolute left-[18px] top-full z-[200] mt-1 w-fit rounded-xl border border-white/60 bg-white/75 px-1.5 py-1.5 shadow-lg backdrop-blur-xl"
+		                        className={`location-menu-drop absolute left-[18px] top-full z-[200] mt-1 w-fit rounded-xl border px-1.5 py-1.5 shadow-lg backdrop-blur-xl ${workbenchLocationMenuSurfaceCls}`}
                         onMouseEnter={cancelLocationMenuClose}
                         onMouseLeave={closeLocationMenuSoon}
                       >
@@ -8047,7 +8312,7 @@ export default function PhotographerPage() {
                             <button
                               key={bld.id}
                               onClick={() => switchAssistantBuilding(bld.id)}
-                              className="w-auto whitespace-nowrap bg-transparent py-1 pr-2 text-left text-[13px] font-semibold leading-tight text-gray-900 shadow-none transition-all duration-150 hover:translate-x-1 hover:text-orange-600 active:scale-95"
+		                              className={`w-auto whitespace-nowrap rounded-lg bg-transparent px-2 py-1 text-left text-[13px] font-semibold leading-tight shadow-none transition-all duration-150 hover:translate-x-1 active:scale-95 ${workbenchLocationMenuItemCls}`}
                             >
                               {bld.name}
                             </button>
@@ -8079,13 +8344,13 @@ export default function PhotographerPage() {
                       </button>
                       {locationMenu === "building" && (
                         <div
-                          className="location-menu-drop absolute left-[18px] top-full z-[200] mt-1 w-fit rounded-xl border border-white/60 bg-white/75 px-1 py-1 shadow-lg backdrop-blur-xl"
+		                          className={`location-menu-drop absolute left-[18px] top-full z-[200] mt-1 w-fit rounded-xl border px-1 py-1 shadow-lg backdrop-blur-xl ${workbenchLocationMenuSurfaceCls}`}
                           onMouseEnter={cancelLocationMenuClose}
                           onMouseLeave={closeLocationMenuSoon}
                         >
                           <div className="flex flex-col items-start gap-1">
                             {photographerBuildingOptions.length === 0 ? (
-                              <span className="whitespace-nowrap pr-1.5 py-1 text-left text-[13px] font-semibold leading-tight text-gray-400">
+	                              <span className="whitespace-nowrap px-2 py-1 text-left text-[13px] font-semibold leading-tight text-[--text-muted]">
                                 暂无其它楼座
                               </span>
                             ) : (
@@ -8093,7 +8358,7 @@ export default function PhotographerPage() {
                                 <button
                                   key={bld.id}
                                   onClick={() => switchPhotographerBuilding(bld.id)}
-                                  className="w-auto whitespace-nowrap bg-transparent py-1 pr-1.5 text-left text-[13px] font-semibold leading-tight text-gray-900 shadow-none transition-all duration-150 hover:translate-x-1 hover:text-orange-600 active:scale-95"
+		                                  className={`w-auto whitespace-nowrap rounded-lg bg-transparent px-2 py-1 text-left text-[13px] font-semibold leading-tight shadow-none transition-all duration-150 hover:translate-x-1 active:scale-95 ${workbenchLocationMenuItemCls}`}
                                 >
                                   {bld.name}
                                 </button>
@@ -8142,8 +8407,8 @@ export default function PhotographerPage() {
                       onMouseEnter={cancelLocationMenuClose}
                       onMouseLeave={closeLocationMenuSoon}
                     />
-                    <div
-                      className="absolute flex w-max flex-col items-stretch gap-1"
+	                    <div
+		                      className={`absolute flex w-max flex-col items-stretch gap-1 rounded-2xl border px-1.5 py-1.5 shadow-xl backdrop-blur-2xl ${workbenchLocationMenuSurfaceCls}`}
                       style={{
                         left: "calc(100% + 24px)",
                         top: "50%",
@@ -8155,11 +8420,13 @@ export default function PhotographerPage() {
                       onMouseEnter={cancelLocationMenuClose}
                       onMouseLeave={closeLocationMenuSoon}
                     >
-                      <span className="w-full text-left text-[11px] text-gray-500 font-bold whitespace-nowrap">切换场地</span>
-                      {isEmpty ? (
-                        <span className="w-full px-2.5 py-1 rounded-md bg-gray-100 text-gray-400 shadow whitespace-nowrap text-left text-[10px] font-bold">
-                          暂无公共区域
-                        </span>
+	                      <span className="w-full whitespace-nowrap px-2.5 text-left text-[11px] font-bold text-[--text-muted]">切换场地</span>
+	                      {isEmpty ? (
+	                        <span className={`w-full whitespace-nowrap rounded-md px-2.5 py-1 text-left text-[10px] font-bold shadow ${
+	                          resolvedTheme === "dark" ? "bg-white/[0.08] text-slate-400" : "bg-gray-100 text-gray-400"
+	                        }`}>
+	                          暂无公共区域
+	                        </span>
                       ) : (
                         photographerVenueOptions.map((venue) => {
                           const isWhiteBg = venue.isOriginal || venue.type === "无影棚" || (!venue.type && (venue.name.includes("无影") || venue.name.includes("白棚")));
@@ -8167,11 +8434,15 @@ export default function PhotographerPage() {
                             <button
                               key={venue.value}
                               onClick={() => switchVenue(venue.value)}
-                              className={`w-full px-2.5 py-1 rounded-md active:scale-95 transition-all duration-150 flex items-center justify-start text-left shadow whitespace-nowrap text-[10px] font-bold hover:translate-x-1 hover:scale-[1.02] hover:shadow-md ${
-                                isWhiteBg
-                                  ? "bg-white text-blue-500 border border-blue-400 hover:bg-blue-50"
-                                  : "bg-blue-500 text-white hover:brightness-110"
-                              }`}
+	                              className={`w-full px-2.5 py-1 rounded-md active:scale-95 transition-all duration-150 flex items-center justify-start text-left shadow whitespace-nowrap text-[10px] font-bold hover:translate-x-1 hover:scale-[1.02] hover:shadow-md ${
+	                                isWhiteBg
+	                                  ? resolvedTheme === "dark"
+	                                    ? "border border-blue-300/35 bg-white/[0.09] text-blue-200 hover:bg-blue-300/[0.16]"
+	                                    : "bg-white text-blue-500 border border-blue-400 hover:bg-blue-50"
+	                                  : resolvedTheme === "dark"
+	                                    ? "bg-blue-400/24 text-blue-100 hover:bg-blue-400/32"
+	                                    : "bg-blue-500 text-white hover:brightness-110"
+	                              }`}
                             >
                               {venue.name}
                             </button>
@@ -8196,7 +8467,7 @@ export default function PhotographerPage() {
 
           {/* 面板2：快捷预约（摄影师） / 当前任务状态（助理） */}
           {isAssistantRole(profile?.role) ? (
-            <div className={`rounded-2xl px-4 py-3 flex-1 min-h-0 flex flex-col ${glass}`}>
+            <div className={`left-workbench-panel ${resolvedTheme === "dark" ? "left-workbench-panel-dark" : ""} rounded-2xl px-4 py-3 flex-1 min-h-0 flex flex-col ${glass}`}>
 	              <h3 className="text-[12px] font-bold text-[--text-primary] tracking-wide mb-1.5">当前任务状态</h3>
 	              <div className="flex-1 min-h-0 flex flex-col items-stretch justify-start gap-2 w-full pt-0.5">
 	                {(() => {
@@ -8240,7 +8511,7 @@ export default function PhotographerPage() {
 	                  if (!currentRawTask && !pausedRawTask) {
 	                    if (assistantPresence === "on_break") {
 	                      return (
-	                        <div className="w-full flex-1 rounded-xl bg-gray-400/15 flex flex-col items-center justify-center gap-3">
+	                        <div className={`left-status-card ${resolvedTheme === "dark" ? "left-status-card-dark" : ""} w-full flex-1 rounded-xl bg-gray-400/15 flex flex-col items-center justify-center gap-3`}>
                           <div className="w-16 h-16 rounded-full bg-gray-400/15 flex items-center justify-center">
                             <div className="w-8 h-8 rounded-full bg-gray-400" />
                           </div>
@@ -8250,7 +8521,7 @@ export default function PhotographerPage() {
                       );
                     }
                     return (
-                      <div className="w-full flex-1 rounded-xl bg-green-400/20 flex flex-col items-center justify-center gap-3">
+                      <div className={`left-status-card left-status-card-idle ${resolvedTheme === "dark" ? "left-status-card-dark left-status-card-idle-dark" : ""} w-full flex-1 rounded-xl bg-green-400/20 flex flex-col items-center justify-center gap-3`}>
                         <div className="w-16 h-16 rounded-full bg-green-500/20 flex items-center justify-center">
                           <div className="w-8 h-8 rounded-full bg-green-500" />
                         </div>
@@ -8402,42 +8673,63 @@ export default function PhotographerPage() {
                   };
 
                   // 渲染待就位任务区块（只显示信息，无按钮）
-                  const renderPendingBlock = (task: TaskFromAPI, flex: number) => (
-                    <div key={task.id} className="w-full min-h-0 rounded-xl bg-blue-400/10 flex flex-col items-center justify-center gap-1.5 pt-1.5 pb-1" style={flexStyle(flex)}>
-                      <div className="w-8 max-w-full min-w-0 min-h-0 shrink-[2] max-h-[min(2rem,26%)] h-[min(2rem,26%)] rounded-full bg-blue-500/20 flex items-center justify-center overflow-hidden">
-                        <div className="min-w-0 min-h-0 w-[42%] h-[42%] max-w-[min(72%,1.1rem)] max-h-[min(72%,1.1rem)] rounded-full bg-blue-400" />
-                      </div>
-                      <span className="text-[13px] font-extrabold text-blue-600">待就位</span>
-                      {lineRoomPhotoCategory(task, "text-blue-600/80")}
-                      <p className="text-[10px] text-blue-600/70 text-center px-2">
-                        {taskCategoryDurationCaption(task.category, task.priority)}
-                      </p>
-                    </div>
-                  );
+	                  const renderPendingBlock = (task: TaskFromAPI, flex: number) => (
+	                    <div key={task.id} className={`w-full min-h-0 rounded-xl flex flex-col items-center justify-center gap-1.5 pt-1.5 pb-1 ${resolvedTheme === "dark" ? "bg-blue-500/18" : "bg-blue-400/10"}`} style={flexStyle(flex)}>
+	                      <div className={`w-8 max-w-full min-w-0 min-h-0 shrink-[2] max-h-[min(2rem,26%)] h-[min(2rem,26%)] rounded-full flex items-center justify-center overflow-hidden ${resolvedTheme === "dark" ? "bg-blue-300/20" : "bg-blue-500/20"}`}>
+	                        <div className="min-w-0 min-h-0 w-[42%] h-[42%] max-w-[min(72%,1.1rem)] max-h-[min(72%,1.1rem)] rounded-full bg-blue-400" />
+	                      </div>
+	                      <span className={`text-[13px] font-extrabold ${resolvedTheme === "dark" ? "text-blue-100" : "text-blue-600"}`}>待就位</span>
+	                      {lineRoomPhotoCategory(task, resolvedTheme === "dark" ? "text-blue-100/85" : "text-blue-600/80")}
+	                      <p className={`text-[10px] text-center px-2 ${resolvedTheme === "dark" ? "text-blue-100/75" : "text-blue-600/70"}`}>
+	                        {taskCategoryDurationCaption(task.category, task.priority)}
+	                      </p>
+	                    </div>
+	                  );
 
                   const startActionLabel = (task: TaskFromAPI) =>
                     isIroningTask(task) && task.ironingStage === "notified"
                       ? "开始熨烫"
                       : "开始任务";
 
-                  const waitingActionTone = (task: TaskFromAPI) =>
-                    isIroningTask(task) && task.ironingStage === "notified"
-                      ? {
-                        card: "border-lime-200/70 bg-lime-400/18 hover:bg-lime-400/28",
-                        dotWrap: "bg-lime-500/18",
-                        dot: "bg-lime-500",
-                        title: "text-lime-700",
-                        meta: "text-lime-700/80",
-                        tag: "bg-lime-100/80 text-lime-700",
-                      }
-                      : {
-                        card: "border-blue-200/60 bg-blue-400/16 hover:bg-blue-400/26",
-                        dotWrap: "bg-blue-500/18",
-                        dot: "bg-blue-500",
-                        title: "text-blue-600",
-                        meta: "text-blue-600/80",
-                        tag: "bg-blue-100/70 text-blue-600",
-                      };
+	                  const waitingActionTone = (task: TaskFromAPI) => {
+	                    const dark = resolvedTheme === "dark";
+	                    if (isIroningTask(task) && task.ironingStage === "notified") {
+	                      return dark
+	                        ? {
+	                          card: "border-lime-300/25 bg-lime-400/18 hover:bg-lime-400/26",
+	                          dotWrap: "bg-lime-300/20",
+	                          dot: "bg-lime-400",
+	                          title: "text-lime-100",
+	                          meta: "text-lime-100/82",
+	                          tag: "bg-lime-300/20 text-lime-100 ring-1 ring-lime-200/20",
+	                        }
+	                        : {
+	                          card: "border-lime-200/70 bg-lime-400/18 hover:bg-lime-400/28",
+	                          dotWrap: "bg-lime-500/18",
+	                          dot: "bg-lime-500",
+	                          title: "text-lime-700",
+	                          meta: "text-lime-700/80",
+	                          tag: "bg-lime-100/80 text-lime-700",
+	                        };
+	                    }
+	                    return dark
+	                      ? {
+	                        card: "border-blue-300/25 bg-blue-500/20 hover:bg-blue-500/28",
+	                        dotWrap: "bg-blue-300/20",
+	                        dot: "bg-blue-400",
+	                        title: "text-blue-100",
+	                        meta: "text-blue-100/82",
+	                        tag: "bg-blue-300/20 text-blue-100 ring-1 ring-blue-200/20",
+	                      }
+	                      : {
+	                        card: "border-blue-200/60 bg-blue-400/16 hover:bg-blue-400/26",
+	                        dotWrap: "bg-blue-500/18",
+	                        dot: "bg-blue-500",
+	                        title: "text-blue-600",
+	                        meta: "text-blue-600/80",
+	                        tag: "bg-blue-100/70 text-blue-600",
+	                      };
+	                  };
 
                   const renderWaitingChoiceBlock = (task: TaskFromAPI) => {
                     const tone = waitingActionTone(task);
@@ -8501,6 +8793,13 @@ export default function PhotographerPage() {
                       <p className="text-[11px] text-emerald-700/70 text-center px-2">
                         当前无空余熨烫机，只能开始做其他任务
                       </p>
+                      <button
+                        type="button"
+                        onClick={() => void handleCancelTask(task.id)}
+                        className="mt-0.5 rounded-lg border border-red-200/80 bg-white/55 px-3 py-1 text-[11px] font-extrabold text-red-500 transition-colors hover:bg-red-50 active:scale-[0.98]"
+                      >
+                        取消任务
+                      </button>
                     </div>
                   );
 
@@ -8517,7 +8816,7 @@ export default function PhotographerPage() {
                           type="button"
                           key={task.id}
                           onClick={() => handleAssistantStatusChange("start", task)}
-                          className={`w-full min-h-0 rounded-xl flex flex-col items-center justify-center gap-1.5 pt-2 pb-1.5 cursor-pointer transition-colors active:scale-[0.98] ${readyIroning ? "bg-lime-400/20 hover:bg-lime-400/30" : "bg-blue-400/20 hover:bg-blue-400/30"}`}
+	                          className={`w-full min-h-0 rounded-xl border flex flex-col items-center justify-center gap-1.5 pt-2 pb-1.5 cursor-pointer transition-colors active:scale-[0.98] ${tone.card}`}
                           style={flexStyle(flex)}
                         >
                           <div className={`w-10 max-w-full min-w-0 min-h-0 shrink-[2] max-h-[min(2.5rem,28%)] h-[min(2.5rem,28%)] rounded-full ${tone.dotWrap} flex items-center justify-center overflow-hidden`}>
@@ -8725,8 +9024,111 @@ export default function PhotographerPage() {
               </div>
             </div>
           ) : (
-          <div className={`rounded-2xl px-4 py-3.5 flex-1 min-h-0 flex flex-col ${glass}`}>
-            <h3 className="text-[12px] font-bold text-[--text-primary] tracking-wide mb-2.5">快捷预约</h3>
+          <div className={`left-workbench-panel ${resolvedTheme === "dark" ? "left-workbench-panel-dark" : ""} relative overflow-visible rounded-2xl px-4 py-3.5 flex-1 min-h-0 flex flex-col ${glass}`}>
+            <div ref={quickBookAssistantPickerRef} className="relative z-[120] mb-2.5 flex items-center justify-between gap-2">
+              <h3 className="text-[12px] font-bold text-[--text-primary] tracking-wide">快捷预约</h3>
+              <button
+                type="button"
+                onClick={() => setQuickBookAssistantPickerOpen((open) => !open)}
+                className={`flex h-7 max-w-[138px] items-center gap-1.5 rounded-full border px-2.5 text-[10px] font-extrabold shadow-sm backdrop-blur-xl transition-all ${
+                  selectedQuickBookAssistant
+                    ? selectedQuickBookAssistantCanSubmit
+                      ? "border-orange-300/70 bg-orange-500/12 text-orange-600"
+                      : "border-gray-300/70 bg-gray-400/12 text-gray-500"
+                    : resolvedTheme === "dark"
+                      ? "border-white/[0.12] bg-white/[0.07] text-orange-200 hover:bg-white/[0.12]"
+                      : "border-white/70 bg-white/54 text-orange-600 hover:bg-white/78"
+                }`}
+                title={selectedQuickBookAssistant ? `本次指定：${selectedQuickBookAssistant.name}` : "为下一单指定助理"}
+              >
+                {selectedQuickBookAssistant ? (
+                  <>
+                    <span className="flex h-[18px] w-[18px] shrink-0 items-center justify-center overflow-hidden rounded-full bg-orange-100 text-[8px] font-extrabold text-orange-600">
+                      {selectedQuickBookAssistant.avatar ? (
+                        <img src={selectedQuickBookAssistant.avatar} alt={selectedQuickBookAssistant.name} className="h-full w-full object-cover" />
+                      ) : selectedQuickBookAssistant.name.slice(0, 1)}
+                    </span>
+                    <span className="min-w-0 truncate">{selectedQuickBookAssistant.name}</span>
+                    <span
+                      role="button"
+                      tabIndex={0}
+                      className="ml-0.5 shrink-0 rounded-full px-1 text-[11px] leading-none text-current opacity-70 hover:opacity-100"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setSpecifiedQuickBookAssistantId(null);
+                        setQuickBookAssistantPickerOpen(false);
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key !== "Enter" && e.key !== " ") return;
+                        e.preventDefault();
+                        e.stopPropagation();
+                        setSpecifiedQuickBookAssistantId(null);
+                        setQuickBookAssistantPickerOpen(false);
+                      }}
+                      aria-label="清除指定助理"
+                    >
+                      ×
+                    </span>
+                  </>
+                ) : (
+                  <>
+                    <span className="text-[13px] leading-none">+</span>
+                    <span>指定助理</span>
+                  </>
+                )}
+              </button>
+              {quickBookAssistantPickerOpen && (
+                <div className={`absolute right-[-124px] top-0 z-[220] w-[100px] rounded-2xl border p-1.5 shadow-2xl backdrop-blur-2xl ${
+                  resolvedTheme === "dark"
+                    ? "border-white/[0.16] bg-slate-900/58 shadow-black/25"
+                    : "border-white/70 bg-white/92 shadow-slate-300/40"
+                }`}>
+                  {quickBookOnlineAssistants.length === 0 ? (
+                    <div className={`rounded-xl px-2 py-4 text-center text-[11px] font-semibold ${resolvedTheme === "dark" ? "bg-white/[0.10] text-slate-200" : "bg-slate-100/70 text-slate-500"}`}>
+                      当前区域暂无在线助理
+                    </div>
+                  ) : (
+                    <div className="max-h-[286px] space-y-1 overflow-y-auto pr-0.5 task-scroll">
+                      {quickBookOnlineAssistants.map((assistant) => {
+                        const selectable = canSpecifyQuickBookAssistant(assistant);
+                        const selected = specifiedQuickBookAssistantId === assistant.id;
+                        return (
+                          <button
+                            type="button"
+                            key={`quick-assistant-${assistant.id}`}
+                            disabled={!selectable}
+                            onClick={() => {
+                              setSpecifiedQuickBookAssistantId(assistant.id);
+                              setQuickBookAssistantPickerOpen(false);
+                            }}
+                            className={`flex min-h-[44px] w-full items-center gap-1 rounded-xl px-1 py-1.5 text-left transition-colors ${
+                              selected
+                                ? "bg-orange-500 text-white"
+                                : selectable
+                                  ? resolvedTheme === "dark" ? "bg-white/[0.11] text-slate-50 hover:bg-white/[0.16]" : "bg-white/60 text-slate-700 hover:bg-orange-50"
+                                  : resolvedTheme === "dark" ? "bg-white/[0.075] text-slate-300" : "bg-slate-100/70 text-slate-400"
+                            } disabled:cursor-not-allowed`}
+                          >
+                            <span className="relative flex h-7 w-7 shrink-0 items-center justify-center overflow-visible">
+                              <span className="flex h-7 w-7 items-center justify-center overflow-hidden rounded-full bg-slate-200 text-[10px] font-extrabold text-white">
+                                {assistant.avatar ? <img src={assistant.avatar} alt={assistant.name} className="h-full w-full object-cover" /> : assistant.name.slice(0, 1)}
+                              </span>
+                              <span className="absolute -bottom-0.5 -right-0.5 z-10 h-2.5 w-2.5 rounded-full ring-2 ring-white" style={{ backgroundColor: assistantDockDotColor(assistant) }} />
+                            </span>
+                            <span className="min-w-0 flex-1">
+                              <span className="block truncate text-[10px] font-extrabold leading-tight">{assistant.name}</span>
+                              <span className={`block truncate text-[8px] font-bold leading-tight ${selected ? "text-white/78" : resolvedTheme === "dark" ? "text-slate-200/80" : "text-[--text-muted]"}`}>
+                                {quickBookAssistantStatusText(assistant)}
+                              </span>
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
             <div className="flex-1 min-h-0 flex flex-col gap-1.5 relative">
               {categories.map((cat) => {
                 const isHovered = hoveredCat === cat.name;
@@ -8791,7 +9193,7 @@ export default function PhotographerPage() {
           )}
 
           {/* 面板3：我的任务 */}
-          <div className={`relative rounded-2xl px-4 pb-3.5 pt-6 flex-1 min-h-0 flex flex-col overflow-visible ${glass}`}>
+          <div className={`left-workbench-panel ${resolvedTheme === "dark" ? "left-workbench-panel-dark" : ""} relative rounded-2xl px-4 pb-3.5 pt-6 flex-1 min-h-0 flex flex-col overflow-visible ${glass}`}>
             <div className="flex items-center justify-between mb-2.5">
               <h3 className="text-[12px] font-bold text-[--text-primary] tracking-wide">我的任务</h3>
               <button onClick={() => setShowStatsModal(true)} className="text-[10px] text-orange-500 font-semibold hover:text-orange-600 cursor-pointer">更多数据 →</button>
@@ -8868,13 +9270,18 @@ export default function PhotographerPage() {
                         queuedWaitingMinutes >= upgradeThresholdMin;
                       const isOwnPhotographerQueueTask = profile?.role === "photographer" && queueTask.photographerId === profile.id;
                       const queuePhotographerLabel = isOwnPhotographerQueueTask ? "我" : queueTask.photographer?.name ?? "摄影师";
+                      const queueSpecifiedName = queueTask.specifiedAssistant?.name ?? (queueTask.isSpecified ? queueTask.assistant?.name ?? null : null);
                       return (
 	                        <div
 	                          key={`public-${queueTask.id}`}
 	                          className={`flex gap-1.5 rounded-xl border px-1.5 py-2 shadow-sm transition-all duration-200 hover:translate-x-1 hover:scale-[1.02] hover:shadow-md ${
-                              isOwnPhotographerQueueTask
-                                ? "public-queue-own-task border-transparent bg-white/55 shadow-amber-100/60"
-                                : "border-white/60 bg-white/55"
+                              resolvedTheme === "dark"
+                                ? isOwnPhotographerQueueTask
+                                  ? "public-queue-own-task border-amber-200/18 bg-amber-200/[0.08] shadow-black/10 hover:bg-amber-200/[0.12]"
+                                  : "border-white/[0.22] bg-white/[0.12] hover:bg-white/[0.17]"
+                                : isOwnPhotographerQueueTask
+                                  ? "public-queue-own-task border-transparent bg-white/55 shadow-amber-100/60 hover:bg-white/75"
+                                  : "border-white/60 bg-white/55 hover:bg-white/75"
                             }${publicQueueAnimatingTaskId === queueTask.id ? " public-queue-promote-inserting" : ""}`}
 	                        >
                           <span className={`mt-0.5 flex shrink-0 items-center justify-center text-[10px] font-extrabold shadow-sm ${publicQueueRankShapeCls(index, queueTask.priority)}`}>
@@ -8893,6 +9300,14 @@ export default function PhotographerPage() {
                                 {isAssignedWaitingOverdue && (
                                   <span className="ml-1.5 rounded bg-orange-50 px-1 py-0.5 align-middle text-[8px] font-extrabold text-orange-500">
                                     超时等待
+                                  </span>
+                                )}
+                                {queueTask.isSpecified && (
+                                  <span
+                                    className="ml-1.5 rounded bg-orange-50 px-1 py-0.5 align-middle text-[8px] font-extrabold text-orange-500"
+                                    title={queueSpecifiedName ? `指定 ${queueSpecifiedName}` : "指定助理"}
+                                  >
+                                    指定
                                   </span>
                                 )}
                               </div>
@@ -8929,7 +9344,7 @@ export default function PhotographerPage() {
                   const isRemoving = removingTaskId === task.id;
                   const rawForTask = taskListRaw.find((x) => x.id === task.id);
                   const isPhotographerQueueTask = rawForTask != null && isPhotographerLimitQueuedTask(rawForTask);
-                  const isCancellable = task.statusLabel === "队列中" || task.statusLabel === "等待中" || task.statusLabel === "待就位" || isPhotographerQueueTask;
+                  const isCancellable = canCancelRawTask(rawForTask) || isPhotographerQueueTask;
                   const showCancel = isCancellable && hoveredTagId === task.id && !isRemoving;
                   const displayStatusLabel = taskStatusLabelForList(task, rawForTask, taskListRaw);
                   const showPausedWaitingDots =
@@ -8976,7 +9391,12 @@ export default function PhotographerPage() {
 	                    overtimeMinutesBeyondSlot(rawForTask, now.getTime()) != null;
 	                  const isEscalatedTask = task.statusLabel !== "已完成" && Boolean(rawForTask?.escalatedAt);
                     const escalationLabel = priorityTransitionLabel(rawForTask);
-                    const taskPriorityLevel = Math.min(5, Math.max(1, Math.round(Number(rawForTask?.priority ?? 5) || 5)));
+                  const taskPriorityLevel = Math.min(5, Math.max(1, Math.round(Number(rawForTask?.priority ?? 5) || 5)));
+                  const isSpecifiedTask = task.isSpecified || Boolean(rawForTask?.isSpecified);
+                  const specifiedAssistantName =
+                    task.specifiedAssistantName ??
+                    rawForTask?.specifiedAssistant?.name ??
+                    (rawForTask?.isSpecified ? rawForTask.assistant?.name ?? null : null);
 	                  return (
                     <div
                       key={task.id}
@@ -8988,7 +9408,9 @@ export default function PhotographerPage() {
                           void handleAssistantStatusChange("start", raw);
                         }
                       }}
-                      className={`px-3 py-2 rounded-xl border cursor-pointer ${task.statusCls}${
+                      className={`px-3 py-2 rounded-xl border cursor-pointer ${task.statusCls} ${
+                        resolvedTheme === "dark" ? "border-white/[0.22] bg-white/[0.12] backdrop-blur-xl shadow-sm shadow-black/10" : ""
+                      }${
                         enteringTaskId === task.id ? " task-genie-enter" : ""
                       }${isRemoving ? " task-slide-out" : ""}`}
                       style={{
@@ -9071,7 +9493,17 @@ export default function PhotographerPage() {
                               </span>
                             </>
                           ) : (
-                            task.assistantName ? <span className="truncate"> · {task.assistantName}</span> : null
+                            <>
+                              {task.assistantName ? <span className="truncate"> · {task.assistantName}</span> : null}
+                              {isSpecifiedTask && (
+                                <span
+                                  className="ml-1.5 shrink-0 rounded bg-orange-50 px-1 py-0.5 align-middle text-[8px] font-extrabold text-orange-500"
+                                  title={specifiedAssistantName ? `指定 ${specifiedAssistantName}` : "指定助理"}
+                                >
+                                  指定
+                                </span>
+                              )}
+                            </>
                           )}
                         </span>
                         {(() => {
@@ -9294,20 +9726,20 @@ export default function PhotographerPage() {
                 </svg>
                 <span className="text-[11px] font-extrabold">后台管理</span>
               </a>
-              <div className="pointer-events-none absolute right-0 top-full w-[112px] translate-y-[-6px] pt-2 opacity-0 transition-all duration-200 group-hover/admin-menu:pointer-events-auto group-hover/admin-menu:translate-y-0 group-hover/admin-menu:opacity-100">
-                <div className="rounded-2xl border border-white/70 bg-white/95 p-1.5 shadow-xl shadow-black/10 backdrop-blur-xl">
-                  <a
-                    href="/"
-                    onClick={() => { safeLocalStorageRemove("user"); safeLocalStorageRemove("currentProfileId"); }}
-                    className="flex w-full items-center justify-start rounded-xl px-3 py-2 text-left text-xs font-bold text-[--text-secondary] transition-colors hover:bg-gray-50 hover:text-[--text-primary]"
-                  >
-                    返回登录
-                  </a>
+	              <div className="pointer-events-none absolute right-0 top-full w-[112px] translate-y-[-6px] pt-2 opacity-0 transition-all duration-200 group-hover/admin-menu:pointer-events-auto group-hover/admin-menu:translate-y-0 group-hover/admin-menu:opacity-100">
+	                <div className={`rounded-2xl border p-1.5 shadow-xl backdrop-blur-xl ${workbenchFloatingSurfaceCls}`}>
+	                  <a
+	                    href="/"
+	                    onClick={() => { safeLocalStorageRemove("user"); safeLocalStorageRemove("currentProfileId"); }}
+	                    className={`flex w-full items-center justify-start rounded-xl px-3 py-2 text-left text-xs font-bold transition-colors ${workbenchFloatingItemCls}`}
+	                  >
+	                    返回登录
+	                  </a>
                   <button
-                    type="button"
-                    onClick={cycleTheme}
-                    className="flex w-full items-center justify-start rounded-xl px-3 py-2 text-left text-xs font-bold text-[--text-secondary] transition-colors hover:bg-gray-50 hover:text-[--text-primary]"
-                  >
+	                    type="button"
+	                    onClick={cycleTheme}
+	                    className={`flex w-full items-center justify-start rounded-xl px-3 py-2 text-left text-xs font-bold transition-colors ${workbenchFloatingItemCls}`}
+	                  >
                     系统风格
                   </button>
                 </div>

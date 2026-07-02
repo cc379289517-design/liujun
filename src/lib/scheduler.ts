@@ -297,7 +297,7 @@ async function buildIdleDispatchOrder<T extends { id: string }>(
   return orderIdleDispatchCandidates(candidates, lastId);
 }
 
-async function dispatchableAssistantIds(assistantIds: string[]): Promise<Set<string>> {
+export async function dispatchableAssistantIds(assistantIds: string[]): Promise<Set<string>> {
   if (assistantIds.length === 0) return new Set();
 
   const [blockingTasks, blockingCollaborators] = await Promise.all([
@@ -508,6 +508,38 @@ function taskEffectiveBuildingId(task: {
   photographer?: { buildingId: number } | null;
 }): number | null {
   return task.locationBuildingId ?? task.photographer?.buildingId ?? null;
+}
+
+export async function hasIroningQueuePressure(buildingId: number): Promise<boolean> {
+  const task = await prisma.bookingTask.findFirst({
+    where: {
+      status: TaskStatus.waiting,
+      ironingStage: { in: [IroningTaskStage.waiting_machine, IroningTaskStage.notified] },
+      category: { name: { contains: "熨" } },
+      AND: [NOT_PHOTOGRAPHER_LIMIT_QUEUE_WHERE],
+      OR: [
+        { locationBuildingId: buildingId },
+        { locationBuildingId: null, photographer: { buildingId } },
+      ],
+    },
+    select: { id: true },
+  });
+  return task != null;
+}
+
+export async function isIroningInterruptProtected(task: {
+  status: TaskStatus;
+  ironingStage: IroningTaskStage;
+  locationBuildingId?: number | null;
+  photographer?: { buildingId: number } | null;
+  category?: { name?: string | null } | null;
+}): Promise<boolean> {
+  if (task.status !== TaskStatus.executing) return false;
+  if (!isIroningTaskCategory(task.category)) return false;
+
+  const buildingId = taskEffectiveBuildingId(task);
+  if (buildingId == null) return false;
+  return hasIroningQueuePressure(buildingId);
 }
 
 async function normalIroningMachineCount(buildingId: number): Promise<number> {
@@ -1862,7 +1894,10 @@ export async function canInterrupt(
       assistantId,
       status: TaskStatus.executing,
     },
-    include: { category: true },
+    include: {
+      category: true,
+      photographer: { select: { buildingId: true } },
+    },
   });
 
   if (!currentTask) return false;
@@ -1872,6 +1907,8 @@ export async function canInterrupt(
   if (await assistantHasPendingInterruptTask(assistantId)) return false;
 
   if (await taskHasActiveHelperParticipants(currentTask.id)) return false;
+
+  if (await isIroningInterruptProtected(currentTask)) return false;
 
   if (!taskCategoryCanBeInterrupted(currentTask.category)) return false;
 
