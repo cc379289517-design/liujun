@@ -155,7 +155,7 @@ fi
 
 ./scripts/backup-sqlite.sh
 npm install
-npx prisma db push --skip-generate
+npx prisma db push
 
 if [ "${RUN_REMOTE_BUILD}" = "1" ]; then
   npm run build
