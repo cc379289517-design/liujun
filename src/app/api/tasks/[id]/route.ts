@@ -1,6 +1,6 @@
 import { NextRequest } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { completeTask, assignTask, runTaskMaintenance, updateTaskParticipantStatus } from "@/lib/scheduler";
+import { completeTask, assignTask, prepareWaitingTaskForAssistantStart, runTaskMaintenance, syncProfileStatus, updateTaskParticipantStatus } from "@/lib/scheduler";
 import { TaskStatus, ProfileStatus } from "@/generated/prisma/client";
 import { Prisma } from "@/generated/prisma/client";
 import { flushExecutingSegment } from "@/lib/taskEffectiveTime";
@@ -69,6 +69,11 @@ export async function GET(_request: NextRequest, { params }: RouteContext) {
             assistant: { select: { id: true, name: true, currentRoom: true, avatar: true, buildingId: true } },
           },
         },
+        completionRegistration: {
+          include: {
+            assistant: { select: { id: true, name: true } },
+          },
+        },
       },
     });
 
@@ -100,28 +105,42 @@ export async function DELETE(_request: NextRequest, { params }: RouteContext) {
     if (!task) {
       return Response.json({ error: "Task not found" }, { status: 404 });
     }
-    if (task.status !== TaskStatus.waiting || task.parentTaskId != null || task.interruptTasks.length > 0) {
+    if (task.status !== TaskStatus.waiting || task.startedAt != null) {
       return Response.json(
-        { error: "任务已开始或处于插单链路中，不能直接取消", code: "TASK_ALREADY_STARTED_CANNOT_CANCEL" },
+        { error: "任务已开始，不能直接取消", code: "TASK_ALREADY_STARTED_CANNOT_CANCEL" },
         { status: 409 }
       );
     }
 
     const releasedIds = [task.assistantId, ...task.collaborators.map((c) => c.assistantId)]
       .filter((id): id is string => id != null);
-    if (releasedIds.length > 0) {
-      await prisma.profile.updateMany({
-        where: { id: { in: releasedIds } },
-        data: { status: ProfileStatus.idle },
-      });
-    }
 
-    await prisma.bookingTask.delete({ where: { id } });
+    await prisma.$transaction(async (tx) => {
+      if (task.interruptTasks.length > 0) {
+        await tx.bookingTask.updateMany({
+          where: { parentTaskId: task.id },
+          data: { parentTaskId: null },
+        });
+      }
+      await tx.bookingTask.delete({ where: { id } });
+    });
+
+    if (releasedIds.length > 0) {
+      await syncProfileStatus();
+    }
     await runTaskMaintenance({ force: true });
 
     return Response.json({ success: true });
   } catch (error) {
     console.error("[DELETE /api/tasks/[id]]", error);
+    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2003") {
+      return Response.json({
+        error: "任务处于关联流程中，暂时不能取消",
+        code: "TASK_RELATION_CONFLICT",
+      }, {
+        status: 409,
+      });
+    }
     return Response.json({ error: "Failed to delete task" }, { status: 500 });
   }
 }
@@ -147,8 +166,13 @@ export async function PATCH(request: NextRequest, { params }: RouteContext) {
         if (!actorId) {
           return Response.json({ error: "actorAssistantId required for start" }, { status: 400 });
         }
+        await prepareWaitingTaskForAssistantStart(id, actorId);
         const ironingAvailability = await ironingMachineAvailabilityForStart(id);
-        if (!ironingAvailability.ok) {
+        const refreshedTask = await prisma.bookingTask.findUnique({
+          where: { id },
+          select: { ironingStage: true },
+        });
+        if (!ironingAvailability.ok && refreshedTask?.ironingStage !== "notified") {
           return Response.json(
             {
               code: "ironing_machine_busy",
@@ -343,6 +367,17 @@ export async function PATCH(request: NextRequest, { params }: RouteContext) {
     }
   } catch (error) {
     console.error("[PATCH /api/tasks/[id]]", error);
+    const businessErrorMessages = [
+      "熨烫机",
+      "当前助理",
+      "该熨烫任务",
+      "该任务已",
+      "多人协作任务",
+      "只有助理",
+    ];
+    const isBusinessError =
+      error instanceof Error &&
+      businessErrorMessages.some((message) => error.message.includes(message));
     const isDev = process.env.NODE_ENV === "development";
     let details: string | undefined;
     if (isDev) {
@@ -354,12 +389,12 @@ export async function PATCH(request: NextRequest, { params }: RouteContext) {
     }
     return Response.json(
       {
-        error: error instanceof Error && error.message.includes("熨烫机")
+        error: isBusinessError && error instanceof Error
           ? error.message
           : "Failed to update task",
         ...(details ? { details } : {}),
       },
-      { status: error instanceof Error && error.message.includes("熨烫机") ? 409 : 500 }
+      { status: isBusinessError ? 409 : 500 }
     );
   }
 }

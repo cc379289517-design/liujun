@@ -3,6 +3,115 @@
 import { useState, useEffect, useCallback, useMemo, useRef, type CSSProperties } from "react";
 import { createPortal } from "react-dom";
 import AssistantDock, { type DockAssistant, type NoteEditAnchor, assistantDockDotColor, DOCK_DOT } from "./AssistantDock";
+import AssistantRankingAvatar from "./AssistantRankingAvatar";
+import AvatarModal from "./AvatarModal";
+import {
+  CAT_ORDER,
+  CAT_SOLID_BG,
+  CAT_SOLID_HEX,
+  CAT_STYLES,
+  buildCategories,
+  polarPoint,
+  queueTaskTypeShortLabel,
+} from "./categoryDisplay";
+import DockBuildingTabs from "./DockBuildingTabs";
+import IroningMachineIcon from "./IroningMachineIcon";
+import MobileQuickBookingPanel from "./MobileQuickBookingPanel";
+import MobileTaskCard from "./MobileTaskCard";
+import {
+  mobileTaskStatusForProfile as deriveMobileTaskStatusForProfile,
+  mobileTaskStatusMeta as deriveMobileTaskStatusMeta,
+  mobileTaskSubtitle as deriveMobileTaskSubtitle,
+  mobileTaskTimeLine as deriveMobileTaskTimeLine,
+} from "./mobileWorkflows";
+import {
+  defaultBuildingVenue,
+  formatRoomOrVenue,
+  isAssistantRole,
+  isPublicQueueTaskForBuilding,
+  profileServiceBuildingId,
+  profileServiceRoom,
+  safeExtraVenueEntries,
+  taskLocationBuildingId,
+  venueBelongsToBuilding,
+} from "./locationDisplay";
+import {
+  ACTIVE_PARTICIPANT_STATUSES,
+  STATUS_STYLE,
+  assistantStartCandidateTasksForProfile,
+  activeTaskParticipants,
+  apiTaskToDisplay,
+  buildDurationLabel,
+  canCancelTaskFromWorkbench,
+  fmtMin,
+  formatAssistantScore,
+  formatMapTaskElapsedLine,
+  formatSecondsAsHMS,
+  formatStatsDateLabel,
+  formatTaskDetailDateTime,
+  hasAreaMetricDetail,
+  helperParticipants,
+  ironingQueueEstimateMinutes,
+  ironingQueueOrderMs,
+  isAssignedIroningReadyTask,
+  isIroningTask,
+  isMapDeferredIroningWaitingTask,
+  isPassiveIroningWaitingTask,
+  participantStatusText,
+  priorityTransitionLabel,
+  publicQueueEscalationKey,
+  publicQueuePriorityLevelCls,
+  publicQueueRankLabel,
+  publicQueueRankShapeCls,
+  publicQueueStatusInfo,
+  resolveAssistantTasks,
+  sortPublicQueueTasks,
+  sortTasksByStatus,
+  statsDayDate,
+  statsWeekStart,
+  taskAssigneeNames,
+  taskCategoryDurationCaption,
+  taskCompletedContributionsForRanking,
+  taskListActualLine,
+  taskParticipantForProfile,
+  taskParticipants,
+  taskStatusForProfile,
+  taskStatusLabelForList,
+  taskTimingForProfile,
+  taskTypeGroupName,
+} from "./taskDisplay";
+import {
+  buildSyntheticBeforePromotionIds,
+  mergePublicQueueOrder,
+  readPublicQueueLastOrder,
+  readPublicQueueSeenEscalations,
+  writePublicQueueLastOrder,
+  writePublicQueueSeenEscalations,
+} from "./publicQueueStorage";
+import type {
+  AssistantPresenceState,
+  AssistantRankingContribution,
+  AssistantRankingDetail,
+  AssistantRankingRow,
+  AreaMetricBreakdown,
+  AreaMetricCard,
+  AreaMetricDetailCard,
+  AreaMetricKey,
+  AreaMetricPerson,
+  BuiltCategory,
+  DbCategory,
+  DisplayTask,
+  IroningWorkItem,
+  MobileWorkbenchTab,
+  StandbyReassignmentNoticeFromAPI,
+  TaskCompletionRegistration,
+  TaskFromAPI,
+  TaskParticipant,
+  TaskPublisherFeedback,
+  ThemeMode,
+  VenuePoint,
+  WorkbenchBuilding,
+} from "./types";
 import {
   effectiveWorkMinutesFromApi,
   overtimeMinutesBeyondSlot,
@@ -23,6 +132,10 @@ import {
   photographerLimitQueuePrompt,
   parsePhotographerMaxActiveTasks,
 } from "@/lib/photographerTaskLimit";
+import {
+  canPriorityRequestByConfig,
+  priorityUpgradeRequestRuleForBuilding,
+} from "@/lib/priorityUpgradeRules";
 import { WORKBENCH_PAGE_BACKGROUND_CONFIG_KEY } from "@/lib/workbenchBackground";
 import {
   ASSISTANT_EATING_SUB_STATUS,
@@ -35,14 +148,19 @@ import {
   parseEatingReentryCooldownMin,
 } from "@/lib/eatingPresence";
 
-/** 用时类展示：≤60 分钟显示「X分钟」，>60 按小时、最多一位小数（整数不写 .0） */
-function fmtMin(min: number): string {
-  const m = Math.max(0, Math.round(Number(min) || 0));
-  if (m <= 60) return `${m}分钟`;
-  const h = m / 60;
-  const rounded = Math.round(h * 10) / 10;
-  if (Number.isInteger(rounded)) return `${rounded}小时`;
-  return `${rounded.toFixed(1)}小时`;
+const COMPLETION_REGISTRATION_REASON_OPTIONS = ["超时过长", "耗时异常", "其他反馈"] as const;
+type CompletionRegistrationReasonType = typeof COMPLETION_REGISTRATION_REASON_OPTIONS[number];
+
+function completionRegistrationImageUrls(registration: TaskCompletionRegistration | null | undefined): string[] {
+  const raw = registration?.imageUrls;
+  if (Array.isArray(raw)) return raw.filter((item): item is string => typeof item === "string");
+  if (typeof raw !== "string" || !raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === "string") : [];
+  } catch {
+    return [];
+  }
 }
 
 function fmtIroningHoverTime(min: number): string {
@@ -50,30 +168,6 @@ function fmtIroningHoverTime(min: number): string {
   if (m <= 60) return `${m}分钟`;
   return `${(Math.round((m / 60) * 10) / 10).toFixed(1)}小时`;
 }
-
-type VenuePoint = { x: number; y: number };
-type ExtraVenueEntry = { name: string; type?: string; x?: number; y?: number; color?: string; polygon?: VenuePoint[] };
-type IroningMachine = {
-  id: number;
-  buildingId: number;
-  name: string;
-  status: "normal" | "maintenance";
-  xPosition: number;
-  yPosition: number;
-  sortRank: number;
-};
-type WorkbenchBuilding = {
-  id: number;
-  name: string;
-  floorPlanUrl: string | null;
-  cropX?: number | null;
-  cropY?: number | null;
-  cropW?: number | null;
-  cropH?: number | null;
-  extraVenues?: string | null;
-  rooms: { id: number; roomNumber: string; xPosition: number; yPosition: number }[];
-  ironingMachines?: IroningMachine[];
-};
 
 const NOTE_POPUP_WIDTH = 260;
 const NOTE_POPUP_ESTIMATED_HEIGHT = 180;
@@ -83,8 +177,6 @@ const MAP_AWAY_AVATAR_FILTER = "grayscale(1) saturate(0.2)";
 const MAP_AWAY_AVATAR_OPACITY = 0.58;
 const MAP_AWAY_AVATAR_BG = "rgba(229, 231, 235, 0.55)";
 const MAP_AWAY_AVATAR_BORDER = "rgba(156, 163, 175, 0.45)";
-type AssistantPresenceState = "online" | "eating" | "on_break";
-type MobileWorkbenchTab = "current" | "map" | "queue" | "me";
 
 function assistantPresenceState(profile: { onlineStatus?: string | null; subStatus?: string | null } | null | undefined): AssistantPresenceState {
   if (profile?.onlineStatus === "on_break" || profile?.onlineStatus === "offline") return "on_break";
@@ -154,822 +246,11 @@ function notePopupPosition(anchor: NoteEditAnchor | null): { left: number; top: 
   };
 }
 
-/** 解析楼座 extraVenues JSON，非法或空时返回 []，避免 hover 整页崩溃 */
-function safeExtraVenueEntries(extraVenues: string | null | undefined): ExtraVenueEntry[] {
-  if (!extraVenues || !extraVenues.trim()) return [];
-  try {
-    const raw = JSON.parse(extraVenues) as unknown;
-    if (!Array.isArray(raw)) return [];
-    const out: ExtraVenueEntry[] = [];
-    for (const v of raw) {
-      if (typeof v === "string") {
-        if (v) out.push({ name: v });
-        continue;
-      }
-      if (v && typeof v === "object" && "name" in v) {
-        const o = v as { name: string; type?: string; x?: unknown; y?: unknown; color?: unknown; polygon?: unknown };
-        const name = String(o.name ?? "");
-        const parsedX = typeof o.x === "number" ? o.x : typeof o.x === "string" ? Number(o.x) : NaN;
-        const parsedY = typeof o.y === "number" ? o.y : typeof o.y === "string" ? Number(o.y) : NaN;
-        const x = Number.isFinite(parsedX) ? parsedX : undefined;
-        const y = Number.isFinite(parsedY) ? parsedY : undefined;
-        const polygon = Array.isArray(o.polygon)
-          ? o.polygon
-              .map((point) => {
-                if (!point || typeof point !== "object") return null;
-                const rawPoint = point as { x?: unknown; y?: unknown };
-                const px = typeof rawPoint.x === "number" ? rawPoint.x : typeof rawPoint.x === "string" ? Number(rawPoint.x) : NaN;
-                const py = typeof rawPoint.y === "number" ? rawPoint.y : typeof rawPoint.y === "string" ? Number(rawPoint.y) : NaN;
-                return Number.isFinite(px) && Number.isFinite(py) ? { x: px, y: py } : null;
-              })
-              .filter((point): point is VenuePoint => point !== null)
-          : undefined;
-        const color = typeof o.color === "string" && o.color.trim() ? o.color : undefined;
-        if (name) out.push({ name, type: o.type, x, y, color, polygon });
-      }
-    }
-    return out;
-  } catch {
-    return [];
-  }
-}
-
-function defaultBuildingVenue(building: WorkbenchBuilding | null | undefined): string | null {
-  if (!building) return null;
-  const venues = safeExtraVenueEntries(building.extraVenues);
-  const realScene = venues.find((v) => v.type === "实景棚");
-  if (realScene?.name) return realScene.name;
-  if (venues[0]?.name) return venues[0].name;
-  return building.rooms[0]?.roomNumber ?? null;
-}
-
-function formatRoomOrVenue(value: string | null | undefined): string {
-  if (!value) return "";
-  if (value.endsWith("室")) return value;
-  return /^\d+$/.test(value) ? `${value}室` : value;
-}
-
-function venueBelongsToBuilding(building: WorkbenchBuilding | null | undefined, value: string | null | undefined): boolean {
-  if (!building || !value) return false;
-  const normalized = value.endsWith("室") ? value.slice(0, -1) : value;
-  const isRoom = building.rooms.some((room) => room.roomNumber === normalized);
-  const isPublicVenue = safeExtraVenueEntries(building.extraVenues).some((venue) => venue.name === value);
-  return isRoom || isPublicVenue;
-}
-
-/** 助理任务状态区：总秒数 → HH:MM:SS（时可为三位以上） */
-function formatSecondsAsHMS(totalSeconds: number): string {
-  const sec = Math.max(0, Math.floor(totalSeconds));
-  const h = Math.floor(sec / 3600);
-  const m = Math.floor((sec % 3600) / 60);
-  const s = sec % 60;
-  const hh = h > 99 ? String(h) : String(h).padStart(2, "0");
-  return `${hh}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
-}
-
-type ThemeMode = "light" | "dark" | "auto";
-type TaskPublisherFeedback = "like" | "dislike";
-type IroningTaskStage = "none" | "waiting_machine" | "notified" | "using";
-
-type TaskFromAPI = {
-  id: string;
-  photographerId: string;
-  assistantId: string | null;
-  locationBuildingId?: number | null;
-  roomNumber: string;
-  categoryId: number;
-  priority: number;
-  status: "waiting" | "executing" | "paused" | "completed";
-  isSpecified?: boolean;
-  ironingStage?: IroningTaskStage;
-  ironingQueuedAt?: string | null;
-  ironingNotifiedAt?: string | null;
-  ironingStartedAt?: string | null;
-  note: string | null;
-  publisherFeedback?: TaskPublisherFeedback | null;
-  createdAt: string;
-  startedAt: string | null;
-  completedAt: string | null;
-  pausedAt: string | null;
-  escalatedAt?: string | null;
-  escalatedFromPriority?: number | null;
-  estEndTime: string | null;
-  effectiveWorkSeconds?: number | null;
-  workSegmentStartedAt?: string | null;
-  isLocked: boolean;
-  lockReason: string | null;
-  parentTaskId: string | null;
-  photographer: { id: string; name: string; currentRoom: string | null; buildingId: number };
-  assistant: { id: string; name: string; currentRoom: string | null } | null;
-  specifiedAssistant?: { id: string; name: string; avatar?: string | null } | null;
-  collaborators?: {
-    id: string;
-    taskId: string;
-    assistantId: string;
-    role: string;
-    status: string;
-    joinedAt: string;
-    leftAt: string | null;
-    startedAt?: string | null;
-    completedAt?: string | null;
-    effectiveWorkSeconds?: number | null;
-    workSegmentStartedAt?: string | null;
-    assistant: { id: string; name: string; currentRoom: string | null; avatar: string | null; buildingId: number };
-  }[];
-  category: {
-    id: number;
-    name: string;
-    priorityLevel: number;
-    estDuration?: number;
-    minDuration?: number;
-    maxDuration?: number;
-  };
-};
-
-type StandbyReassignmentNoticeFromAPI = {
-  id: string;
-  taskId: string;
-  oldAssistantId: string;
-  oldAssistantName: string;
-  newAssistantId: string;
-  newAssistantName: string;
-  taskRoomNumber: string;
-  taskCategoryName: string;
-  taskPriority: number;
-  waitedMinutes: number;
-  thresholdMinutes: number;
-  score: number;
-  reason: string;
-  oldAssistantSetOffline: boolean;
-  oldAssistantActiveTaskRoomNumber: string | null;
-  oldAssistantActiveTaskCategoryName: string | null;
-  oldAssistantActiveTaskStatus: string | null;
-  newAssistantAcknowledgedAt: string | null;
-  oldAssistantAcknowledgedAt: string | null;
-  createdAt: string;
-  task?: {
-    id: string;
-    note: string | null;
-    roomNumber: string;
-    status: TaskFromAPI["status"];
-  } | null;
-};
-
-type DisplayTask = {
-  id: string;
-  name: string;
-  room: string;
-  time: string;
-  timePeriod: string;
-  /** 任务类型配置的预估时长（摄影师下发所选类别），与优先级档文案无关 */
-  estimatedLabel: string;
-  /** 快捷预约所选 min–max 时段文案，与按钮标签一致 */
-  durationSlotLabel: string;
-  actualTime: string;
-  progress: number | null;
-  statusLabel: string;
-  statusCls: string;
-  tagCls: string;
-  hasProgress: boolean;
-  isSpecified: boolean;
-  specifiedAssistantName: string | null;
-  assistantName: string | null;
-  photographerName: string | null;
-  createdAt: string;
-  estEndTime: string | null;
-  publisherFeedback: TaskPublisherFeedback | null;
-};
-
-const STATUS_STYLE: Record<string, { statusLabel: string; statusCls: string; tagCls: string; hasProgress: boolean }> = {
-  executing: { statusLabel: "进行中", statusCls: "bg-white/40 border-orange-200/50", tagCls: "bg-orange-100/60 text-orange-600", hasProgress: true },
-  waiting:   { statusLabel: "等待中", statusCls: "bg-white/30 border-white/40", tagCls: "bg-gray-100/60 text-gray-500", hasProgress: false },
-  queued:    { statusLabel: "队列中", statusCls: "bg-white/30 border-white/40", tagCls: "bg-gray-100/80 text-gray-500", hasProgress: false },
-  assigned:  { statusLabel: "待就位", statusCls: "bg-white/35 border-blue-200/50", tagCls: "bg-blue-100/60 text-blue-600", hasProgress: false },
-  waitingMachine: { statusLabel: "等待熨烫机", statusCls: "bg-white/35 border-emerald-200/50", tagCls: "bg-emerald-100/70 text-emerald-700", hasProgress: false },
-  ironingReady: { statusLabel: "准备熨烫", statusCls: "bg-white/40 border-lime-200/60", tagCls: "bg-lime-100/80 text-lime-700", hasProgress: false },
-  completed: { statusLabel: "已完成", statusCls: "bg-white/30 border-white/40", tagCls: "bg-green-100/60 text-green-600", hasProgress: false },
-  paused:    { statusLabel: "已暂停", statusCls: "bg-white/25 border-yellow-200/40", tagCls: "bg-yellow-100/60 text-yellow-600", hasProgress: false },
-};
-
-// 任务状态排序权重：超过上限后的个人队列优先提醒，其余按待就位 → 等待中 → 进行中 → 已暂停 → 已完成
-const STATUS_ORDER: Record<string, number> = { "准备熨烫": 0, "等待熨烫机": 1, "队列中": 2, "待就位": 3, "等待中": 4, "进行中": 5, "已暂停": 6, "已完成": 7, "已取消": 8 };
-function sortTasksByStatus(tasks: DisplayTask[]): DisplayTask[] {
-  return [...tasks].sort((a, b) => (STATUS_ORDER[a.statusLabel] ?? 99) - (STATUS_ORDER[b.statusLabel] ?? 99));
-}
-
-type TaskParticipant = NonNullable<TaskFromAPI["collaborators"]>[number];
-const ACTIVE_PARTICIPANT_STATUSES = ["waiting", "executing", "paused"];
 const ASSISTANT_RANKING_TASK_BONUS = 0.2;
 const ASSISTANT_RANKING_CROSS_BUILDING_BONUS = 0.2;
 
-type AssistantRankingContribution = {
-  assistantId: string;
-  assistantName: string;
-  taskId: string;
-  taskName: string;
-  roomNumber: string;
-  buildingId: number | null;
-  completedAtMs: number;
-  workSeconds: number;
-};
-
-type AssistantRankingDetail = {
-  taskId: string;
-  taskTitle: string;
-  serviceSeconds: number;
-  serviceScore: number;
-  taskBonus: number;
-  crossBuildingBonus: number;
-  totalScore: number;
-};
-
-type AssistantRankingRow = {
-  assistantId: string;
-  assistantName: string;
-  avatar: string | null;
-  score: number;
-  completedCount: number;
-  workSeconds: number;
-  crossBuildingCount: number;
-  lastCompletedAtMs: number;
-  details: AssistantRankingDetail[];
-};
-
-type AreaMetricKey = "executing" | "assigned" | "overtime" | "queue" | "offline";
-type AreaMetricBreakdown = {
-  label: "任务超时" | "吃饭超时";
-  count: number;
-  unit: "项" | "人";
-};
-type AreaMetricPerson = {
-  id: string;
-  name: string;
-  avatar: string | null;
-  count: number;
-  queueSortIndex?: number;
-  queueTaskTypes?: string[];
-  breakdown?: AreaMetricBreakdown[];
-};
-type AreaMetricBaseCard = {
-  caption: string;
-  value: number;
-  span: string;
-};
-type AreaMetricDetailCard = AreaMetricBaseCard & {
-  detailKey: AreaMetricKey;
-  people: AreaMetricPerson[];
-  unit: string;
-  emptyText: string;
-  bubbleAnchorMode?: "card" | "value";
-};
-type AreaMetricCard = AreaMetricBaseCard | AreaMetricDetailCard;
-
-type IroningWorkItem = {
-  task: TaskFromAPI;
-  assistantId: string;
-  assistantName: string;
-  assistantAvatar: string | null;
-  elapsedMin: number;
-  overtimeMin: number | null;
-  remainingMin: number | null;
-  durationLabel: string;
-  elapsedLabel: string;
-  taskLabel: string;
-};
-
-function hasAreaMetricDetail(item: AreaMetricCard): item is AreaMetricDetailCard {
-  return "detailKey" in item;
-}
-
-function taskParticipants(task: TaskFromAPI | undefined | null): TaskParticipant[] {
-  return (task?.collaborators ?? []).filter((c) => c.status !== "left");
-}
-
-function helperParticipants(task: TaskFromAPI | undefined | null): TaskParticipant[] {
-  return taskParticipants(task).filter((c) => c.role !== "primary" && c.assistantId !== task?.assistantId);
-}
-
-function activeTaskParticipants(task: TaskFromAPI | undefined | null): TaskParticipant[] {
-  return taskParticipants(task).filter((c) => ACTIVE_PARTICIPANT_STATUSES.includes(c.status));
-}
-
-function taskParticipantForProfile(
-  task: TaskFromAPI | undefined | null,
-  profileId: string | null | undefined
-): TaskParticipant | null {
-  if (!task || !profileId) return null;
-  return taskParticipants(task).find((c) => c.assistantId === profileId) ?? null;
-}
-
-function taskStatusForProfile(
-  task: TaskFromAPI | undefined | null,
-  profileId: string | null | undefined
-): string | null {
-  return taskParticipantForProfile(task, profileId)?.status ?? task?.status ?? null;
-}
-
-function taskTimingForProfile(
-  task: TaskFromAPI,
-  profileId: string | null | undefined
-): TaskFromAPI | TaskParticipant {
-  return taskParticipantForProfile(task, profileId) ?? task;
-}
-
-function taskWaitingStartedAt(task: TaskFromAPI, profileId: string | null | undefined): string {
-  const participant = taskParticipantForProfile(task, profileId);
-  if (participant?.status === "waiting") return participant.joinedAt;
-  const primaryWaiting = taskParticipants(task).find((c) => c.role === "primary" && c.status === "waiting");
-  if (primaryWaiting) return primaryWaiting.joinedAt;
-  return task.createdAt;
-}
-
-function participantStatusText(status: string): string {
-  if (status === "waiting") return "待就位";
-  if (status === "executing") return "进行中";
-  if (status === "paused") return "暂停中";
-  if (status === "completed") return "已完成";
-  return "已离开";
-}
-
-function taskAssigneeNames(task: TaskFromAPI | undefined | null, fallbackName?: string | null): string[] {
-  const names = [
-    task?.assistant?.name ?? fallbackName ?? null,
-    ...helperParticipants(task).map((c) => c.assistant.name),
-  ].filter((name): name is string => Boolean(name));
-  return [...new Set(names)];
-}
-
-function formatAssistantScore(score: number): string {
-  const rounded = Math.round(score * 10) / 10;
-  return Number.isInteger(rounded) ? `${rounded}` : rounded.toFixed(1);
-}
-
-function assistantRankingCrownMeta(index: number): { color: string; sizeCls: string; offsetCls: string } | null {
-  if (index === 0) return { color: "#fde047", sizeCls: "h-[22px] w-[22px]", offsetCls: "-left-2.5 -top-2.5" };
-  if (index === 1) return { color: "#e2e8f0", sizeCls: "h-[17px] w-[17px]", offsetCls: "-left-2 -top-2" };
-  if (index === 2) return { color: "#f59e0b", sizeCls: "h-3.5 w-3.5", offsetCls: "-left-1.5 -top-1.5" };
-  return null;
-}
-
-function AssistantRankingAvatar({ row, index, sizeCls = "h-7 w-7" }: { row: AssistantRankingRow; index: number; sizeCls?: string }) {
-  const crown = assistantRankingCrownMeta(index);
-  const ringCls =
-    index === 0 ? "ring-2 ring-amber-300/80" :
-    index === 1 ? "ring-2 ring-slate-300/80" :
-    index === 2 ? "ring-2 ring-orange-300/70" :
-    "ring-1 ring-white/90";
-
-  return (
-    <span className={`relative flex shrink-0 items-center justify-center overflow-visible rounded-full bg-slate-200 text-[10px] font-extrabold text-white shadow-sm ${sizeCls} ${ringCls}`}>
-      {row.avatar ? (
-        <span className="h-full w-full overflow-hidden rounded-full">
-          <img src={row.avatar} alt={row.assistantName} className="h-full w-full object-cover" />
-        </span>
-      ) : (
-        <span className="flex h-full w-full items-center justify-center overflow-hidden rounded-full bg-gradient-to-br from-slate-300 to-slate-500">
-          {row.assistantName.slice(0, 1)}
-        </span>
-      )}
-      {crown && (
-        <svg
-          className={`absolute ${crown.offsetCls} ${crown.sizeCls} -rotate-[22deg] overflow-visible`}
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke={crown.color}
-          strokeWidth="2.6"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-          aria-hidden="true"
-          style={{ filter: "drop-shadow(0 0 2px rgba(255,255,255,0.95)) drop-shadow(0 1px 1px rgba(15,23,42,0.22))" }}
-        >
-          <path d="m3 8 4.5 4L12 5l4.5 7L21 8l-2 10H5L3 8Z" />
-          <path d="M5 18h14" />
-        </svg>
-      )}
-    </span>
-  );
-}
-
-function completedAtMsForRanking(task: TaskFromAPI, participant?: TaskParticipant | null): number {
-  const raw = participant?.completedAt ?? task.completedAt ?? task.createdAt;
-  const ms = new Date(raw).getTime();
-  return Number.isFinite(ms) ? ms : 0;
-}
-
-function completedContributionForRanking(
-  task: TaskFromAPI,
-  assistantId: string,
-  assistantName: string,
-  timingSource: TaskFromAPI | TaskParticipant,
-  completedAtMs: number,
-  nowMs: number
-): AssistantRankingContribution {
-  return {
-    assistantId,
-    assistantName,
-    taskId: task.id,
-    taskName: task.category?.name ?? "任务",
-    roomNumber: task.roomNumber,
-    buildingId: taskLocationBuildingId(task),
-    completedAtMs,
-    workSeconds: totalEffectiveWorkSecondsFromApi(
-      { ...timingSource, status: "completed" },
-      nowMs,
-    ),
-  };
-}
-
-function taskCompletedContributionsForRanking(task: TaskFromAPI, nowMs: number): AssistantRankingContribution[] {
-  const rows: AssistantRankingContribution[] = [];
-  const seenAssistantIds = new Set<string>();
-
-  if (task.assistantId && task.status === "completed") {
-    const primary = taskParticipantForProfile(task, task.assistantId);
-    rows.push(completedContributionForRanking(
-      task,
-      task.assistantId,
-      task.assistant?.name ?? "未命名助理",
-      primary ?? task,
-      completedAtMsForRanking(task, primary),
-      nowMs,
-    ));
-    seenAssistantIds.add(task.assistantId);
-  }
-
-  for (const participant of taskParticipants(task)) {
-    if (participant.status !== "completed") continue;
-    if (seenAssistantIds.has(participant.assistantId)) continue;
-    rows.push(completedContributionForRanking(
-      task,
-      participant.assistantId,
-      participant.assistant.name,
-      participant,
-      completedAtMsForRanking(task, participant),
-      nowMs,
-    ));
-    seenAssistantIds.add(participant.assistantId);
-  }
-
-  return rows;
-}
-
-function resolveAssistantTasks(taskData: TaskFromAPI[], profileId?: string): {
-  current: TaskFromAPI | null;
-  paused: TaskFromAPI | null;
-  pending: TaskFromAPI | null;
-  deferredWaiting: TaskFromAPI | null;
-} {
-  const statusOf = (task: TaskFromAPI) => taskStatusForProfile(task, profileId) ?? task.status;
-  const belongsToProfile = (task: TaskFromAPI) => !profileId || task.assistantId === profileId || !!taskParticipantForProfile(task, profileId);
-  const executing = taskData.find((t) => belongsToProfile(t) && statusOf(t) === "executing") || null;
-  const paused = taskData.find((t) => belongsToProfile(t) && statusOf(t) === "paused") || null;
-  // waiting + parentTaskId = 插单待处理（pending）；waiting + no parentTaskId = 普通待就位
-  const waitingWithParent = taskData.find((t) => belongsToProfile(t) && statusOf(t) === "waiting" && t.parentTaskId && !isPassiveIroningWaitingTask(t)) || null;
-  const waitingNormal = taskData.find((t) => belongsToProfile(t) && statusOf(t) === "waiting" && !t.parentTaskId && !isPassiveIroningWaitingTask(t)) || null;
-  const passiveIroningWaiting = taskData.find((t) => belongsToProfile(t) && statusOf(t) === "waiting" && isPassiveIroningWaitingTask(t)) || null;
-
-  if (executing && waitingWithParent) {
-    // 旧任务执行中，新插单任务待处理
-    return { current: executing, paused: null, pending: waitingWithParent, deferredWaiting: null };
-  }
-  if (paused && waitingWithParent) {
-    // 旧任务已暂停，新插单任务待就位
-    return { current: waitingWithParent, paused, pending: null, deferredWaiting: null };
-  }
-  if (paused && executing) {
-    // 旧任务已暂停，新插单任务执行中
-    return { current: executing, paused, pending: null, deferredWaiting: null };
-  }
-  if (paused?.parentTaskId) {
-    const parentOfPaused = taskData.find((t) => t.id === paused.parentTaskId);
-    if (
-      parentOfPaused &&
-      statusOf(parentOfPaused) === "waiting" &&
-      belongsToProfile(parentOfPaused)
-    ) {
-      // 紧急插单已接单后中途暂停：原任务仍让行，当前应恢复暂停中的紧急单。
-      return { current: null, paused, pending: null, deferredWaiting: parentOfPaused };
-    }
-  }
-  if (executing?.parentTaskId) {
-    const parentOfExec = taskData.find((t) => t.id === executing.parentTaskId);
-    if (
-      parentOfExec &&
-      statusOf(parentOfExec) === "waiting" &&
-      belongsToProfile(parentOfExec)
-    ) {
-      // 待就位插单后已开始执行紧急单，父任务仍在 waiting（地图灰头像场景）
-      return { current: executing, paused: null, pending: null, deferredWaiting: parentOfExec };
-    }
-  }
-  if (waitingWithParent) {
-    const parent = taskData.find((t) => t.id === waitingWithParent.parentTaskId);
-    if (
-      parent &&
-      statusOf(parent) === "waiting" &&
-      belongsToProfile(parent)
-    ) {
-      // 待就位被更高优先插单：当前为紧急单，原单让行（仍为 waiting）
-      return { current: waitingWithParent, paused: null, pending: null, deferredWaiting: parent };
-    }
-  }
-  // 普通单任务
-  const current = executing || waitingNormal || waitingWithParent || passiveIroningWaiting || null;
-  return { current, paused, pending: null, deferredWaiting: null };
-}
-
-function actionableWaitingTasksForProfile(taskData: TaskFromAPI[], profileId?: string): TaskFromAPI[] {
-  const statusOf = (task: TaskFromAPI) => taskStatusForProfile(task, profileId) ?? task.status;
-  const belongsToProfile = (task: TaskFromAPI) => !profileId || task.assistantId === profileId || !!taskParticipantForProfile(task, profileId);
-  const waitingTasks = taskData.filter((task) =>
-    belongsToProfile(task) &&
-    statusOf(task) === "waiting" &&
-    !isPassiveIroningWaitingTask(task)
-  );
-
-  return waitingTasks.sort((a, b) => {
-    const aIroningReady = isAssignedIroningReadyTask(a, profileId) ? 0 : 1;
-    const bIroningReady = isAssignedIroningReadyTask(b, profileId) ? 0 : 1;
-    return aIroningReady - bIroningReady ||
-      a.priority - b.priority ||
-      new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
-  });
-}
-
-function apiTaskToDisplay(t: TaskFromAPI, profileId?: string): DisplayTask {
-  // waiting 的两种业务含义：未分配=队列中；已分配但未开始=待就位。
-  const viewerStatus = taskStatusForProfile(t, profileId) ?? t.status;
-  const timingSource = taskTimingForProfile(t, profileId);
-  const hasAssignedPerson = !!t.assistantId || activeTaskParticipants(t).length > 0;
-  const effectiveStatus = isPhotographerLimitQueuedTask(t)
-    ? "queued"
-    : isIroningTask(t) && t.status === "waiting" && t.ironingStage === "waiting_machine"
-      ? "waitingMachine"
-    : isAssignedIroningReadyTask(t, profileId)
-      ? "ironingReady"
-    : viewerStatus === "waiting"
-      ? hasAssignedPerson ? "assigned" : "queued"
-      : viewerStatus;
-  const style = STATUS_STYLE[effectiveStatus] || STATUS_STYLE.waiting;
-  const PRIORITY_LABEL: Record<number, string> = { 1: "1-5分钟", 2: "5-20分钟", 3: "30分钟以内", 4: "30-60分钟", 5: "1小时以上" };
-  const timePeriod = PRIORITY_LABEL[t.priority] || t.category?.name || "任务";
-  const estMin = t.category?.estDuration;
-  const estimatedLabel = estMin != null && estMin > 0 ? fmtMin(estMin) : "—";
-  const durationSlotLabel = categoryDurationSlotLabel(t.category);
-  let time = "";
-  let actualTime = "";
-  let progress: number | null = null;
-  if (viewerStatus === "executing") {
-    const elapsedMin = effectiveWorkMinutesFromApi(timingSource);
-    const estDur = t.category?.estDuration;
-    const estWall =
-      t.estEndTime && t.startedAt
-        ? Math.floor(
-            (new Date(t.estEndTime).getTime() - new Date(t.startedAt).getTime()) / 60000
-          )
-        : null;
-    const estMin = estDur != null && estDur > 0 ? estDur : estWall;
-    if (estMin != null && estMin > 0) {
-      time = `已执行${fmtMin(elapsedMin)}/${fmtMin(estMin)}`;
-      progress = Math.min(100, Math.round((elapsedMin / estMin) * 100));
-    } else {
-      time = `已执行${fmtMin(elapsedMin)}`;
-      progress = null;
-    }
-    actualTime = `已进行${fmtMin(elapsedMin)}`;
-  } else if (viewerStatus === "completed" && timingSource.startedAt && timingSource.completedAt) {
-    const used = effectiveWorkMinutesFromApi(timingSource);
-    time = `用时${fmtMin(used)}`;
-    actualTime = fmtMin(used);
-  } else if (viewerStatus === "paused") {
-    const elapsedMin = effectiveWorkMinutesFromApi(timingSource);
-    time = `已执行${fmtMin(elapsedMin)}(暂停)`;
-    actualTime = `已进行${fmtMin(elapsedMin)}`;
-  } else {
-    time = timePeriod;
-    actualTime = "";
-  }
-  return {
-    id: t.id,
-    name: t.category?.name ?? "任务",
-    room: t.roomNumber,
-    time,
-    timePeriod,
-    estimatedLabel,
-    durationSlotLabel,
-    actualTime,
-    progress,
-    isSpecified: Boolean(t.isSpecified),
-    specifiedAssistantName: t.specifiedAssistant?.name ?? (t.isSpecified ? t.assistant?.name ?? null : null),
-    assistantName: t.assistant?.name || null,
-    photographerName: t.photographer?.name || null,
-    createdAt: t.createdAt,
-    estEndTime: t.estEndTime,
-    publisherFeedback: t.publisherFeedback ?? null,
-    ...style,
-  };
-}
-
-/**
- * 任务列表「实际用时」列 / 卡片第二行右侧：进行中·已暂停→已超时/已进行；等待中·待就位→已等待（随 now 刷新）
- */
-function taskListActualLine(
-  d: DisplayTask,
-  raw: TaskFromAPI | undefined,
-  nowMs: number,
-  forCard: boolean,
-  profileId?: string
-): string | null {
-  if (d.statusLabel === "进行中" || d.statusLabel === "已暂停") {
-    if (raw) {
-      const timingSource = taskTimingForProfile(raw, profileId);
-      const status = taskStatusForProfile(raw, profileId) ?? raw.status;
-      const over = overtimeMinutesBeyondSlot({ ...timingSource, status, category: raw.category }, nowMs);
-      if (over != null) return `已超时${fmtMin(over)}`;
-    }
-    const m = raw ? effectiveWorkMinutesFromApi(taskTimingForProfile(raw, profileId), nowMs) : 0;
-    return `已进行${fmtMin(m)}`;
-  }
-  if (d.statusLabel === "队列中" || d.statusLabel === "等待中" || d.statusLabel === "待就位") {
-    const startedAt = raw ? taskWaitingStartedAt(raw, profileId) : d.createdAt;
-    const m = Math.max(0, Math.floor((nowMs - new Date(startedAt).getTime()) / 60000));
-    return `已等待${fmtMin(m)}`;
-  }
-  if (d.statusLabel === "已完成" && d.actualTime) {
-    return forCard ? `实际用时${d.actualTime}` : d.actualTime;
-  }
-  return null;
-}
-
-type TaskPauseKind = "manual" | "interrupt";
-
-function taskPauseKind(task: TaskFromAPI | undefined, allTasks: TaskFromAPI[]): TaskPauseKind | null {
-  if (!task || task.status !== "paused") return null;
-  const hasActiveInterrupt = allTasks.some(
-    (candidate) =>
-      candidate.parentTaskId === task.id &&
-      candidate.status !== "completed"
-  );
-  return hasActiveInterrupt ? "interrupt" : "manual";
-}
-
-function taskStatusLabelForList(d: DisplayTask, raw: TaskFromAPI | undefined, allTasks: TaskFromAPI[]): string {
-  if (d.statusLabel !== "已暂停") return d.statusLabel;
-  const kind = taskPauseKind(raw, allTasks);
-  if (kind === "interrupt") return "插单暂停中";
-  if (kind === "manual") return "手动暂停中";
-  return d.statusLabel;
-}
-
-function publicQueueStatusInfo(task: TaskFromAPI, allTasks: TaskFromAPI[]) {
-  if (task.status === "paused") {
-    const kind = taskPauseKind(task, allTasks);
-    return {
-      label: kind === "interrupt" ? "插单暂停" : "暂停",
-      cls: "bg-yellow-100/70 text-yellow-700",
-      rank: 2,
-      assignedWaiting: false,
-    };
-  }
-
-  const assigned = !!task.assistantId || activeTaskParticipants(task).length > 0;
-  return assigned
-    ? { label: "已分配待就位", cls: "bg-blue-100/70 text-blue-700", rank: 0, assignedWaiting: true }
-    : { label: "未分配待派发", cls: "bg-gray-100/80 text-gray-600", rank: 1, assignedWaiting: false };
-}
-
-function publicQueueRankCls(index: number): string {
-  if (index === 0) return "bg-red-500 text-white shadow-red-200/80";
-  if (index === 1) return "bg-orange-500 text-white shadow-orange-200/80";
-  if (index === 2) return "bg-yellow-400 text-yellow-950 shadow-yellow-200/80";
-  return "bg-gray-200/90 text-gray-600 shadow-gray-200/70";
-}
-
-function publicQueueRankLabel(index: number, priority: number): string {
-  if (index < 3) return String(index + 1);
-  const level = Math.min(5, Math.max(1, Math.round(Number(priority) || 5)));
-  return `P${level}`;
-}
-
-function publicQueuePriorityLevelCls(priority: number): string {
-  const level = Math.min(5, Math.max(1, Math.round(Number(priority) || 5)));
-  const priorityCls: Record<number, string> = {
-    1: "bg-red-50 text-red-600 shadow-red-100/70",
-    2: "bg-orange-50 text-orange-600 shadow-orange-100/70",
-    3: "bg-yellow-50 text-yellow-600 shadow-yellow-100/70",
-    4: "bg-blue-50 text-blue-600 shadow-blue-100/70",
-    5: "bg-gray-100/80 text-gray-500 shadow-gray-200/70",
-  };
-  return priorityCls[level];
-}
-
-function publicQueueRankShapeCls(index: number, priority: number): string {
-  if (index < 3) return `h-5 w-5 rounded-full ${publicQueueRankCls(index)}`;
-  const level = Math.min(5, Math.max(1, Math.round(Number(priority) || 5)));
-  return `h-5 w-8 rounded-lg ${publicQueuePriorityLevelCls(level)}`;
-}
-
-function sortPublicQueueTasks(
-  tasks: TaskFromAPI[],
-  allTasks: TaskFromAPI[],
-  priorityOf: (task: TaskFromAPI) => number = (task) => task.priority
-): TaskFromAPI[] {
-  return [...tasks].sort((a, b) => {
-    const statusA = publicQueueStatusInfo(a, allTasks).rank;
-    const statusB = publicQueueStatusInfo(b, allTasks).rank;
-    const createdA = new Date(a.createdAt).getTime();
-    const createdB = new Date(b.createdAt).getTime();
-    return (
-      statusA - statusB ||
-      priorityOf(a) - priorityOf(b) ||
-      createdA - createdB
-    );
-  });
-}
-
-function publicQueueEscalationKey(task: TaskFromAPI): string | null {
-  if (!task.escalatedAt) return null;
-  return `${task.id}:${task.escalatedAt}:${task.priority}`;
-}
-
-function priorityTransitionLabel(task: TaskFromAPI | undefined): string {
-  if (!task?.escalatedAt) return "";
-  const from = task.escalatedFromPriority;
-  if (typeof from === "number" && Number.isFinite(from) && from > task.priority) {
-    return `P${from}→P${task.priority}`;
-  }
-  return "提权";
-}
-
-function publicQueueSeenStorageKey(profileId: string): string {
-  return `publicQueueEscalationSeen:v2:${profileId}`;
-}
-
-function publicQueueOrderStorageKey(profileId: string, buildingId: number | null): string {
-  return `publicQueueLastOrder:v2:${profileId}:${buildingId ?? "all"}`;
-}
-
-function readPublicQueueSeenEscalations(profileId: string): Set<string> {
-  try {
-    const parsed = JSON.parse(safeLocalStorageGet(publicQueueSeenStorageKey(profileId)) || "[]");
-    return new Set(Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === "string") : []);
-  } catch {
-    return new Set();
-  }
-}
-
-function writePublicQueueSeenEscalations(profileId: string, keys: string[]) {
-  if (keys.length === 0) return;
-  const seen = readPublicQueueSeenEscalations(profileId);
-  keys.forEach((key) => seen.add(key));
-  safeLocalStorageSet(publicQueueSeenStorageKey(profileId), JSON.stringify([...seen].slice(-300)));
-}
-
-function readPublicQueueLastOrder(profileId: string, buildingId: number | null): string[] {
-  try {
-    const parsed = JSON.parse(safeLocalStorageGet(publicQueueOrderStorageKey(profileId, buildingId)) || "[]");
-    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === "string") : [];
-  } catch {
-    return [];
-  }
-}
-
-function writePublicQueueLastOrder(profileId: string, buildingId: number | null, ids: string[]) {
-  safeLocalStorageSet(publicQueueOrderStorageKey(profileId, buildingId), JSON.stringify(ids.slice(0, 80)));
-}
-
-function mergePublicQueueOrder(storedIds: string[], finalIds: string[]): string[] {
-  const finalSet = new Set(finalIds);
-  const ordered = storedIds.filter((id) => finalSet.has(id));
-  const orderedSet = new Set(ordered);
-  return [...ordered, ...finalIds.filter((id) => !orderedSet.has(id))];
-}
-
-function buildSyntheticBeforePromotionIds(finalIds: string[], promotedIds: string[]): string[] {
-  const ids = [...finalIds];
-  for (const id of promotedIds) {
-    const index = ids.indexOf(id);
-    if (index < 0 || index >= ids.length - 1) continue;
-    ids.splice(index, 1);
-    ids.splice(index + 1, 0, id);
-  }
-  return ids;
-}
-
 function taskAllowsCollaboration(task: TaskFromAPI | undefined, collaborationEnabled = true): boolean {
   return collaborationEnabled && task != null && task.status !== "completed" && taskCategoryAllowsCollaboration(task.category);
-}
-
-function isAssistantRole(role: string | undefined): boolean {
-  return role === "assistant" || role === "assistant_leader";
-}
-
-function profileServiceBuildingId(profile: { role: string; buildingId: number; activeBuildingId?: number | null }): number {
-  return isAssistantRole(profile.role) ? profile.activeBuildingId ?? profile.buildingId : profile.buildingId;
-}
-
-function profileServiceRoom(profile: { role: string; currentRoom: string | null; activeRoom?: string | null }): string | null {
-  return isAssistantRole(profile.role) ? profile.activeRoom ?? null : profile.currentRoom;
 }
 
 function taskListUrlForProfile(profile: { id: string; role: string }): string {
@@ -991,19 +272,6 @@ function visibleTasksForProfile(
     return raw.filter((task) => taskLocationBuildingId(task) === activeBuildingId);
   }
   return raw;
-}
-
-function taskLocationBuildingId(task: TaskFromAPI | null | undefined): number | null {
-  return task?.locationBuildingId ?? task?.photographer?.buildingId ?? null;
-}
-
-function isPublicQueueTaskForBuilding(task: TaskFromAPI, buildingId: number | null): boolean {
-  return (
-    buildingId != null &&
-    taskLocationBuildingId(task) === buildingId &&
-    !isPhotographerLimitQueuedTask(task) &&
-    (task.status === "waiting" || task.status === "paused")
-  );
 }
 
 function getAutoTheme(): "light" | "dark" {
@@ -1028,488 +296,6 @@ function quickBookAssistantStatusText(assistant: DockAssistant): string {
 
 const glass =
   "bg-white/25 backdrop-blur-xl border border-white/30 shadow-lg shadow-black/[0.03]";
-
-// Style config per category name (static visual properties)
-const CAT_STYLES: Record<string, { bg: string; active: string; darkBg: string; darkActive: string; text: string; darkText: string }> = {
-  "手持": { bg: "bg-red-400/20", active: "bg-red-400/35", darkBg: "bg-red-500/25", darkActive: "bg-red-500/40", text: "text-red-700", darkText: "text-red-300" },
-  "服装穿戴": { bg: "bg-orange-400/20", active: "bg-orange-400/35", darkBg: "bg-orange-500/25", darkActive: "bg-orange-500/40", text: "text-orange-700", darkText: "text-orange-300" },
-  "手工DIY": { bg: "bg-amber-400/20", active: "bg-amber-400/35", darkBg: "bg-amber-500/25", darkActive: "bg-amber-500/40", text: "text-amber-700", darkText: "text-amber-300" },
-  "熨烫": { bg: "bg-emerald-400/20", active: "bg-emerald-400/35", darkBg: "bg-emerald-500/25", darkActive: "bg-emerald-500/40", text: "text-emerald-700", darkText: "text-emerald-300" },
-  "其他": { bg: "bg-blue-400/20", active: "bg-blue-400/35", darkBg: "bg-blue-500/25", darkActive: "bg-blue-500/40", text: "text-blue-700", darkText: "text-blue-300" },
-};
-const CAT_ORDER = ["手持", "服装穿戴", "手工DIY", "熨烫", "其他"];
-const CAT_SOLID_BG: Record<string, string> = {
-  "手持": "bg-red-400",
-  "服装穿戴": "bg-orange-400",
-  "手工DIY": "bg-amber-400",
-  "熨烫": "bg-emerald-400",
-  "其他": "bg-blue-400",
-};
-const CAT_SOLID_HEX: Record<string, string> = {
-  "手持": "#f87171",
-  "服装穿戴": "#fb923c",
-  "手工DIY": "#fbbf24",
-  "熨烫": "#34d399",
-  "其他": "#60a5fa",
-};
-const TASK_CATEGORY_GROUP: Record<string, string> = {
-  "短时手持": "手持", "手持": "手持",
-  "服装穿戴": "服装穿戴", "穿戴对角度": "服装穿戴",
-  "手工DIY协助": "手工DIY", "手工DIY制作": "手工DIY", "手工DIY": "手工DIY",
-  "短时熨烫": "熨烫", "长时熨烫": "熨烫", "熨烫": "熨烫",
-  "其他长时任务": "其他", "其他": "其他",
-};
-
-function taskTypeGroupName(name: string | null | undefined): string {
-  if (!name) return "其他";
-  return TASK_CATEGORY_GROUP[name] || "其他";
-}
-
-function isIroningTask(task: TaskFromAPI | null | undefined): boolean {
-  if (!task) return false;
-  const name = task.category?.name ?? "";
-  return taskTypeGroupName(name) === "熨烫" || name.includes("熨");
-}
-
-function isPassiveIroningWaitingTask(task: TaskFromAPI | null | undefined): boolean {
-  return !!task &&
-    isIroningTask(task) &&
-    task.status === "waiting" &&
-    task.ironingStage === "waiting_machine";
-}
-
-function isAssignedIroningReadyTask(task: TaskFromAPI | null | undefined, profileId?: string): boolean {
-  if (!task || !isIroningTask(task) || task.status !== "waiting") return false;
-  if (task.ironingStage === "waiting_machine") return false;
-  if (task.ironingStage === "notified") return true;
-  if (!profileId) return !!task.assistantId || activeTaskParticipants(task).length > 0;
-  return task.assistantId === profileId || !!taskParticipantForProfile(task, profileId);
-}
-
-function ironingQueueOrderMs(task: TaskFromAPI): number {
-  const raw = task.ironingQueuedAt ?? task.ironingNotifiedAt ?? task.createdAt;
-  const ms = new Date(raw).getTime();
-  return Number.isFinite(ms) ? ms : 0;
-}
-
-function ironingQueueEstimateMinutes(task: TaskFromAPI): number {
-  return taskSlotCapMinutes(task.category) ?? task.category?.estDuration ?? 30;
-}
-
-function isMapDeferredIroningWaitingTask(task: TaskFromAPI | null | undefined): boolean {
-  return !!task &&
-    isIroningTask(task) &&
-    task.status === "waiting" &&
-    task.ironingStage === "waiting_machine";
-}
-
-function IroningMachineIcon({
-  tone = "idle",
-  className = "h-5 w-5",
-}: {
-  tone?: "busy" | "queue" | "moderate" | "idle" | "maintenance";
-  className?: string;
-}) {
-  const color = tone === "busy"
-    ? "#ef4444"
-    : tone === "queue"
-      ? "#ef4444"
-    : tone === "moderate"
-      ? "#f59e0b"
-      : tone === "maintenance"
-        ? "#94a3b8"
-        : "#22c55e";
-  const steamColor = tone === "busy"
-    ? "#fca5a5"
-    : tone === "queue"
-      ? "#fca5a5"
-    : tone === "moderate"
-      ? "#fdba74"
-      : tone === "maintenance"
-        ? "#cbd5e1"
-        : "#86efac";
-  return (
-    <svg className={className} viewBox="0 0 96 96" fill="none" aria-hidden="true">
-      <path d="M17 31c6-8-5-13 1-22" stroke={steamColor} strokeWidth="6" strokeLinecap="round" />
-      <path d="M30 31c6-8-5-13 1-22" stroke={steamColor} strokeWidth="6" strokeLinecap="round" />
-      <path d="M45 31h10" stroke={color} strokeWidth="7" strokeLinecap="round" />
-      <path d="M20 70h59v9H18c-4 0-7-3-7-7 0-21 16-38 38-38h29c8 0 13 5 14 12l3 17c1 4-2 7-6 7H20Z" stroke={color} strokeWidth="6" strokeLinecap="round" strokeLinejoin="round" />
-      <path d="M50 48h19c4 0 7 3 8 7l1 6H40c1-8 5-13 10-13Z" stroke={color} strokeWidth="6" strokeLinecap="round" strokeLinejoin="round" />
-      <path d="M11 62h69" stroke={color} strokeWidth="5" strokeLinecap="round" />
-      <path d="M48 64h.1M59 64h.1M70 64h.1" stroke={steamColor} strokeWidth="6" strokeLinecap="round" />
-    </svg>
-  );
-}
-
-function queueTaskTypeShortLabel(name: string | null | undefined): string {
-  const groupName = taskTypeGroupName(name);
-  if (groupName === "服装穿戴") return "穿戴";
-  if (groupName === "手工DIY") return "手工";
-  return groupName;
-}
-
-function polarPoint(cx: number, cy: number, radius: number, angleDeg: number) {
-  const angle = ((angleDeg - 90) * Math.PI) / 180;
-  return {
-    x: cx + radius * Math.cos(angle),
-    y: cy + radius * Math.sin(angle),
-  };
-}
-
-const PRIORITY_CLS: Record<number, string> = {
-  1: "bg-red-500 text-white",
-  2: "bg-orange-500 text-white",
-  3: "bg-amber-500 text-white",
-  4: "bg-blue-500 text-white",
-  5: "bg-gray-500 text-white",
-};
-
-function buildDurationLabel(min: number, max: number): string {
-  if (min > 0 && max > 0) return `${min}-${max}分钟`;
-  if (max > 0) return `${max}分钟以内`;
-  if (min > 0) return `${min}分钟以上`;
-  return "未设置";
-}
-
-/** 与快捷预约按钮一致：优先类别 min/max 时段，否则退回 estDuration */
-function categoryDurationSlotLabel(
-  cat: { minDuration?: number; maxDuration?: number; estDuration?: number } | undefined
-): string {
-  if (!cat) return "—";
-  const min = cat.minDuration;
-  const max = cat.maxDuration;
-  if (typeof min === "number" && typeof max === "number" && (min > 0 || max > 0)) {
-    return buildDurationLabel(min, max);
-  }
-  if (typeof cat.estDuration === "number" && cat.estDuration > 0) return fmtMin(cat.estDuration);
-  return "—";
-}
-
-/** 统计明细等：月/日 + 时:分（本地） */
-function formatTaskDetailDateTime(iso: string): string {
-  const d = new Date(iso);
-  if (!Number.isFinite(d.getTime())) return "—";
-  return `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
-}
-
-function statsWeekStart(weekOffset = 0, base = new Date()): Date {
-  const dow = base.getDay();
-  const mondayOffset = dow === 0 ? -6 : 1 - dow;
-  return new Date(base.getFullYear(), base.getMonth(), base.getDate() + mondayOffset + weekOffset * 7);
-}
-
-function statsDayDate(weekOffset: number, dayIndex: number, base = new Date()): Date {
-  const monday = statsWeekStart(weekOffset, base);
-  return new Date(monday.getFullYear(), monday.getMonth(), monday.getDate() + dayIndex);
-}
-
-function formatStatsDateLabel(date: Date): string {
-  return `${date.getFullYear()}/${String(date.getMonth() + 1).padStart(2, "0")}/${String(date.getDate()).padStart(2, "0")}`;
-}
-
-type DbCategory = { id: number; name: string; priorityLevel: number; minDuration: number; maxDuration: number };
-type BuiltCategory = {
-  name: string;
-  bg: string; active: string; darkBg: string; darkActive: string; text: string; darkText: string;
-  durations: { label: string; priority: string; cls: string; categoryId: number }[];
-};
-
-function buildCategories(dbCats: DbCategory[]): BuiltCategory[] {
-  const result: BuiltCategory[] = [];
-  for (const catName of CAT_ORDER) {
-    const style = CAT_STYLES[catName];
-    if (!style) continue;
-    const items = dbCats
-      .filter((c) => c.name === catName)
-      .sort((a, b) => a.priorityLevel - b.priorityLevel);
-    if (items.length === 0) continue;
-    result.push({
-      name: catName,
-      ...style,
-      durations: items.map((c) => ({
-        label: buildDurationLabel(c.minDuration, c.maxDuration),
-        priority: `P${c.priorityLevel}`,
-        cls: PRIORITY_CLS[c.priorityLevel] || PRIORITY_CLS[5],
-        categoryId: c.id,
-      })),
-    });
-  }
-  return result;
-}
-
-const PRIORITY_DUR: Record<number, string> = { 1: "1-5分钟", 2: "5-20分钟", 3: "30分钟以内", 4: "30-60分钟", 5: "1小时以上" };
-
-/** 与快捷预约按钮一致：优先用任务类型的 min/max，避免 P 档固定文案与后台配置不一致 */
-function taskCategoryDurationCaption(
-  category: { minDuration?: number; maxDuration?: number; estDuration?: number } | undefined,
-  priority: number
-): string {
-  const min = category?.minDuration;
-  const max = category?.maxDuration;
-  if (typeof min === "number" && typeof max === "number" && (min > 0 || max > 0)) {
-    return buildDurationLabel(min, max);
-  }
-  const est = category?.estDuration;
-  if (typeof est === "number" && est > 0) return fmtMin(est);
-  return PRIORITY_DUR[priority] || "";
-}
-
-/** 地图 tooltip 首行：超时显示「已超时X」，否则「已进行X」 */
-function formatMapTaskElapsedLine(task: TaskFromAPI, nowMs: number): string | null {
-  if (task.status !== "executing" && task.status !== "paused") return null;
-  const elapsed = effectiveWorkMinutesFromApi(task, nowMs);
-  const cap = taskSlotCapMinutes(task.category);
-  if (cap != null && elapsed > cap) return `已超时${fmtMin(elapsed - cap)}`;
-  if (elapsed > 0) return `已进行${fmtMin(elapsed)}`;
-  return null;
-}
-
-/* ============ Dock-style draggable building tabs ============ */
-type DockEntry = [number, { name: string; profiles: { id: string }[] }];
-
-function DockBuildingTabs({
-  entries,
-  activeBld,
-  onSelect,
-  onReorder,
-}: {
-  entries: DockEntry[];
-  activeBld: number | null;
-  onSelect: (id: number) => void;
-  onReorder: (order: number[]) => void;
-}) {
-  const itemRefs = useRef<Map<number, HTMLButtonElement>>(new Map());
-  const [drag, setDrag] = useState<{
-    id: number;
-    startX: number;
-    currentX: number;
-    pointerId: number;
-  } | null>(null);
-  // visualOrder: the logical order items should appear in (indices into entries)
-  const [visualOrder, setVisualOrder] = useState<number[]>(() => entries.map(([id]) => id));
-  const dragRef = useRef(drag);
-  const visualOrderRef = useRef(visualOrder);
-  const suppressClickRef = useRef(false);
-  // snapshot of each item's left edge at drag start (keyed by id)
-  const startRectsRef = useRef<Map<number, { left: number; width: number }>>(new Map());
-  const [startRects, setStartRects] = useState<Map<number, { left: number; width: number }>>(new Map());
-  // whether we're in the "settling" phase right after drop
-  const [settling, setSettling] = useState(false);
-  const settleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  // Cleanup settle timer on unmount
-  useEffect(() => () => { if (settleTimerRef.current) clearTimeout(settleTimerRef.current); }, []);
-
-  // Keep refs in sync (avoid writing refs during render)
-  useEffect(() => {
-    dragRef.current = drag;
-  }, [drag]);
-  useEffect(() => {
-    visualOrderRef.current = visualOrder;
-  }, [visualOrder]);
-
-  // Sync when entries change from parent
-  useEffect(() => {
-    setVisualOrder(entries.map(([id]) => id));
-  }, [entries]);
-
-  // Snapshot positions at drag start
-  const snapshotPositions = useCallback(() => {
-    const m = new Map<number, { left: number; width: number }>();
-    for (const [id] of entries) {
-      const el = itemRefs.current.get(id);
-      if (el) {
-        const r = el.getBoundingClientRect();
-        m.set(id, { left: r.left, width: r.width });
-      }
-    }
-    startRectsRef.current = m;
-    setStartRects(m);
-  }, [entries]);
-
-  const handlePointerDown = useCallback((e: React.PointerEvent, id: number) => {
-    const el = itemRefs.current.get(id);
-    if (!el) return;
-    el.setPointerCapture(e.pointerId);
-    snapshotPositions();
-    setDrag({ id, startX: e.clientX, currentX: e.clientX, pointerId: e.pointerId });
-    setVisualOrder(visualOrderRef.current);
-    setSettling(false);
-  }, [snapshotPositions]);
-
-  const handlePointerMove = useCallback((e: React.PointerEvent) => {
-    const d = dragRef.current;
-    if (!d) return;
-    const newX = e.clientX;
-    setDrag((prev) => prev ? { ...prev, currentX: newX } : prev);
-
-    // Where is the dragged item's center now?
-    const dragEl = itemRefs.current.get(d.id);
-    if (!dragEl) return;
-    const startRect = startRectsRef.current.get(d.id);
-    if (!startRect) return;
-    const dx = newX - d.startX;
-    const draggedCenter = startRect.left + startRect.width / 2 + dx;
-
-    // Compute new visual order based on dragged center vs other items' resting centers
-    const currentOrder = visualOrderRef.current;
-    const ids = entries.map(([id]) => id);
-
-    // Compute "resting" center for each slot in visual order
-    // We need to know: if items were laid out in visualOrder, what center would each slot have?
-    // Use the snapshot widths + gap(8px)
-    const gap = 8;
-    const slotPositions: { id: number; center: number }[] = [];
-    let x = startRectsRef.current.get(currentOrder[0])?.left ?? 0;
-    // Recalculate from the leftmost item's original position
-    const firstOrigLeft = Math.min(...Array.from(startRectsRef.current.values()).map((r) => r.left));
-    x = firstOrigLeft;
-    for (const slotId of currentOrder) {
-      const w = startRectsRef.current.get(slotId)?.width ?? 60;
-      slotPositions.push({ id: slotId, center: x + w / 2 });
-      x += w + gap;
-    }
-
-    // Remove dragged, find where to insert based on draggedCenter
-    const others = currentOrder.filter((id) => id !== d.id);
-    const otherSlots = slotPositions.filter((s) => s.id !== d.id);
-
-    let insertIdx = others.length;
-    for (let i = 0; i < otherSlots.length; i++) {
-      if (draggedCenter < otherSlots[i].center) {
-        insertIdx = i;
-        break;
-      }
-    }
-
-    const newOrder = [...others];
-    newOrder.splice(insertIdx, 0, d.id);
-
-    // Only update if changed
-    if (newOrder.some((id, i) => currentOrder[i] !== id)) {
-      setVisualOrder(newOrder);
-    }
-  }, [entries]);
-
-  const handlePointerUp = useCallback(() => {
-    const d = dragRef.current;
-    if (!d) return;
-    const wasDragged = Math.abs(d.currentX - d.startX) > 3;
-    // Start settling animation
-    setSettling(true);
-    setDrag(null);
-    // Commit order after settle animation
-    const finalOrder = [...visualOrderRef.current];
-    settleTimerRef.current = setTimeout(() => {
-      startRectsRef.current = new Map();
-      setStartRects(new Map());
-      onReorder(finalOrder);
-      setSettling(false);
-    }, 320);
-    if (wasDragged) {
-      suppressClickRef.current = true;
-      setTimeout(() => { suppressClickRef.current = false; }, 100);
-    }
-  }, [onReorder]);
-
-  // Compute translateX for each item based on visual order vs DOM order
-  // DOM order = entries order (fixed), visual order = where they should appear
-  const gap = 8;
-  const entryIds = entries.map(([id]) => id);
-
-  // Build slot X positions based on visual order
-  const slotLefts: number[] = [];
-  let xAccum = 0;
-  for (const id of visualOrder) {
-    slotLefts.push(xAccum);
-    const w = startRects.get(id)?.width ?? 0;
-    xAccum += w + gap;
-  }
-
-  // Build DOM-order X positions
-  const domLefts: number[] = [];
-  let xAccum2 = 0;
-  for (const id of entryIds) {
-    domLefts.push(xAccum2);
-    const w = startRects.get(id)?.width ?? 0;
-    xAccum2 += w + gap;
-  }
-
-  // For each item: find its slot index in visualOrder, compute offset from its DOM position
-  const offsets = new Map<number, number>();
-  for (let domIdx = 0; domIdx < entryIds.length; domIdx++) {
-    const id = entryIds[domIdx];
-    const slotIdx = visualOrder.indexOf(id);
-    if (slotIdx !== -1 && startRects.size > 0) {
-      offsets.set(id, slotLefts[slotIdx] - domLefts[domIdx]);
-    } else {
-      offsets.set(id, 0);
-    }
-  }
-
-  const isDragging = drag !== null;
-
-  return (
-    <div
-      className="px-5 pb-3 flex items-center gap-2 relative"
-      onPointerMove={handlePointerMove}
-      onPointerUp={handlePointerUp}
-      style={{ touchAction: "none" }}
-    >
-      {/* Render in DOM (entries) order — always fixed */}
-      {entries.map(([bId, data]) => {
-        const isThisDragging = drag?.id === bId;
-        const isActive = activeBld === bId;
-        const offset = offsets.get(bId) ?? 0;
-
-        let style: React.CSSProperties;
-        if (isThisDragging && drag) {
-          // Dragged item: follow cursor directly, no transition
-          const dx = drag.currentX - drag.startX;
-          style = {
-            transform: `translateX(${dx}px) scale(1.06)`,
-            zIndex: 50,
-            boxShadow: "0 10px 30px rgba(0,0,0,0.18), 0 2px 8px rgba(0,0,0,0.1)",
-            transition: "box-shadow 0.15s ease, transform 0s",
-            cursor: "grabbing",
-          };
-        } else if (isDragging || settling) {
-          // Other items: smooth slide to their visual slot
-          style = {
-            transform: offset ? `translateX(${offset}px)` : "none",
-            transition: "transform 0.32s cubic-bezier(.2,1,.3,1)",
-            cursor: "grab",
-            zIndex: 1,
-          };
-        } else {
-          // Idle
-          style = {
-            transform: "none",
-            transition: "none",
-            cursor: "grab",
-          };
-        }
-
-        return (
-          <button
-            key={bId}
-            ref={(el) => { if (el) itemRefs.current.set(bId, el); }}
-            onPointerDown={(e) => handlePointerDown(e, bId)}
-            onClick={() => { if (!suppressClickRef.current) onSelect(bId); }}
-            className={`relative select-none rounded-2xl border px-3.5 py-2 text-[11px] font-extrabold shadow-sm backdrop-blur-xl transition-colors ${
-              isActive
-                ? "border-orange-300/80 bg-orange-500/95 text-white shadow-orange-300/40"
-                : "border-white/70 bg-white/38 text-[--text-secondary] hover:bg-white/62 hover:text-[--text-primary]"
-            }`}
-            style={style}
-          >
-            {data.name} <span className={`ml-0.5 ${isActive ? "text-white/80" : "text-[--text-muted]"}`}>{data.profiles.length}人</span>
-          </button>
-        );
-      })}
-    </div>
-  );
-}
 
 export default function PhotographerPage() {
   const [hoveredCat, setHoveredCat] = useState<string | null>(null);
@@ -1593,6 +379,21 @@ export default function PhotographerPage() {
   const [areaCompletedStatsSelectedDay, setAreaCompletedStatsSelectedDay] = useState<number | null>(null);
   const [areaCompletedStatsWeekOffset, setAreaCompletedStatsWeekOffset] = useState(0);
   const [publisherFeedbackSavingId, setPublisherFeedbackSavingId] = useState<string | null>(null);
+  const [priorityUpgradeTask, setPriorityUpgradeTask] = useState<TaskFromAPI | null>(null);
+  const [priorityUpgradeSku, setPriorityUpgradeSku] = useState("");
+  const [priorityUpgradeReason, setPriorityUpgradeReason] = useState("");
+  const [priorityUpgradeSaving, setPriorityUpgradeSaving] = useState(false);
+  const [priorityUpgradeError, setPriorityUpgradeError] = useState<string | null>(null);
+  const [ironingPreferenceConfirmTask, setIroningPreferenceConfirmTask] = useState<TaskFromAPI | null>(null);
+  const [completionRegistrationTask, setCompletionRegistrationTask] = useState<TaskFromAPI | null>(null);
+  const [completionRegistrationSku, setCompletionRegistrationSku] = useState("");
+  const [completionRegistrationReasonType, setCompletionRegistrationReasonType] = useState<CompletionRegistrationReasonType | "">("");
+  const [completionRegistrationDescription, setCompletionRegistrationDescription] = useState("");
+  const [completionRegistrationExistingImages, setCompletionRegistrationExistingImages] = useState<string[]>([]);
+  const [completionRegistrationFiles, setCompletionRegistrationFiles] = useState<File[]>([]);
+  const [completionRegistrationFilePreviewUrls, setCompletionRegistrationFilePreviewUrls] = useState<string[]>([]);
+  const [completionRegistrationSaving, setCompletionRegistrationSaving] = useState(false);
+  const [completionRegistrationError, setCompletionRegistrationError] = useState<string | null>(null);
   const statsScrollRef = useRef<HTMLDivElement>(null);
   const [weeklyTasks, setWeeklyTasks] = useState<TaskFromAPI[]>([]);
   const [areaCompletedWeeklyTasks, setAreaCompletedWeeklyTasks] = useState<TaskFromAPI[]>([]);
@@ -1603,6 +404,7 @@ export default function PhotographerPage() {
   const [eatingReentryCooldownMin, setEatingReentryCooldownMin] = useState(DEFAULT_EATING_REENTRY_COOLDOWN_MIN);
   const [workbenchPageBackground, setWorkbenchPageBackground] = useState("");
   const [photographerMaxActiveTasks, setPhotographerMaxActiveTasks] = useState(1);
+  const [priorityUpgradeConfig, setPriorityUpgradeConfig] = useState<Record<string, { value: string; label: string | null }>>({});
   const [collaborationEnabledByBuilding, setCollaborationEnabledByBuilding] = useState<Record<number, boolean>>({});
   const [collaborationMaxByBuilding, setCollaborationMaxByBuilding] = useState<Record<number, number>>({});
   const [collaborationQueueAutoCloseLimit, setCollaborationQueueAutoCloseLimit] = useState(10);
@@ -2097,6 +899,14 @@ export default function PhotographerPage() {
     }, 3500);
   }, []);
 
+  useEffect(() => {
+    const urls = completionRegistrationFiles.map((file) => URL.createObjectURL(file));
+    setCompletionRegistrationFilePreviewUrls(urls);
+    return () => {
+      urls.forEach((url) => URL.revokeObjectURL(url));
+    };
+  }, [completionRegistrationFiles]);
+
   const refreshReassignmentNotices = useCallback(async (assistantId: string) => {
     try {
       const response = await fetch(`/api/reassignment-notices?assistantId=${assistantId}`, { cache: "no-store" });
@@ -2108,6 +918,75 @@ export default function PhotographerPage() {
       setReassignmentNotices([]);
     }
   }, []);
+
+  const applyTaskDataForProfile = useCallback((
+    taskData: TaskFromAPI[],
+    targetProfile: { id: string; role: string; buildingId: number },
+    targetBuildingId = targetProfile.buildingId,
+  ) => {
+    const raw = visibleTasksForProfile(taskData, targetProfile, targetBuildingId);
+    const assistantView = isAssistantRole(targetProfile.role);
+    setTaskListRaw(raw);
+    setTasks(sortTasksByStatus(raw.map((t) => apiTaskToDisplay(t, assistantView ? targetProfile.id : undefined))));
+    if (assistantView) {
+      setAssistantRawTasks(raw);
+      const { current: active, paused, pending, deferredWaiting } = resolveAssistantTasks(raw, targetProfile.id);
+      setCurrentRawTask(active);
+      setPausedRawTask(paused);
+      setPendingRawTask(pending);
+      setDeferredWaitingRawTask(deferredWaiting);
+    } else {
+      setAssistantRawTasks([]);
+      setDeferredWaitingRawTask(null);
+      setCurrentRawTask(null);
+      setPausedRawTask(null);
+      setPendingRawTask(null);
+    }
+  }, []);
+
+  const applyOptimisticAssistantTaskStatus = useCallback((task: TaskFromAPI, action: "start" | "complete") => {
+    if (!profile || !isAssistantRole(profile.role)) return;
+    const nowIso = new Date().toISOString();
+    const nextStatus = action === "start" ? "executing" : "completed";
+    const nextTask: TaskFromAPI = {
+      ...task,
+      assistantId: profile.id,
+      assistant: task.assistant ?? { id: profile.id, name: profile.name, currentRoom: profile.currentRoom },
+      status: nextStatus,
+      startedAt: action === "start" ? task.startedAt ?? nowIso : task.startedAt,
+      completedAt: action === "complete" ? nowIso : task.completedAt,
+      pausedAt: null,
+      workSegmentStartedAt: action === "start" ? nowIso : null,
+      ironingStage: action === "start" && isIroningTask(task) ? "using" : task.ironingStage,
+      collaborators: task.collaborators?.map((participant) =>
+        participant.assistantId === profile.id
+          ? {
+            ...participant,
+            status: nextStatus,
+            startedAt: action === "start" ? participant.startedAt ?? nowIso : participant.startedAt,
+            completedAt: action === "complete" ? nowIso : participant.completedAt,
+            workSegmentStartedAt: action === "start" ? nowIso : null,
+          }
+          : participant
+      ),
+    };
+    const mergeTask = (list: TaskFromAPI[]) => {
+      const exists = list.some((item) => item.id === nextTask.id);
+      return exists
+        ? list.map((item) => item.id === nextTask.id ? { ...item, ...nextTask } : item)
+        : [nextTask, ...list];
+    };
+    const nextTaskList = mergeTask(taskListRaw);
+    const nextAssistantTasks = mergeTask(assistantRawTasks.length > 0 ? assistantRawTasks : taskListRaw);
+    setTaskListRaw(nextTaskList);
+    setAssistantRawTasks(nextAssistantTasks);
+    setTasks(sortTasksByStatus(nextTaskList.map((t) => apiTaskToDisplay(t, profile.id))));
+    const { current: active, paused, pending, deferredWaiting } = resolveAssistantTasks(nextAssistantTasks, profile.id);
+    setCurrentRawTask(active);
+    setPausedRawTask(paused);
+    setPendingRawTask(pending);
+    setDeferredWaitingRawTask(deferredWaiting);
+  }, [assistantRawTasks, profile, taskListRaw]);
 
   const applyWorkbenchProfile = useCallback((selected: typeof allProfiles[0]) => {
     originalRoomRef.current = selected.currentRoom;
@@ -2142,27 +1021,11 @@ export default function PhotographerPage() {
       .then((r) => r.json())
       .then((taskData) => {
         if (Array.isArray(taskData)) {
-          const raw = visibleTasksForProfile(taskData as TaskFromAPI[], selectedForWorkbench, selectedServiceBuildingId);
-          setTaskListRaw(raw);
-          setTasks(sortTasksByStatus(raw.map((t) => apiTaskToDisplay(t, isAssistantRole(selectedForWorkbench.role) ? selectedForWorkbench.id : undefined))));
-          if (isAssistantRole(selectedForWorkbench.role)) {
-            setAssistantRawTasks(raw);
-            const { current: active, paused, pending, deferredWaiting } = resolveAssistantTasks(raw, selectedForWorkbench.id);
-            setCurrentRawTask(active);
-            setPausedRawTask(paused);
-            setPendingRawTask(pending);
-            setDeferredWaitingRawTask(deferredWaiting);
-          } else {
-            setAssistantRawTasks([]);
-            setDeferredWaitingRawTask(null);
-            setCurrentRawTask(null);
-            setPausedRawTask(null);
-            setPendingRawTask(null);
-          }
+          applyTaskDataForProfile(taskData as TaskFromAPI[], selectedForWorkbench, selectedServiceBuildingId);
         }
       })
       .catch(console.error);
-  }, [refreshReassignmentNotices]);
+  }, [applyTaskDataForProfile, refreshReassignmentNotices]);
 
   // Map pan & zoom state
   const mapContainerRef = useRef<HTMLDivElement>(null);
@@ -2922,19 +1785,7 @@ export default function PhotographerPage() {
             setReassignmentNotices([]);
           }
           if (Array.isArray(taskData)) {
-            const raw = visibleTasksForProfile(taskData as TaskFromAPI[], pollingProfile, activeBuildingId ?? pollingProfile.buildingId);
-            setTaskListRaw(raw);
-            setTasks(sortTasksByStatus(raw.map((t) => apiTaskToDisplay(t, isAssistantRole(pollingProfile.role) ? pollingProfile.id : undefined))));
-            if (isAssistantRole(pollingProfile.role)) {
-              setAssistantRawTasks(raw);
-              const { current: active, paused, pending, deferredWaiting } = resolveAssistantTasks(raw, pollingProfile.id);
-              setCurrentRawTask(active);
-              setPausedRawTask(paused);
-              setPendingRawTask(pending);
-              setDeferredWaitingRawTask(deferredWaiting);
-            } else {
-              setAssistantRawTasks([]);
-            }
+            applyTaskDataForProfile(taskData as TaskFromAPI[], pollingProfile, activeBuildingId ?? pollingProfile.buildingId);
           }
         })
         .catch(console.error)
@@ -2947,7 +1798,7 @@ export default function PhotographerPage() {
       cancelled = true;
       clearInterval(timer);
     };
-  }, [activeBuildingId, pollingProfile, refreshAssistants]);
+  }, [activeBuildingId, applyTaskDataForProfile, pollingProfile, refreshAssistants]);
 
   // Map pan handlers
   const handleMapPanDown = useCallback(
@@ -3188,6 +2039,7 @@ export default function PhotographerPage() {
         setPhotographerMaxActiveTasks(
           parsePhotographerMaxActiveTasks(cfg?.[PHOTOGRAPHER_MAX_ACTIVE_TASKS_CONFIG_KEY]?.value)
         );
+        setPriorityUpgradeConfig(cfg && typeof cfg === "object" ? cfg : {});
         setCollaborationQueueAutoCloseLimit(
           parseCollaborationQueueAutoCloseLimit(cfg?.[COLLABORATION_QUEUE_AUTO_CLOSE_LIMIT_CONFIG_KEY]?.value)
         );
@@ -3800,6 +2652,213 @@ export default function PhotographerPage() {
     }
   }, [publisherFeedbackSavingId]);
 
+  const pendingPriorityUpgradeForTask = useCallback((task: TaskFromAPI | null | undefined) => (
+    task?.priorityUpgradeRequests?.find((request) => request.status === "pending") ?? null
+  ), []);
+
+  const canRequestPriorityUpgrade = useCallback((task: TaskFromAPI | null | undefined) => (
+    !!task &&
+    profile?.role === "photographer" &&
+    task.photographerId === profile.id &&
+    task.priority > 1 &&
+    priorityUpgradeRequestRuleForBuilding(
+      priorityUpgradeConfig,
+      task.locationBuildingId ?? task.photographer?.buildingId
+    ).enabled &&
+    canPriorityRequestByConfig(
+      task.priority,
+      priorityUpgradeRequestRuleForBuilding(
+        priorityUpgradeConfig,
+        task.locationBuildingId ?? task.photographer?.buildingId
+      ).minPriority
+    ) &&
+    task.status !== "executing" &&
+    task.status !== "completed" &&
+    !pendingPriorityUpgradeForTask(task)
+  ), [pendingPriorityUpgradeForTask, priorityUpgradeConfig, profile?.id, profile?.role]);
+
+  const openPriorityUpgradeModal = useCallback((task: TaskFromAPI) => {
+    setPriorityUpgradeTask(task);
+    setPriorityUpgradeSku("");
+    setPriorityUpgradeReason("");
+    setPriorityUpgradeError(null);
+  }, []);
+
+  const closePriorityUpgradeModal = useCallback(() => {
+    if (priorityUpgradeSaving) return;
+    setPriorityUpgradeTask(null);
+    setPriorityUpgradeSku("");
+    setPriorityUpgradeReason("");
+    setPriorityUpgradeError(null);
+  }, [priorityUpgradeSaving]);
+
+  const handleSubmitPriorityUpgrade = useCallback(async () => {
+    if (!profile || !priorityUpgradeTask || priorityUpgradeSaving) return;
+    const sku = priorityUpgradeSku.trim();
+    const reason = priorityUpgradeReason.trim();
+    if (!sku) {
+      setPriorityUpgradeError("请填写 SKU");
+      return;
+    }
+    if (!reason) {
+      setPriorityUpgradeError("请填写提权申请理由");
+      return;
+    }
+    setPriorityUpgradeSaving(true);
+    setPriorityUpgradeError(null);
+    try {
+      const response = await fetch(`/api/tasks/${priorityUpgradeTask.id}/priority-upgrade`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ requesterId: profile.id, sku, reason }),
+      });
+      const data = await response.json().catch(() => null) as {
+        id?: string;
+        status?: "pending" | "approved" | "rejected";
+        fromPriority?: number;
+        targetPriority?: number;
+        reason?: string;
+        createdAt?: string;
+        error?: string;
+        code?: string;
+      } | null;
+      if (!response.ok || !data?.id) {
+        const errorMessage =
+          data?.code === "SKU_REQUIRED" ? "请填写 SKU" :
+          data?.code === "PRIORITY_UPGRADE_DISABLED" ? "提权申请入口已关闭" :
+          data?.code === "PRIORITY_UPGRADE_BUILDING_NOT_ALLOWED" ? "当前任务楼座不在提权开放范围内" :
+          data?.error ?? "提权申请提交失败";
+        throw new Error(errorMessage);
+      }
+      const pendingRequest = {
+        id: data.id,
+        status: data.status ?? "pending",
+        fromPriority: data.fromPriority ?? priorityUpgradeTask.priority,
+        targetPriority: data.targetPriority ?? 1,
+        reason: data.reason ?? reason,
+        createdAt: data.createdAt ?? new Date().toISOString(),
+      };
+      const markPending = (task: TaskFromAPI): TaskFromAPI =>
+        task.id === priorityUpgradeTask.id
+          ? { ...task, priorityUpgradeRequests: [pendingRequest] }
+          : task;
+      setTaskListRaw((prev) => prev.map(markPending));
+      setWeeklyTasks((prev) => prev.map(markPending));
+      setPublicQueueRaw((prev) => prev.map(markPending));
+      setAssistantRawTasks((prev) => prev.map(markPending));
+      setCurrentRawTask((prev) => prev?.id === priorityUpgradeTask.id ? markPending(prev) : prev);
+      setPausedRawTask((prev) => prev?.id === priorityUpgradeTask.id ? markPending(prev) : prev);
+      setPendingRawTask((prev) => prev?.id === priorityUpgradeTask.id ? markPending(prev) : prev);
+      setDeferredWaitingRawTask((prev) => prev?.id === priorityUpgradeTask.id ? markPending(prev) : prev);
+      setPriorityUpgradeTask(null);
+      setPriorityUpgradeSku("");
+      setPriorityUpgradeReason("");
+    } catch (error) {
+      setPriorityUpgradeError(error instanceof Error ? error.message : "提权申请提交失败");
+    } finally {
+      setPriorityUpgradeSaving(false);
+    }
+  }, [priorityUpgradeReason, priorityUpgradeSaving, priorityUpgradeSku, priorityUpgradeTask, profile]);
+
+  const openCompletionRegistrationModal = useCallback((task: TaskFromAPI) => {
+    const registration = task.completionRegistration;
+    setCompletionRegistrationTask(task);
+    setCompletionRegistrationSku(registration?.sku ?? "");
+    setCompletionRegistrationReasonType(
+      COMPLETION_REGISTRATION_REASON_OPTIONS.includes(registration?.reasonType as CompletionRegistrationReasonType)
+        ? registration?.reasonType as CompletionRegistrationReasonType
+        : ""
+    );
+    setCompletionRegistrationDescription((registration?.description ?? "").slice(0, 100));
+    setCompletionRegistrationExistingImages(completionRegistrationImageUrls(registration));
+    setCompletionRegistrationFiles([]);
+    setCompletionRegistrationError(null);
+  }, []);
+
+  const closeCompletionRegistrationModal = useCallback(() => {
+    setCompletionRegistrationTask(null);
+    setCompletionRegistrationSku("");
+    setCompletionRegistrationReasonType("");
+    setCompletionRegistrationDescription("");
+    setCompletionRegistrationExistingImages([]);
+    setCompletionRegistrationFiles([]);
+    setCompletionRegistrationError(null);
+  }, []);
+
+  const applyCompletionRegistration = useCallback((taskId: string, registration: TaskCompletionRegistration) => {
+    const updateTask = (task: TaskFromAPI): TaskFromAPI =>
+      task.id === taskId ? { ...task, completionRegistration: registration } : task;
+    setTaskListRaw((prev) => prev.map(updateTask));
+    setAssistantRawTasks((prev) => prev.map(updateTask));
+    setWeeklyTasks((prev) => prev.map(updateTask));
+    setAreaCompletedWeeklyTasks((prev) => prev.map(updateTask));
+    setPublicQueueRaw((prev) => prev.map(updateTask));
+    setCurrentRawTask((prev) => prev?.id === taskId ? updateTask(prev) : prev);
+    setPausedRawTask((prev) => prev?.id === taskId ? updateTask(prev) : prev);
+    setPendingRawTask((prev) => prev?.id === taskId ? updateTask(prev) : prev);
+    setDeferredWaitingRawTask((prev) => prev?.id === taskId ? updateTask(prev) : prev);
+  }, []);
+
+  const handleCompletionRegistrationFiles = useCallback((files: FileList | null) => {
+    if (!files) return;
+    const nextFiles = Array.from(files);
+    setCompletionRegistrationFiles((prev) => [...prev, ...nextFiles]);
+    setCompletionRegistrationError(null);
+  }, []);
+
+  const handleSubmitCompletionRegistration = useCallback(async () => {
+    if (!profile?.id || !completionRegistrationTask || completionRegistrationSaving) return;
+    const sku = completionRegistrationSku.trim();
+    if (!sku) {
+      setCompletionRegistrationError("请填写 SKU");
+      return;
+    }
+    if (!completionRegistrationReasonType) {
+      setCompletionRegistrationError("请选择异常原因");
+      return;
+    }
+    setCompletionRegistrationSaving(true);
+    setCompletionRegistrationError(null);
+    try {
+      const formData = new FormData();
+      formData.append("assistantId", profile.id);
+      formData.append("sku", sku);
+      formData.append("reasonType", completionRegistrationReasonType);
+      formData.append("description", completionRegistrationDescription.trim());
+      for (const imageUrl of completionRegistrationExistingImages) {
+        formData.append("existingImageUrls", imageUrl);
+      }
+      for (const file of completionRegistrationFiles) {
+        formData.append("images", file);
+      }
+      const response = await fetch(`/api/tasks/${completionRegistrationTask.id}/completion-registration`, {
+        method: "POST",
+        body: formData,
+      });
+      const data = await response.json().catch(() => null) as (TaskCompletionRegistration & { error?: string }) | null;
+      if (!response.ok || !data?.id) {
+        throw new Error(data?.error ?? "登记保存失败");
+      }
+      applyCompletionRegistration(completionRegistrationTask.id, data);
+      closeCompletionRegistrationModal();
+    } catch (error) {
+      setCompletionRegistrationError(error instanceof Error ? error.message : "登记保存失败");
+    } finally {
+      setCompletionRegistrationSaving(false);
+    }
+  }, [
+    applyCompletionRegistration,
+    closeCompletionRegistrationModal,
+    completionRegistrationDescription,
+    completionRegistrationExistingImages,
+    completionRegistrationFiles,
+    completionRegistrationReasonType,
+    completionRegistrationSaving,
+    completionRegistrationSku,
+    completionRegistrationTask,
+    profile?.id,
+  ]);
+
   const handleAcknowledgeReassignmentNotice = useCallback(async (
     notice: StandbyReassignmentNoticeFromAPI,
     action: "acknowledgeNew" | "acknowledgeOld"
@@ -4020,45 +3079,19 @@ export default function PhotographerPage() {
         }
         return;
       }
-      // 完成任务时，检查下一个待就位任务；顶部位置由任务/驻点派生，不再覆盖助理默认棚位
-      if (action === "complete" && profile) {
-        const taskRes = await fetch(`/api/tasks?assistantId=${profile.id}&todayOnly=true`);
-        const taskData = await taskRes.json();
-        if (Array.isArray(taskData)) {
-          const raw = taskData as TaskFromAPI[];
-          setTaskListRaw(raw);
-          setAssistantRawTasks(raw);
-          setTasks(sortTasksByStatus(raw.map((t) => apiTaskToDisplay(t, profile.id))));
-          const { current: next, paused, pending, deferredWaiting } = resolveAssistantTasks(raw, profile.id);
-          setCurrentRawTask(next);
-          setPausedRawTask(paused);
-          setPendingRawTask(pending);
-          setDeferredWaitingRawTask(deferredWaiting);
-        }
-        refreshAssistants();
-        return;
-      }
-      // 开始任务后：重新拉取任务
       if (profile) {
-        const taskRes = await fetch(`/api/tasks?assistantId=${profile.id}&todayOnly=true`);
+        applyOptimisticAssistantTaskStatus(task, action);
+        const taskRes = await fetch(taskListUrlForProfile(profile), { cache: "no-store" });
         const taskData = await taskRes.json();
         if (Array.isArray(taskData)) {
-          const raw = taskData as TaskFromAPI[];
-          setTaskListRaw(raw);
-          setAssistantRawTasks(raw);
-          setTasks(sortTasksByStatus(raw.map((t) => apiTaskToDisplay(t, profile.id))));
-          const { current: active, paused, pending, deferredWaiting } = resolveAssistantTasks(raw, profile.id);
-          setCurrentRawTask(active);
-          setPausedRawTask(paused);
-          setPendingRawTask(pending);
-          setDeferredWaitingRawTask(deferredWaiting);
+          applyTaskDataForProfile(taskData as TaskFromAPI[], profile, activeBuildingId ?? profile.buildingId);
         }
         refreshAssistants();
       }
     } catch (e) {
       console.error("Failed to update task status", e);
     }
-  }, [currentRawTask, profile, refreshAssistants, showTaskCreateError]);
+  }, [activeBuildingId, applyOptimisticAssistantTaskStatus, applyTaskDataForProfile, currentRawTask, profile, refreshAssistants, showTaskCreateError]);
 
   const handleResumePausedTask = useCallback(async (task: TaskFromAPI) => {
     if (manualPauseSlide) return;
@@ -5278,10 +4311,11 @@ export default function PhotographerPage() {
             : "";
 
   const mobileActionableWaitingTasks = isAssistantProfile && profile
-    ? actionableWaitingTasksForProfile(taskListRaw, profile.id).filter((task) =>
-        !isAssignedIroningReadyTask(task, profile.id) || freeIroningMachineCount > 0
-      )
+    ? assistantStartCandidateTasksForProfile(taskListRaw, areaTasks, profile.id, freeIroningMachineCount)
     : [];
+  const mobileRecommendedIroningTaskId = isAssistantProfile && profile && freeIroningMachineCount > 0
+    ? mobileActionableWaitingTasks.find((task) => isIroningTask(task))?.id ?? null
+    : null;
 
   const createMobileTask = useCallback(async (
     catName: string,
@@ -5373,51 +4407,101 @@ export default function PhotographerPage() {
   }, [activeBuilding, activeBuildingId, photographerMaxActiveTasks, profile, profileCurrentWorkbenchRoom, refreshAssistants, selectedQuickBookAssistant, selectedQuickBookAssistantCanSubmit, showTaskCreateError]);
 
   const mobileTaskStatusForProfile = useCallback((task: TaskFromAPI) => (
-    taskStatusForProfile(task, isAssistantProfile ? profile?.id : undefined) ?? task.status
+    deriveMobileTaskStatusForProfile(task, { isAssistantProfile, profileId: profile?.id })
   ), [isAssistantProfile, profile?.id]);
 
   const mobileTaskStatusMeta = useCallback((task: TaskFromAPI) => {
-    const status = mobileTaskStatusForProfile(task);
-    if (status === "executing") {
-      const over = overtimeMinutesBeyondSlot(
-        {
-          ...taskTimingForProfile(task, isAssistantProfile ? profile?.id : undefined),
-          status,
-          category: task.category,
-        },
-        now.getTime(),
-      );
-      return over != null
-        ? { label: `超时${fmtMin(over)}`, dot: DOCK_DOT.overtime, badge: "bg-red-100/80 text-red-600", panel: "bg-red-400/14" }
-        : { label: "进行中", dot: DOCK_DOT.inProgress, badge: "bg-orange-100/80 text-orange-600", panel: "bg-orange-400/16" };
-    }
-    if (status === "paused") return { label: "暂停中", dot: "#9ca3af", badge: "bg-gray-100/80 text-gray-600", panel: "bg-gray-400/14" };
-    if (status === "completed") return { label: "已完成", dot: DOCK_DOT.idle, badge: "bg-green-100/80 text-green-600", panel: "bg-green-400/12" };
-    if (isIroningTask(task) && task.ironingStage === "waiting_machine") {
-      return { label: "等待熨烫机", dot: "#10b981", badge: "bg-emerald-100/80 text-emerald-700", panel: "bg-emerald-400/12" };
-    }
-    if (isIroningTask(task) && task.ironingStage === "notified") {
-      return { label: "准备熨烫", dot: "#84cc16", badge: "bg-lime-100/80 text-lime-700", panel: "bg-lime-400/14" };
-    }
-    return { label: task.assistantId ? "待就位" : "队列中", dot: DOCK_DOT.assigned, badge: "bg-blue-100/80 text-blue-600", panel: "bg-blue-400/12" };
-  }, [isAssistantProfile, mobileTaskStatusForProfile, now, profile?.id]);
+    return deriveMobileTaskStatusMeta(task, {
+      isAssistantProfile,
+      profileId: profile?.id,
+      nowMs: now.getTime(),
+      dots: DOCK_DOT,
+    });
+  }, [isAssistantProfile, now, profile?.id]);
 
   const mobileTaskSubtitle = useCallback((task: TaskFromAPI) => {
-    const person = isAssistantProfile
-      ? task.photographer?.name ?? "摄影师"
-      : task.assistant?.name ?? "未分配助理";
-    return `${formatRoomOrVenue(task.roomNumber)} · ${person} · ${taskCategoryDurationCaption(task.category, task.priority)}`;
+    return deriveMobileTaskSubtitle(task, { isAssistantProfile });
   }, [isAssistantProfile]);
 
   const mobileTaskTimeLine = useCallback((task: TaskFromAPI) => {
-    const display = apiTaskToDisplay(task, isAssistantProfile ? profile?.id : undefined);
-    return taskListActualLine(display, task, now.getTime(), true, isAssistantProfile ? profile?.id : undefined);
+    return deriveMobileTaskTimeLine(task, {
+      isAssistantProfile,
+      profileId: profile?.id,
+      nowMs: now.getTime(),
+    });
   }, [isAssistantProfile, now, profile?.id]);
 
   const canCancelRawTask = useCallback((task: TaskFromAPI | null | undefined) => {
-    if (task == null || task.status !== "waiting" || task.parentTaskId != null) return false;
-    return !taskListRaw.some((item) => item.parentTaskId === task.id && item.status !== "completed");
+    return canCancelTaskFromWorkbench(task, taskListRaw);
   }, [taskListRaw]);
+
+  const renderEscalationBadge = useCallback((
+    task: TaskFromAPI | null | undefined,
+    options?: { className?: string; compact?: boolean }
+  ) => {
+    const label = priorityTransitionLabel(task ?? undefined);
+    if (!label) return null;
+    const approvedByReview = task?.priorityUpgradeRequests?.some((request) => request.status === "approved") ?? false;
+    return (
+      <span
+        title={approvedByReview ? "审批通过提权" : "已提权任务"}
+        className={`shrink-0 rounded-md bg-red-50 px-1.5 py-0.5 align-middle font-extrabold text-red-500 ring-1 ring-red-100 ${options?.compact ? "text-[8px]" : "text-[9px]"} ${options?.className ?? ""}`}
+      >
+        {label}
+      </span>
+    );
+  }, []);
+
+  const renderPriorityUpgradeControl = useCallback((task: TaskFromAPI | null | undefined, compact = false) => {
+    if (!task || profile?.role !== "photographer") return null;
+    const pendingRequest = pendingPriorityUpgradeForTask(task);
+    if (pendingRequest) {
+      return (
+        <span className={`inline-flex items-center justify-center rounded-lg bg-red-50 px-2 py-1 font-extrabold text-red-500 ${compact ? "text-[10px]" : "text-[9px]"}`}>
+          提权待审批
+        </span>
+      );
+    }
+    if (!canRequestPriorityUpgrade(task)) return null;
+    return (
+      <button
+        type="button"
+        className={`inline-flex items-center justify-center rounded-lg bg-red-500 font-extrabold text-white shadow-sm shadow-red-500/20 transition-colors hover:bg-red-600 active:scale-[0.98] ${compact ? "min-h-[36px] px-3 text-[12px]" : "h-5 px-2 text-[9px]"}`}
+        onClick={(event) => {
+          event.stopPropagation();
+          openPriorityUpgradeModal(task);
+        }}
+      >
+        申请提权
+      </button>
+    );
+  }, [canRequestPriorityUpgrade, openPriorityUpgradeModal, pendingPriorityUpgradeForTask, profile?.role]);
+
+  const canOpenCompletionRegistration = useCallback((task: TaskFromAPI | null | undefined) => {
+    if (!task || !profile || !isAssistantRole(profile.role)) return false;
+    return (taskStatusForProfile(task, profile.id) ?? task.status) === "completed";
+  }, [profile]);
+
+  const renderCompletionRegistrationControl = useCallback((task: TaskFromAPI | null | undefined, compact = false) => {
+    if (!task || !canOpenCompletionRegistration(task)) return null;
+    const registered = Boolean(task.completionRegistration);
+    return (
+      <button
+        type="button"
+        className={`inline-flex items-center justify-center rounded-lg font-extrabold transition-colors active:scale-[0.98] ${
+          registered
+            ? "bg-emerald-500/10 text-emerald-600 hover:bg-emerald-500/16"
+            : "bg-orange-500/10 text-orange-600 hover:bg-orange-500/16"
+        } ${compact ? "min-h-[34px] px-3 text-[12px]" : "h-5 px-2 text-[9px]"}`}
+        onClick={(event) => {
+          event.stopPropagation();
+          openCompletionRegistrationModal(task);
+        }}
+      >
+        {registered ? "查看登记" : "异常登记"}
+      </button>
+    );
+  }, [canOpenCompletionRegistration, openCompletionRegistrationModal]);
 
   const mobileIcon = useCallback((name: MobileWorkbenchTab | "admin" | "logout" | "stats" | "identity") => {
     const common = "h-5 w-5";
@@ -5463,95 +4547,61 @@ export default function PhotographerPage() {
     primaryAction?: "start" | "complete" | "resume" | null;
     showCancel?: boolean;
   }) => {
-    const meta = mobileTaskStatusMeta(task);
     const status = mobileTaskStatusForProfile(task);
     const timeLine = mobileTaskTimeLine(task);
-    const specifiedTask = Boolean(task.isSpecified);
     const specifiedName = task.specifiedAssistant?.name ?? (task.isSpecified ? task.assistant?.name ?? null : null);
     const primaryAction = options?.primaryAction ?? null;
+    const isStartableIroning = primaryAction === "start" && isIroningTask(task);
+    const meta = isStartableIroning
+      ? { ...mobileTaskStatusMeta(task), label: "准备熨烫", dot: "#84cc16", badge: "bg-lime-100/80 text-lime-700", panel: "bg-lime-400/14" }
+      : mobileTaskStatusMeta(task);
+    const subtitleHint = isStartableIroning && mobileRecommendedIroningTaskId === task.id
+      ? "机器空闲建议优先"
+      : null;
     const actionLabel =
       primaryAction === "complete"
         ? "完成任务"
         : primaryAction === "resume"
           ? "继续任务"
-          : primaryAction === "start"
-            ? isIroningTask(task) && task.ironingStage === "notified" ? "开始熨烫" : "开始任务"
-            : "";
+	            : primaryAction === "start"
+	            ? isIroningTask(task) ? "开始熨烫" : "开始任务"
+	            : "";
     const canStart = primaryAction === "start" && status === "waiting";
     const canComplete = primaryAction === "complete" && status === "executing";
     const canResume = primaryAction === "resume";
+    const priorityControl = renderPriorityUpgradeControl(task, true);
+    const completionControl = renderCompletionRegistrationControl(task, true);
+    const footerControls = priorityControl || completionControl
+      ? <div className="flex flex-wrap gap-2">{priorityControl}{completionControl}</div>
+      : null;
     return (
-      <div
+      <MobileTaskCard
         key={task.id}
-        className={`rounded-[20px] border p-4 backdrop-blur-2xl ${mobileGlassPanel} ${options?.compact ? "" : meta.panel}`}
-      >
-        <div className="flex items-start justify-between gap-3">
-          <div className="min-w-0">
-            <div className="flex min-w-0 items-center gap-2">
-              <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: meta.dot }} />
-              <h3 className="truncate text-[18px] font-extrabold leading-tight text-[--text-primary]">
-                {formatRoomOrVenue(task.roomNumber)} {task.category?.name ?? "任务"}
-              </h3>
-              {specifiedTask && (
-                <span
-                  className="shrink-0 rounded-md bg-orange-500/10 px-1.5 py-0.5 text-[9px] font-extrabold text-orange-500"
-                  title={specifiedName ? `指定 ${specifiedName}` : "指定助理"}
-                >
-                  指定
-                </span>
-              )}
-            </div>
-            <p className="mt-1 truncate text-[12px] font-semibold text-[--text-secondary]">{mobileTaskSubtitle(task)}</p>
-          </div>
-          <span className={`shrink-0 rounded-full px-2.5 py-1 text-[10px] font-extrabold ${meta.badge}`}>
-            {meta.label}
-          </span>
-        </div>
-        {timeLine && (
-          <p className="mt-3 text-[12px] font-bold text-[--text-muted]">{timeLine}</p>
-        )}
-        {!options?.compact && task.note?.trim() && (
-          <p className="mt-3 rounded-2xl bg-white/44 px-3 py-2 text-[11px] font-semibold leading-relaxed text-orange-600">
-            {task.note.trim()}
-          </p>
-        )}
-        {(primaryAction || options?.showCancel) && (
-          <div className="mt-4 flex gap-2">
-            {primaryAction && (
-              <button
-                type="button"
-                onClick={() => {
-                  if (canStart || canComplete) void handleAssistantStatusChange(primaryAction, task);
-                  if (canResume) void handleResumePausedTask(task);
-                }}
-                className="min-h-[44px] flex-1 rounded-2xl bg-orange-500 px-4 text-[14px] font-extrabold text-white shadow-lg shadow-orange-500/20 active:scale-[0.99]"
-              >
-                {actionLabel}
-              </button>
-            )}
-            {canComplete && (
-              <button
-                type="button"
-                onClick={handlePauseCurrentTask}
-                className="min-h-[44px] rounded-2xl bg-red-500/90 px-4 text-[13px] font-extrabold text-white shadow-lg shadow-red-500/15 active:scale-[0.99]"
-              >
-                短暂离开
-              </button>
-            )}
-            {options?.showCancel && (
-              <button
-                type="button"
-                onClick={() => handleCancelTask(task.id)}
-                className="min-h-[44px] rounded-2xl border border-red-200/80 bg-white/54 px-4 text-[13px] font-extrabold text-red-500 active:scale-[0.99]"
-              >
-                取消
-              </button>
-            )}
-          </div>
-        )}
-      </div>
+        task={task}
+        meta={meta}
+        title={task.category?.name ?? "任务"}
+        subtitle={mobileTaskSubtitle(task)}
+        timeLine={timeLine}
+        actionLabel={actionLabel}
+        glassPanelClassName={mobileGlassPanel}
+        compact={options?.compact}
+        featured={mobileRecommendedIroningTaskId === task.id && primaryAction === "start"}
+        note={task.note}
+        specifiedName={specifiedName}
+        subtitleHint={subtitleHint}
+        escalationBadge={renderEscalationBadge(task)}
+        footer={footerControls}
+        primaryAction={primaryAction}
+        showCancel={options?.showCancel}
+        onPrimaryAction={() => {
+          if (canStart || canComplete) void handleAssistantStatusChange(primaryAction, task);
+          if (canResume) void handleResumePausedTask(task);
+        }}
+        onPause={handlePauseCurrentTask}
+        onCancel={() => handleCancelTask(task.id)}
+      />
     );
-  }, [handleAssistantStatusChange, handleCancelTask, handlePauseCurrentTask, handleResumePausedTask, mobileGlassPanel, mobileTaskStatusForProfile, mobileTaskStatusMeta, mobileTaskSubtitle, mobileTaskTimeLine]);
+  }, [handleAssistantStatusChange, handleCancelTask, handlePauseCurrentTask, handleResumePausedTask, mobileGlassPanel, mobileRecommendedIroningTaskId, mobileTaskStatusForProfile, mobileTaskStatusMeta, mobileTaskSubtitle, mobileTaskTimeLine, renderCompletionRegistrationControl, renderEscalationBadge, renderPriorityUpgradeControl]);
 
   const renderMobileCurrentView = useCallback(() => {
     if (isAssistantProfile) {
@@ -5632,7 +4682,8 @@ export default function PhotographerPage() {
       if (currentRawTask) {
         const status = mobileTaskStatusForProfile(currentRawTask);
         const primaryAction = status === "executing" ? "complete" : status === "waiting" ? "start" : null;
-        return renderMobileTaskCard(currentRawTask, { primaryAction, showCancel: canCancelRawTask(currentRawTask) });
+        const currentCard = renderMobileTaskCard(currentRawTask, { primaryAction, showCancel: canCancelRawTask(currentRawTask) });
+        return currentCard;
       }
 
       if (pausedRawTask) {
@@ -5646,132 +4697,30 @@ export default function PhotographerPage() {
       const selectedCategory = categories.find((cat) => cat.name === mobileQuickBookCategory) ?? null;
       return (
         <div className="space-y-4">
-          <div className={`rounded-[24px] border p-4 backdrop-blur-2xl ${mobileGlassPanel}`}>
-            <div className="mb-3 flex items-center justify-between">
-              <div>
-                <h2 className="text-[17px] font-extrabold text-[--text-primary]">快捷发单</h2>
-                <p className="mt-1 text-[12px] font-semibold text-[--text-muted]">{workbenchLocationText}</p>
-              </div>
-              <button
-                type="button"
-                onClick={() => setMobileQuickBookAssistantPickerOpen((open) => !open)}
-                className={`flex min-h-[34px] max-w-[132px] items-center gap-1.5 rounded-full border px-2.5 text-[11px] font-extrabold ${
-                  selectedQuickBookAssistant
-                    ? selectedQuickBookAssistantCanSubmit
-                      ? "border-orange-300/70 bg-orange-500/12 text-orange-600"
-                      : "border-gray-300/70 bg-gray-400/12 text-gray-500"
-                    : resolvedTheme === "dark"
-                      ? "border-white/[0.12] bg-white/[0.07] text-orange-200"
-                      : "border-white/70 bg-white/60 text-orange-600"
-                }`}
-              >
-                {selectedQuickBookAssistant ? (
-                  <>
-                    <span className="flex h-5 w-5 shrink-0 items-center justify-center overflow-hidden rounded-full bg-orange-100 text-[9px] text-orange-600">
-                      {selectedQuickBookAssistant.avatar ? (
-                        <img src={selectedQuickBookAssistant.avatar} alt={selectedQuickBookAssistant.name} className="h-full w-full object-cover" />
-                      ) : selectedQuickBookAssistant.name.slice(0, 1)}
-                    </span>
-                    <span className="min-w-0 truncate">{selectedQuickBookAssistant.name}</span>
-                  </>
-                ) : (
-                  <span>指定助理</span>
-                )}
-              </button>
-            </div>
-            {selectedQuickBookAssistant && (
-              <div className={`mb-2 flex items-center justify-between rounded-2xl border px-3 py-2 ${
-                selectedQuickBookAssistantCanSubmit
-                  ? resolvedTheme === "dark" ? "border-orange-300/20 bg-orange-400/10" : "border-orange-200/70 bg-orange-50/80"
-                  : resolvedTheme === "dark" ? "border-white/[0.10] bg-white/[0.06]" : "border-gray-200/80 bg-gray-50/80"
-              }`}>
-                <span className={`min-w-0 truncate text-[12px] font-extrabold ${selectedQuickBookAssistantCanSubmit ? "text-orange-500" : "text-gray-500"}`}>
-                  本次指定：{selectedQuickBookAssistant.name}
-                </span>
-                <button
-                  type="button"
-                  onClick={() => setSpecifiedQuickBookAssistantId(null)}
-                  className="ml-2 shrink-0 rounded-full px-2 py-1 text-[11px] font-extrabold text-[--text-muted]"
-                >
-                  清除
-                </button>
-              </div>
-            )}
-            {mobileQuickBookAssistantPickerOpen && (
-              <div className={`mb-3 rounded-[20px] border p-2 ${mobileSoftPanel}`}>
-                {quickBookOnlineAssistants.length === 0 ? (
-                  <p className="rounded-2xl bg-white/32 px-3 py-4 text-center text-[12px] font-semibold text-[--text-muted]">当前区域暂无在线助理</p>
-                ) : (
-                  <div className="grid grid-cols-1 gap-1.5">
-                    {quickBookOnlineAssistants.map((assistant) => {
-                      const selectable = canSpecifyQuickBookAssistant(assistant);
-                      const selected = specifiedQuickBookAssistantId === assistant.id;
-                      return (
-                        <button
-                          type="button"
-                          key={`mobile-quick-assistant-${assistant.id}`}
-                          disabled={!selectable}
-                          onClick={() => {
-                            setSpecifiedQuickBookAssistantId(assistant.id);
-                            setMobileQuickBookAssistantPickerOpen(false);
-                          }}
-                          className={`flex min-h-[44px] items-center gap-2 rounded-2xl px-3 text-left ${
-                            selected
-                              ? "bg-orange-500 text-white"
-                              : selectable
-                                ? resolvedTheme === "dark" ? "bg-white/[0.07] text-slate-100" : "bg-white/58 text-slate-700"
-                                : resolvedTheme === "dark" ? "bg-white/[0.035] text-slate-500" : "bg-slate-100/70 text-slate-400"
-                          } disabled:opacity-70`}
-                        >
-                          <span className="relative flex h-8 w-8 shrink-0 items-center justify-center overflow-visible">
-                            <span className="flex h-8 w-8 items-center justify-center overflow-hidden rounded-full bg-slate-200 text-[12px] font-extrabold text-white">
-                              {assistant.avatar ? <img src={assistant.avatar} alt={assistant.name} className="h-full w-full object-cover" /> : assistant.name.slice(0, 1)}
-                            </span>
-                            <span className="absolute -bottom-0.5 -right-0.5 z-10 h-3 w-3 rounded-full ring-2 ring-white" style={{ backgroundColor: assistantDockDotColor(assistant) }} />
-                          </span>
-                          <span className="min-w-0 flex-1">
-                            <span className="block truncate text-[13px] font-extrabold">{assistant.name}</span>
-                            <span className={`block text-[10px] font-bold ${selected ? "text-white/75" : "text-[--text-muted]"}`}>{quickBookAssistantStatusText(assistant)}</span>
-                          </span>
-                        </button>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-            )}
-            <div className="grid grid-cols-2 gap-2">
-              {categories.map((cat) => (
-                <button
-                  type="button"
-                  key={cat.name}
-                  onClick={() => setMobileQuickBookCategory((current) => current === cat.name ? null : cat.name)}
-                  className={`min-h-[46px] rounded-2xl px-3 text-[14px] font-extrabold active:scale-[0.99] ${
-                    selectedCategory?.name === cat.name
-                      ? "bg-orange-500 text-white shadow-lg shadow-orange-500/20"
-                      : `${resolvedTheme === "dark" ? cat.darkBg : cat.bg} ${resolvedTheme === "dark" ? cat.darkText : cat.text}`
-                  }`}
-                >
-                  {cat.name}
-                </button>
-              ))}
-            </div>
-            {selectedCategory && (
-              <div className="mt-3 grid grid-cols-1 gap-2">
-                {selectedCategory.durations.map((dur) => (
-                  <button
-                    type="button"
-                    key={`${selectedCategory.name}-${dur.priority}`}
-                    onClick={() => void createMobileTask(selectedCategory.name, dur)}
-                    className="flex min-h-[44px] items-center justify-between rounded-2xl bg-white/60 px-4 text-[13px] font-extrabold text-[--text-primary] shadow-sm active:scale-[0.99]"
-                  >
-                    <span>{dur.label}</span>
-                    <span className={`rounded-lg px-2 py-1 text-[11px] ${dur.cls}`}>{dur.priority}</span>
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
+          <MobileQuickBookingPanel
+            categories={categories}
+            selectedCategory={selectedCategory}
+            selectedAssistant={selectedQuickBookAssistant}
+            selectedAssistantCanSubmit={selectedQuickBookAssistantCanSubmit}
+            selectedAssistantId={specifiedQuickBookAssistantId}
+            pickerOpen={mobileQuickBookAssistantPickerOpen}
+            onlineAssistants={quickBookOnlineAssistants}
+            workbenchLocationText={workbenchLocationText}
+            glassPanelClassName={mobileGlassPanel}
+            softPanelClassName={mobileSoftPanel}
+            isDark={resolvedTheme === "dark"}
+            onTogglePicker={() => setMobileQuickBookAssistantPickerOpen((open) => !open)}
+            onClearAssistant={() => setSpecifiedQuickBookAssistantId(null)}
+            onSelectAssistant={(assistantId) => {
+              setSpecifiedQuickBookAssistantId(assistantId);
+              setMobileQuickBookAssistantPickerOpen(false);
+            }}
+            onToggleCategory={(categoryName) => setMobileQuickBookCategory((current) => current === categoryName ? null : categoryName)}
+            onCreateTask={(categoryName, duration) => void createMobileTask(categoryName, duration)}
+            canSpecifyAssistant={canSpecifyQuickBookAssistant}
+            assistantStatusText={quickBookAssistantStatusText}
+            assistantDotColor={assistantDockDotColor}
+          />
           <div className={`rounded-[24px] border p-4 backdrop-blur-2xl ${mobileGlassPanel}`}>
             <div className="mb-3 flex items-center justify-between">
               <h2 className="text-[16px] font-extrabold text-[--text-primary]">当前发布任务</h2>
@@ -5835,6 +4784,7 @@ export default function PhotographerPage() {
     mobileIcon,
     mobileQuickBookCategory,
     mobileQuickBookAssistantPickerOpen,
+    mobileRecommendedIroningTaskId,
     mobileSoftPanel,
     mobileTaskStatusForProfile,
     pausedRawTask,
@@ -6300,7 +5250,7 @@ export default function PhotographerPage() {
               }}
             />
 	            <div
-		              className={`group/map-building pointer-events-auto absolute left-6 top-5 z-30 inline-flex w-[112px] items-center gap-2 rounded-full border px-3.5 py-2 text-[12px] font-bold ${
+		              className={`group/map-building pointer-events-auto absolute left-6 top-5 z-30 inline-flex w-max min-w-[112px] max-w-[calc(100%-3rem)] items-center gap-2 rounded-full border px-3.5 py-2 text-[12px] font-bold ${
 	              resolvedTheme === "dark"
 	                ? "border-white/[0.16] bg-slate-900/58 text-slate-100 shadow-black/25 shadow-sm"
 	                : "border-white/70 bg-white/92 text-slate-700 shadow-slate-300/40 shadow-sm"
@@ -6309,8 +5259,8 @@ export default function PhotographerPage() {
               onMouseLeave={mapBuildingOptions.length > 0 ? closeMapBuildingMenuSoon : undefined}
               onMouseDown={(e) => e.stopPropagation()}
 	            >
-	              <span className="h-2.5 w-2.5 rounded-full bg-blue-400 shadow-[0_0_0_5px_rgba(96,165,250,0.14)]" />
-	              <span className="min-w-0 truncate">{activeBuilding?.name ?? "加载中"}</span>
+	              <span className="h-2.5 w-2.5 shrink-0 rounded-full bg-blue-400 shadow-[0_0_0_5px_rgba(96,165,250,0.14)]" />
+	              <span className="whitespace-nowrap">{activeBuilding?.name ?? "加载中"}</span>
 	              {mapBuildingOptions.length > 0 && (
 	                <span className="ml-0.5 flex h-4 w-4 shrink-0 items-center justify-center text-[--text-muted]">
 	                  <svg
@@ -8553,17 +7503,16 @@ export default function PhotographerPage() {
                     return { ...taskTimingForProfile(task, profile?.id), status };
                   };
                   const actionableWaitingTasks = profile
-                    ? actionableWaitingTasksForProfile(taskListRaw, profile.id)
+                    ? assistantStartCandidateTasksForProfile(taskListRaw, areaTasks, profile.id, freeIroningMachineCount)
                     : [];
-                  const selectedActionableWaitingTasks = actionableWaitingTasks.filter((task) =>
-                    !isAssignedIroningReadyTask(task, profile?.id) ||
-                    freeIroningMachineCount > 0
-                  );
-                  const passiveIroningReadyTask = actionableWaitingTasks.find((task) =>
-                    isAssignedIroningReadyTask(task, profile?.id)
+	                  const selectedActionableWaitingTasks = actionableWaitingTasks;
+	                  const recommendedIroningTaskId = freeIroningMachineCount > 0
+	                    ? selectedActionableWaitingTasks.find((task) => isIroningTask(task))?.id ?? null
+	                    : null;
+	                  const passiveIroningReadyTask = actionableWaitingTasks.find((task) =>
+	                    isAssignedIroningReadyTask(task, profile?.id)
                   ) ?? null;
-
-                    const renderPausedBlock = (task: TaskFromAPI, flex: number, withResume = false) => {
+	                    const renderPausedBlock = (task: TaskFromAPI, flex: number, withResume = false) => {
                       const leaveSec = totalPausedSecondsFromApi(myTaskTiming(task), now.getTime());
                       const pauseSlideActive = manualPauseSlide?.taskId === task.id;
                       const pauseSlideCollapsed = pauseSlideActive && !manualPauseSlide.expanded;
@@ -8585,6 +7534,7 @@ export default function PhotographerPage() {
                                 <div className="min-w-0 min-h-0 w-[45%] h-[45%] max-w-[min(72%,1.55rem)] max-h-[min(72%,1.55rem)] rounded-full bg-gray-400" />
                               </div>
                               <span className="text-[17px] font-extrabold text-gray-600 leading-tight">暂停中/已离开</span>
+                              {renderEscalationBadge(task, { compact: true })}
                               {lineRoomPhotoCategory(task, "text-gray-500")}
                               {pixelHMSBlock(leaveSec, "text-gray-600")}
                             </div>
@@ -8611,6 +7561,7 @@ export default function PhotographerPage() {
                           <div className="min-w-0 min-h-0 w-[42%] h-[42%] max-w-[min(72%,1.1rem)] max-h-[min(72%,1.1rem)] rounded-full bg-gray-400" />
                         </div>
                         <span className="text-[13px] font-extrabold text-gray-500 text-center leading-tight">暂停中/已离开</span>
+                        {renderEscalationBadge(task, { compact: true })}
                         {lineRoomPhotoCategory(task, "text-gray-400")}
                         {pixelHMSBlock(leaveSec, "text-gray-500")}
                       </div>
@@ -8631,6 +7582,7 @@ export default function PhotographerPage() {
                           <div className="min-w-0 min-h-0 w-[42%] h-[42%] max-w-[min(72%,1.1rem)] max-h-[min(72%,1.1rem)] rounded-full bg-gray-400" />
                         </div>
                         <span className="text-[13px] font-extrabold text-gray-500 text-center leading-tight">已让行紧急单</span>
+                        {renderEscalationBadge(task, { compact: true })}
                         {lineRoomPhotoCategory(task, "text-gray-400")}
                         {pixelHMSBlock(waitSec, "text-gray-500")}
                       </div>
@@ -8655,6 +7607,7 @@ export default function PhotographerPage() {
                             <div className="min-w-0 min-h-0 w-[42%] h-[42%] max-w-[min(72%,1.1rem)] max-h-[min(72%,1.1rem)] rounded-full bg-orange-500 animate-pulse" />
                           </div>
                           <span className="text-[13px] font-extrabold text-orange-600">完成当前任务</span>
+                          {renderEscalationBadge(task, { compact: true })}
                           {lineRoomPhotoCategory(task, "text-orange-600/80")}
                           {pixelHMSBlock(effSec, "text-orange-600")}
                         </button>
@@ -8679,6 +7632,7 @@ export default function PhotographerPage() {
 	                        <div className="min-w-0 min-h-0 w-[42%] h-[42%] max-w-[min(72%,1.1rem)] max-h-[min(72%,1.1rem)] rounded-full bg-blue-400" />
 	                      </div>
 	                      <span className={`text-[13px] font-extrabold ${resolvedTheme === "dark" ? "text-blue-100" : "text-blue-600"}`}>待就位</span>
+	                      {renderEscalationBadge(task, { compact: true })}
 	                      {lineRoomPhotoCategory(task, resolvedTheme === "dark" ? "text-blue-100/85" : "text-blue-600/80")}
 	                      <p className={`text-[10px] text-center px-2 ${resolvedTheme === "dark" ? "text-blue-100/75" : "text-blue-600/70"}`}>
 	                        {taskCategoryDurationCaption(task.category, task.priority)}
@@ -8686,14 +7640,14 @@ export default function PhotographerPage() {
 	                    </div>
 	                  );
 
-                  const startActionLabel = (task: TaskFromAPI) =>
-                    isIroningTask(task) && task.ironingStage === "notified"
-                      ? "开始熨烫"
-                      : "开始任务";
+	                  const startActionLabel = (task: TaskFromAPI) =>
+	                    isIroningTask(task)
+	                      ? "开始熨烫"
+	                      : "开始任务";
 
 	                  const waitingActionTone = (task: TaskFromAPI) => {
 	                    const dark = resolvedTheme === "dark";
-	                    if (isIroningTask(task) && task.ironingStage === "notified") {
+		                    if (isIroningTask(task)) {
 	                      return dark
 	                        ? {
 	                          card: "border-lime-300/25 bg-lime-400/18 hover:bg-lime-400/26",
@@ -8731,14 +7685,29 @@ export default function PhotographerPage() {
 	                      };
 	                  };
 
-                  const renderWaitingChoiceBlock = (task: TaskFromAPI) => {
-                    const tone = waitingActionTone(task);
+	                  const handleWaitingChoiceStart = (task: TaskFromAPI) => {
+	                    const shouldConfirm =
+	                      recommendedIroningTaskId &&
+	                      task.id !== recommendedIroningTaskId &&
+	                      !isIroningTask(task) &&
+	                      !task.escalatedAt;
+	                    if (shouldConfirm) {
+	                      setIroningPreferenceConfirmTask(task);
+	                      return;
+	                    }
+	                    void handleAssistantStatusChange("start", task);
+	                  };
+
+	                  const renderWaitingChoiceBlock = (task: TaskFromAPI) => {
+		                    const tone = waitingActionTone(task);
+                    const showInlineIroningHint = recommendedIroningTaskId === task.id;
+                    const isRecommendedIroning = showInlineIroningHint && isIroningTask(task);
                     return (
                       <button
                         type="button"
                         key={task.id}
-                        onClick={() => handleAssistantStatusChange("start", task)}
-                        className={`flex h-full min-h-0 w-full flex-1 items-center gap-2 rounded-xl border px-2.5 py-2 text-left shadow-sm transition-all hover:translate-x-0.5 active:scale-[0.99] ${tone.card}`}
+                        onClick={() => handleWaitingChoiceStart(task)}
+	                        className={`flex min-h-0 w-full items-center gap-2 rounded-xl border px-2.5 py-2 text-left shadow-sm transition-all hover:translate-x-0.5 active:scale-[0.99] ${isRecommendedIroning ? "flex-[1.7]" : "flex-[0.82]"} ${tone.card}`}
                       >
                         <div className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full ${tone.dotWrap}`}>
                           <div className={`h-4 w-4 rounded-full ${tone.dot}`} />
@@ -8748,30 +7717,36 @@ export default function PhotographerPage() {
                             <span className={`truncate text-[14px] font-extrabold leading-tight ${tone.title}`}>
                               {startActionLabel(task)}
                             </span>
-                            <span className={`shrink-0 rounded-md px-1.5 py-0.5 text-[9px] font-extrabold ${tone.tag}`}>
-                              {isIroningTask(task) && task.ironingStage === "notified" ? "准备熨烫" : "待就位"}
-                            </span>
+                            <span className={`shrink-0 rounded-md px-1.5 py-0.5 text-[9px] font-extrabold leading-tight ${tone.tag}`}>
+                              <span className="block">
+                                {isIroningTask(task) ? "准备熨烫" : "待就位"}
+                              </span>
+	                            </span>
+                            {renderEscalationBadge(task, { compact: true })}
                           </div>
                           <p className={`mt-0.5 truncate text-[11px] font-semibold ${tone.meta}`}>
                             {task.roomNumber}室 · {task.photographer?.name ?? "—"} · {assistantCatName(task)}
                           </p>
-                          <p className={`mt-0.5 truncate text-[10px] ${tone.meta}`}>
-                            {taskCategoryDurationCaption(task.category, task.priority)}
-                          </p>
+	                          <p className={`mt-0.5 truncate text-[10px] ${tone.meta}`}>
+	                            {taskCategoryDurationCaption(task.category, task.priority)}
+                              {showInlineIroningHint && (
+                                <span className="ml-1 font-extrabold text-lime-600">机器空闲建议优先</span>
+                              )}
+	                          </p>
                         </div>
                       </button>
                     );
                   };
 
                   const renderWaitingChoices = (tasks: TaskFromAPI[]) => (
-                    <div className="flex-1 min-h-0 w-full rounded-xl bg-white/18 p-2">
+                    <div className="flex-1 min-h-0 w-full rounded-xl bg-white/18 p-2 flex flex-col">
                       <div className="mb-1.5 flex items-center justify-between gap-2 px-0.5">
                         <span className="text-[11px] font-extrabold text-[--text-primary]">选择要开始的任务</span>
                         <span className="rounded-md bg-white/55 px-1.5 py-0.5 text-[9px] font-extrabold text-[--text-muted]">
                           {tasks.length} 个可选
                         </span>
                       </div>
-                      <div className="flex h-[calc(100%-1.375rem)] min-h-0 flex-col gap-1.5">
+                      <div className="flex flex-1 min-h-0 flex-col gap-1.5">
                         {tasks.map(renderWaitingChoiceBlock)}
                       </div>
                     </div>
@@ -8789,6 +7764,7 @@ export default function PhotographerPage() {
                       <span className="text-[16px] font-extrabold text-emerald-700">
                         {task.ironingStage === "notified" ? "准备熨烫" : "等待熨烫机"}
                       </span>
+                      {renderEscalationBadge(task, { compact: true })}
                       {lineRoomPhotoCategory(task, "text-emerald-700/80")}
                       <p className="text-[11px] text-emerald-700/70 text-center px-2">
                         当前无空余熨烫机，只能开始做其他任务
@@ -8809,7 +7785,7 @@ export default function PhotographerPage() {
                     if (isPassiveIroningWaitingTask(task)) return renderPassiveIroningWaitingBlock(task, flex);
                     if (status === "paused") return renderPausedBlock(task, flex);
                     if (status === "waiting") {
-                      const readyIroning = isIroningTask(task) && task.ironingStage === "notified";
+                      const readyIroning = isIroningTask(task);
                       const tone = waitingActionTone(task);
                       return (
                         <button
@@ -8825,11 +7801,13 @@ export default function PhotographerPage() {
                           <span className={`text-[16px] font-extrabold ${tone.title}`}>
                             {readyIroning ? "点击开始熨烫" : "点击开始任务"}
                           </span>
-                          {lineRoomPhotoCategory(task, tone.meta)}
-                          <p className={`text-[11px] ${tone.meta} text-center px-2`}>
+                          {renderEscalationBadge(task, { compact: true })}
+	                          {lineRoomPhotoCategory(task, tone.meta)}
+	                          <p className={`text-[11px] ${tone.meta} text-center px-2`}>
                             {taskCategoryDurationCaption(task.category, task.priority)} · {readyIroning ? "准备熨烫" : "待就位"}
-                          </p>
-                        </button>
+                            {recommendedIroningTaskId === task.id ? " · 机器空闲建议优先" : ""}
+	                          </p>
+	                        </button>
                       );
                     }
                     if (status === "executing") {
@@ -8861,6 +7839,7 @@ export default function PhotographerPage() {
                                 <div className={`min-w-0 min-h-0 w-[45%] h-[45%] max-w-[min(72%,1.35rem)] max-h-[min(72%,1.35rem)] rounded-full ${dotColor} animate-pulse`} />
                             </div>
                             <span className={`text-[16px] font-extrabold ${textColor}`}>点击完成任务</span>
+                            {renderEscalationBadge(task, { compact: true })}
                             {lineRoomPhotoCategory(task, subColor)}
                             {pixelHMSBlock(effSec, textColor)}
                           </button>
@@ -8876,6 +7855,7 @@ export default function PhotographerPage() {
                                   <div className="min-w-0 min-h-0 w-[45%] h-[45%] max-w-[min(72%,1.55rem)] max-h-[min(72%,1.55rem)] rounded-full bg-gray-400" />
                                 </div>
                                 <span className="text-[17px] font-extrabold leading-tight">暂停中/已离开</span>
+                                {renderEscalationBadge(task, { compact: true })}
                                 {lineRoomPhotoCategory(task, "text-gray-500")}
                                 {pixelHMSBlock(pausePreviewSec, "text-gray-600")}
                               </div>
@@ -9346,6 +8326,8 @@ export default function PhotographerPage() {
                   const isPhotographerQueueTask = rawForTask != null && isPhotographerLimitQueuedTask(rawForTask);
                   const isCancellable = canCancelRawTask(rawForTask) || isPhotographerQueueTask;
                   const showCancel = isCancellable && hoveredTagId === task.id && !isRemoving;
+                  const canRegisterCompletion = canOpenCompletionRegistration(rawForTask);
+                  const showCompletionRegistration = canRegisterCompletion && hoveredTagId === task.id && !isRemoving;
                   const displayStatusLabel = taskStatusLabelForList(task, rawForTask, taskListRaw);
                   const showPausedWaitingDots =
                     !isAssistantRole(profile?.role) && task.statusLabel === "已暂停";
@@ -9358,6 +8340,10 @@ export default function PhotographerPage() {
                   const statusBadgeLabel = isCompletedCollaboration ? "多人协作完成" : displayStatusLabel;
                   const statusBadgeCls = showCancel
                     ? "bg-red-100/80 text-red-500 cursor-pointer hover:bg-red-200/80 scale-105"
+                    : showCompletionRegistration
+                      ? rawForTask?.completionRegistration
+                        ? "bg-emerald-100/80 text-emerald-600 cursor-pointer hover:bg-emerald-200/80 scale-105"
+                        : "bg-orange-100/80 text-orange-600 cursor-pointer hover:bg-orange-200/80 scale-105"
                     : isCompletedCollaboration
                       ? STATUS_STYLE.completed.tagCls
                       : task.tagCls;
@@ -9382,16 +8368,38 @@ export default function PhotographerPage() {
                     collaboratorCount > 0 &&
                     taskCategoryAllowsCollaboration(rawForTask.category);
                   const canOpenCollaboratorModal = canManageCollaborators || canEditExistingCollaborators;
+                  const showCollaboratorEntry = !isCompletedCollaboration && (canOpenCollaboratorModal || collaboratorCount > 0) && rawForTask;
+                  const collaboratorEntryButton = showCollaboratorEntry
+                    ? canOpenCollaboratorModal
+                      ? (
+                        <button
+                          type="button"
+                          className="ml-1.5 inline-flex h-5 shrink-0 items-center gap-0.5 whitespace-nowrap rounded-md border border-transparent bg-transparent pl-1 pr-1.5 text-[9px] font-semibold leading-[18px] text-slate-500 transition-colors hover:border-blue-200/80 hover:bg-blue-50/55 hover:text-blue-600"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            openCollaboratorModal(rawForTask);
+                          }}
+                        >
+                          {canManageCollaborators && <span className="leading-[20px]">+</span>}
+                          <span className="leading-[20px]">{collaboratorCount > 0 ? `协作 ${collaboratorCount}人` : "添加协作"}</span>
+                        </button>
+                      )
+                      : (
+                        <span className="ml-1.5 flex h-5 shrink-0 items-center whitespace-nowrap text-[9px] font-semibold leading-[20px] text-blue-500">
+                          协作 {collaboratorCount}人
+                        </span>
+                      )
+                    : null;
                   const isEndingSoon = task.statusLabel === "进行中" && task.estEndTime
                     ? (() => { const diff = (new Date(task.estEndTime).getTime() - Date.now()) / 60000; return diff > 0 && diff <= endingAlertMin; })()
                     : false;
-	                  const isExecutingOvertime =
-	                    task.statusLabel === "进行中" &&
-	                    rawForTask != null &&
-	                    overtimeMinutesBeyondSlot(rawForTask, now.getTime()) != null;
-	                  const isEscalatedTask = task.statusLabel !== "已完成" && Boolean(rawForTask?.escalatedAt);
-                    const escalationLabel = priorityTransitionLabel(rawForTask);
+                  const isExecutingOvertime =
+                    task.statusLabel === "进行中" &&
+                    rawForTask != null &&
+                    overtimeMinutesBeyondSlot(rawForTask, now.getTime()) != null;
                   const taskPriorityLevel = Math.min(5, Math.max(1, Math.round(Number(rawForTask?.priority ?? 5) || 5)));
+                  const pendingPriorityUpgrade = isAssistantRole(profile?.role) ? null : pendingPriorityUpgradeForTask(rawForTask);
+                  const canOpenPriorityUpgradeFromBadge = rawForTask != null && canRequestPriorityUpgrade(rawForTask);
                   const isSpecifiedTask = task.isSpecified || Boolean(rawForTask?.isSpecified);
                   const specifiedAssistantName =
                     task.specifiedAssistantName ??
@@ -9421,6 +8429,9 @@ export default function PhotographerPage() {
                           (e.currentTarget as HTMLElement).style.transform = "translateX(4px) scale(1.02)";
                           (e.currentTarget as HTMLElement).style.boxShadow = "0 4px 12px rgba(0,0,0,0.08)";
                         }
+                        if (isCancellable) {
+                          setHoveredTagId(task.id);
+                        }
                       }}
                       onMouseLeave={(e) => {
                         if (!isRemoving) {
@@ -9432,16 +8443,37 @@ export default function PhotographerPage() {
                     >
 	                      <div className="flex items-center justify-between gap-2">
 	                        <span className="flex min-w-0 items-center text-[12px] font-medium text-[--text-primary]">
-                            <span className={`mr-1.5 flex h-5 w-8 shrink-0 items-center justify-center rounded-lg text-[10px] font-extrabold shadow-sm ${publicQueuePriorityLevelCls(taskPriorityLevel)}`}>
-                              P{taskPriorityLevel}
-                            </span>
+                            {canOpenPriorityUpgradeFromBadge ? (
+                              <button
+                                type="button"
+                                title="申请提权"
+                                className={`group/priority-upgrade relative mr-1.5 flex h-5 w-8 shrink-0 items-center justify-center overflow-hidden rounded-lg text-[10px] font-extrabold shadow-sm transition-all duration-200 ease-out hover:w-[58px] hover:scale-105 hover:bg-red-500 hover:text-white active:scale-95 ${publicQueuePriorityLevelCls(taskPriorityLevel)}`}
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  openPriorityUpgradeModal(rawForTask);
+                                }}
+                              >
+                                <span className="transition-all duration-150 group-hover/priority-upgrade:-translate-x-1 group-hover/priority-upgrade:opacity-0">P{taskPriorityLevel}</span>
+                                <span className="absolute inset-0 flex items-center justify-center whitespace-nowrap text-[9px] opacity-0 transition-opacity duration-150 group-hover/priority-upgrade:opacity-100">
+                                  申请提权
+                                </span>
+                              </button>
+                            ) : (
+                              <span
+                                title={pendingPriorityUpgrade ? "提权待审批" : undefined}
+                                className={`group/priority-upgrade relative mr-1.5 flex h-5 w-8 shrink-0 items-center justify-center rounded-lg text-[10px] font-extrabold shadow-sm ${pendingPriorityUpgrade ? "ring-1 ring-red-300/70" : ""} ${publicQueuePriorityLevelCls(taskPriorityLevel)}`}
+                              >
+                                <span className={pendingPriorityUpgrade ? "transition-opacity group-hover/priority-upgrade:opacity-0" : ""}>P{taskPriorityLevel}</span>
+                                {pendingPriorityUpgrade && (
+                                  <span className="absolute inset-0 flex items-center justify-center text-[9px] text-red-500 opacity-0 transition-opacity group-hover/priority-upgrade:opacity-100">
+                                    待审
+                                  </span>
+                                )}
+                              </span>
+                            )}
 	                          <span className="min-w-0 truncate">{task.name}</span>
 	                          <span className="ml-1.5 shrink-0 text-[10px] font-normal text-[--text-muted]">{task.durationSlotLabel}</span>
-	                          {isEscalatedTask && (
-	                            <span className="ml-1.5 shrink-0 rounded bg-red-50 px-1 py-0.5 align-middle text-[8px] font-extrabold text-red-500">
-	                              {escalationLabel}
-	                            </span>
-	                          )}
+	                          {renderEscalationBadge(rawForTask, { compact: true, className: "ml-1.5" })}
 	                          {isEndingSoon && (
 	                            <span className="ml-1.5 shrink-0 rounded bg-red-100 px-1.5 py-0.5 text-[9px] font-bold text-red-500 animate-pulse">快结束</span>
 	                          )}
@@ -9450,17 +8482,22 @@ export default function PhotographerPage() {
                           className={`inline-flex shrink-0 items-center gap-1 text-[10px] leading-none font-bold px-1.5 py-1 rounded transition-all duration-150 ${
                             statusBadgeCls
                           }`}
-                          onMouseEnter={() => isCancellable && setHoveredTagId(task.id)}
+                          onMouseEnter={() => (isCancellable || canRegisterCompletion) && setHoveredTagId(task.id)}
                           onMouseLeave={() => setHoveredTagId(null)}
                           onClick={(e) => {
-                            if (showCancel) {
+                            if (isCancellable) {
                               e.stopPropagation();
                               handleCancelTask(task.id);
+                            } else if (showCompletionRegistration && rawForTask) {
+                              e.stopPropagation();
+                              openCompletionRegistrationModal(rawForTask);
                             }
                           }}
                         >
                           {showCancel ? (
                             "取消"
+                          ) : showCompletionRegistration ? (
+                            rawForTask?.completionRegistration ? "查看登记" : "添加登记"
                           ) : (
                             <>
                               {showPausedWaitingDots && (
@@ -9479,7 +8516,14 @@ export default function PhotographerPage() {
                         <span className="flex min-w-0 items-center text-[10px] leading-[14px] text-[--text-muted]">
                           <span className="shrink-0">{task.room}室</span>
                           {isAssistantRole(profile?.role) ? (
-                            task.photographerName ? <span className="truncate"> · {task.photographerName}</span> : null
+                            task.photographerName ? (
+                              <>
+                                <span className="truncate"> · {task.photographerName}</span>
+                                {collaboratorEntryButton}
+                              </>
+                            ) : (
+                              collaboratorEntryButton
+                            )
                           ) : isCompletedCollaboration ? (
                             <>
                               <span className="shrink-0">&nbsp;·&nbsp;</span>
@@ -9495,6 +8539,7 @@ export default function PhotographerPage() {
                           ) : (
                             <>
                               {task.assistantName ? <span className="truncate"> · {task.assistantName}</span> : null}
+                              {collaboratorEntryButton}
                               {isSpecifiedTask && (
                                 <span
                                   className="ml-1.5 shrink-0 rounded bg-orange-50 px-1 py-0.5 align-middle text-[8px] font-extrabold text-orange-500"
@@ -9528,23 +8573,8 @@ export default function PhotographerPage() {
                           ) : null;
                         })()}
                       </div>
-                      {!isCompletedCollaboration && (canOpenCollaboratorModal || collaboratorCount > 0) && rawForTask && (
+                      {showCollaboratorEntry && collaboratorCount > 0 && (
                         <div className="mt-1 flex h-5 min-w-0 items-center justify-between gap-2">
-                          {canOpenCollaboratorModal ? (
-                            <button
-                              type="button"
-	                              className="inline-flex h-5 shrink-0 items-center gap-0.5 whitespace-nowrap rounded-md bg-blue-50/70 pl-0 pr-1.5 text-[9px] font-semibold leading-[20px] text-blue-600 transition-colors hover:bg-blue-100"
-	                              onClick={(e) => {
-	                                e.stopPropagation();
-	                                openCollaboratorModal(rawForTask);
-	                              }}
-                            >
-                              {canManageCollaborators && <span className="leading-[20px]">+</span>}
-                              <span className="leading-[20px]">{collaboratorCount > 0 ? `协作 ${collaboratorCount}人` : "添加协作"}</span>
-                            </button>
-                          ) : (
-                            <span className="flex h-5 shrink-0 items-center whitespace-nowrap text-[9px] font-semibold leading-[20px] text-blue-500">协作 {collaboratorCount}人</span>
-                          )}
                           {collaboratorCount > 0 && (
                             <span
                               className="task-assignee-marquee-container flex h-5 flex-1 items-center text-[9px] leading-[20px] text-blue-500/70"
@@ -9878,6 +8908,27 @@ export default function PhotographerPage() {
               const roleLabel = (r: string) => r === "photographer" ? "摄影师" : r === "assistant" ? "助理" : r === "assistant_leader" ? "助理组长" : "管理";
               const roleColor = (r: string) => r === "photographer" ? "text-orange-600" : r === "assistant" ? "text-green-600" : r === "assistant_leader" ? "text-blue-600" : "text-purple-600";
               const roleBg = (r: string) => r === "photographer" ? "bg-orange-50" : r === "assistant" ? "bg-green-50" : r === "assistant_leader" ? "bg-blue-50" : "bg-purple-50";
+              const identityPresenceText = (state: AssistantPresenceState) => {
+                if (resolvedTheme !== "dark") return assistantPresenceMeta(state).textCls;
+                if (state === "online") return "text-emerald-300";
+                if (state === "eating") return "text-sky-300";
+                return "text-slate-200";
+              };
+              const identityPresenceButtonSurface = (state: AssistantPresenceState) => {
+                if (resolvedTheme !== "dark") return "border-white/70 bg-white/40";
+                if (state === "online") return "border-emerald-300/35 bg-emerald-400/16 shadow-emerald-950/20";
+                if (state === "eating") return "border-sky-300/35 bg-sky-400/16 shadow-sky-950/20";
+                return "border-slate-300/30 bg-slate-400/18 shadow-black/20";
+              };
+              const identityFloatingPanelCls = resolvedTheme === "dark"
+                ? "border-white/[0.16] bg-slate-900/92 shadow-2xl shadow-black/45"
+                : "border-white/70 bg-white/82 shadow-xl shadow-slate-300/30";
+              const identityFloatingButtonCls = resolvedTheme === "dark"
+                ? "border-white/[0.14] bg-white/[0.10] shadow-black/20 hover:bg-white/[0.16] disabled:opacity-55"
+                : "border-white/70 bg-white/54 shadow-sm hover:bg-white/80 disabled:opacity-60";
+              const identityLocationButtonCls = resolvedTheme === "dark"
+                ? "border-white/[0.18] bg-white/[0.12] text-slate-200 shadow-black/20 hover:border-white/[0.28] hover:bg-white/[0.18] hover:text-white"
+                : "border-white/70 bg-white/40 text-gray-500 shadow-sm hover:bg-white/66 hover:border-white";
 
               return (
                 <>
@@ -9964,7 +9015,7 @@ export default function PhotographerPage() {
                                         <button
                                           type="button"
                                           disabled={!isCurrent}
-                                          className={`flex h-6 items-center justify-center rounded-lg border border-white/70 bg-white/40 px-1.5 text-[9px] font-extrabold shadow-sm backdrop-blur-xl transition-colors disabled:cursor-not-allowed disabled:opacity-70 ${isCurrent ? "cursor-pointer hover:bg-white/66 hover:border-white" : ""} ${currentPresenceMeta.textCls}`}
+                                          className={`flex h-6 items-center justify-center rounded-lg border px-1.5 text-[9px] font-extrabold shadow-sm backdrop-blur-xl transition-colors disabled:cursor-not-allowed ${identityPresenceButtonSurface(currentPresence)} ${isCurrent ? resolvedTheme === "dark" ? "cursor-pointer hover:bg-white/[0.20] hover:border-white/30" : "cursor-pointer hover:bg-white/66 hover:border-white" : ""} ${identityPresenceText(currentPresence)}`}
                                           onPointerDown={(e) => {
                                             e.stopPropagation();
                                           }}
@@ -9986,7 +9037,7 @@ export default function PhotographerPage() {
                                           onMouseDown={(e) => e.stopPropagation()}
                                           onClick={(e) => e.stopPropagation()}
                                         >
-                                          <div className="flex flex-col items-center gap-1 rounded-2xl border border-white/70 bg-white/82 px-1.5 py-1.5 shadow-xl shadow-slate-300/30 backdrop-blur-2xl">
+                                          <div className={`flex flex-col items-center gap-1 rounded-2xl border px-1.5 py-1.5 backdrop-blur-2xl ${identityFloatingPanelCls}`}>
 	                                            {otherStatuses.map((s) => {
 	                                              const meta = assistantPresenceMeta(s);
 	                                              const reentryMinutes = s === "eating"
@@ -10019,16 +9070,16 @@ export default function PhotographerPage() {
                                                     setIdentityPresenceMenuId(null);
                                                     void updateAssistantPresenceStatus(p.id, s);
                                                   }}
-                                                  className={`relative flex h-7 min-w-[104px] items-center justify-between gap-1.5 rounded-xl border border-white/70 bg-white/54 px-2 text-[10px] font-extrabold whitespace-nowrap shadow-sm transition-colors hover:bg-white/80 disabled:cursor-not-allowed disabled:opacity-60 ${meta.textCls}`}
+                                                  className={`relative flex h-7 min-w-[104px] items-center justify-between gap-1.5 rounded-xl border px-2 text-[10px] font-extrabold whitespace-nowrap transition-colors disabled:cursor-not-allowed ${identityFloatingButtonCls} ${identityPresenceText(s)}`}
                                                 >
                                                   <span>{meta.label}</span>
 	                                                  {hintMinutes > 0 && (
-	                                                    <span className="pointer-events-none absolute left-[calc(100%+6px)] top-1/2 z-20 -translate-y-1/2 whitespace-nowrap rounded-md border border-orange-200 bg-white px-2 py-1 text-[8px] font-black leading-none text-orange-500 shadow-lg shadow-orange-200/40">
+	                                                    <span className={`pointer-events-none absolute left-[calc(100%+6px)] top-1/2 z-20 -translate-y-1/2 whitespace-nowrap rounded-md border px-2 py-1 text-[8px] font-black leading-none shadow-lg ${resolvedTheme === "dark" ? "border-orange-300/30 bg-slate-950/96 text-orange-300 shadow-black/35" : "border-orange-200 bg-white text-orange-500 shadow-orange-200/40"}`}>
 	                                                      短时间内无法再次切换吃饭中状态
 	                                                    </span>
 	                                                  )}
 	                                                  {statusLocked && (
-	                                                    <span className="pointer-events-none absolute left-[calc(100%+6px)] top-1/2 z-20 -translate-y-1/2 whitespace-nowrap rounded-md border border-gray-200 bg-white px-2 py-1 text-[8px] font-black leading-none text-gray-500 shadow-lg shadow-gray-200/60">
+	                                                    <span className={`pointer-events-none absolute left-[calc(100%+6px)] top-1/2 z-20 -translate-y-1/2 whitespace-nowrap rounded-md border px-2 py-1 text-[8px] font-black leading-none shadow-lg ${resolvedTheme === "dark" ? "border-white/[0.16] bg-slate-950/96 text-slate-300 shadow-black/35" : "border-gray-200 bg-white text-gray-500 shadow-gray-200/60"}`}>
 	                                                      只能变更当前身份的在线状态
 	                                                    </span>
 	                                                  )}
@@ -10042,23 +9093,23 @@ export default function PhotographerPage() {
                                       {/* 场地按钮 — 位置图标 */}
                                       <div className="relative group/bld">
                                         <div
-                                          className="flex h-6 w-6 cursor-pointer items-center justify-center rounded-lg border border-white/70 bg-white/40 shadow-sm backdrop-blur-xl transition-colors hover:bg-white/66 hover:border-white"
+                                          className={`flex h-6 w-6 cursor-pointer items-center justify-center rounded-lg border shadow-sm backdrop-blur-xl transition-colors ${identityLocationButtonCls}`}
                                           title={assistantServiceBuildingName}
                                         >
-                                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#6b7280" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                                             <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z" /><circle cx="12" cy="10" r="3" />
                                           </svg>
                                         </div>
                                         {/* hover 下拉 */}
                                         {otherBuildings.length > 0 && (
                                           <div className="absolute top-full right-0 pt-1 opacity-0 pointer-events-none group-hover/bld:opacity-100 group-hover/bld:pointer-events-auto transition-opacity z-10">
-                                            <div className="min-w-[92px] rounded-2xl border border-white/70 bg-white/84 py-1.5 shadow-xl shadow-slate-300/30 backdrop-blur-2xl">
-                                              <div className="px-2.5 py-1 text-[9px] font-bold text-gray-400 whitespace-nowrap">切换场地</div>
+                                            <div className={`min-w-[92px] rounded-2xl border py-1.5 backdrop-blur-2xl ${identityFloatingPanelCls}`}>
+                                              <div className={`px-2.5 py-1 text-[9px] font-bold whitespace-nowrap ${resolvedTheme === "dark" ? "text-slate-400" : "text-gray-400"}`}>切换场地</div>
                                               {otherBuildings.map((b) => (
                                                 <button
                                                   key={b.id}
                                                   onClick={(e) => { e.stopPropagation(); updateAssistantBuilding(p.id, b.id); }}
-                                                  className="flex w-full items-center gap-1.5 px-2.5 py-1.5 text-[10px] font-extrabold text-blue-600 transition-colors hover:bg-blue-50/80 whitespace-nowrap"
+                                                  className={`flex w-full items-center gap-1.5 px-2.5 py-1.5 text-[10px] font-extrabold transition-colors whitespace-nowrap ${resolvedTheme === "dark" ? "text-sky-300 hover:bg-white/[0.10]" : "text-blue-600 hover:bg-blue-50/80"}`}
                                                 >
                                                   <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                                                     <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z" /><circle cx="12" cy="10" r="3" />
@@ -10385,7 +9436,10 @@ export default function PhotographerPage() {
                                         </span>
                                       </td>
                                       <td className="px-3 py-3 align-middle">
-                                        <span className={`inline-block rounded-full px-2.5 py-1 text-[9px] font-extrabold whitespace-nowrap ${task.tagCls}`}>{task.statusLabel}</span>
+                                        <div className="flex items-center justify-center gap-1">
+                                          <span className={`inline-block rounded-full px-2.5 py-1 text-[9px] font-extrabold whitespace-nowrap ${task.tagCls}`}>{task.statusLabel}</span>
+                                          {renderEscalationBadge(rawTask, { compact: true })}
+                                        </div>
                                       </td>
                                     </tr>
                                   );
@@ -10741,7 +9795,10 @@ export default function PhotographerPage() {
                             </span>
                           </td>
                           <td className="px-3 py-3 align-middle">
-                            <span className={`inline-block rounded-full px-2.5 py-1 text-[9px] font-extrabold whitespace-nowrap ${t.tagCls}`}>{t.statusLabel}</span>
+                            <div className="flex items-center justify-center gap-1">
+                              <span className={`inline-block rounded-full px-2.5 py-1 text-[9px] font-extrabold whitespace-nowrap ${t.tagCls}`}>{t.statusLabel}</span>
+                              {renderEscalationBadge(selectedStatsRawTasks.find((x) => x.id === t.id), { compact: true })}
+                            </div>
                           </td>
                           <td className="px-3 py-3 align-middle">
                             <div className="flex items-center justify-center gap-1">
@@ -10822,6 +9879,357 @@ export default function PhotographerPage() {
         })()
       )}
 
+      {ironingPreferenceConfirmTask && (
+        <div
+          className="fixed inset-0 z-[220] flex items-center justify-center bg-black/30 px-4 backdrop-blur-sm"
+          onMouseDown={() => setIroningPreferenceConfirmTask(null)}
+        >
+          <div
+            className={`w-full max-w-sm rounded-3xl border p-5 text-center shadow-2xl ${resolvedTheme === "dark" ? "border-white/[0.16] bg-slate-950/92 shadow-black/50" : "border-white/75 bg-white/92 shadow-slate-300/40"}`}
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-2xl bg-lime-500/15 text-lime-600">
+              <span className="h-5 w-5 rounded-full bg-lime-500" />
+            </div>
+            <h3 className="mt-4 text-[17px] font-extrabold text-[--text-primary]">当前熨烫机空闲</h3>
+            <p className="mt-2 text-[12px] font-semibold leading-relaxed text-[--text-secondary]">
+              建议优先承接熨烫任务。你选择的是
+              <span className="mx-1 font-extrabold text-[--text-primary]">
+                {ironingPreferenceConfirmTask.roomNumber}室 · {ironingPreferenceConfirmTask.category?.name ?? "任务"}
+              </span>
+              ，确认先开始这个普通任务吗？
+            </p>
+            <div className="mt-5 flex gap-2">
+              <button
+                type="button"
+                onClick={() => setIroningPreferenceConfirmTask(null)}
+                className="min-h-[42px] flex-1 rounded-2xl bg-white/56 px-4 text-[13px] font-extrabold text-[--text-secondary] transition-colors hover:bg-white/80"
+              >
+                先不开始
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const task = ironingPreferenceConfirmTask;
+                  setIroningPreferenceConfirmTask(null);
+                  void handleAssistantStatusChange("start", task);
+                }}
+                className="min-h-[42px] flex-1 rounded-2xl bg-orange-500 px-4 text-[13px] font-extrabold text-white shadow-lg shadow-orange-500/20 transition-colors hover:bg-orange-600"
+              >
+                确认开始
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {completionRegistrationTask && (
+        <div
+          className="fixed inset-0 z-[220] flex items-center justify-center bg-black/35 px-4 backdrop-blur-sm"
+          onMouseDown={() => {
+            if (!completionRegistrationSaving) closeCompletionRegistrationModal();
+          }}
+        >
+          <div
+            className={`w-full max-w-lg rounded-3xl border p-5 shadow-2xl ${resolvedTheme === "dark" ? "border-white/[0.16] bg-slate-950/94 shadow-black/50" : "border-white/75 bg-white/94 shadow-slate-300/40"}`}
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <div className="flex items-start justify-between gap-3">
+	              <div>
+	                <h3 className="text-[17px] font-extrabold text-[--text-primary]">异常登记 / SKU 追踪</h3>
+	                <p className="mt-1 text-[12px] font-semibold text-[--text-muted]">
+		                  用于记录超时过长、耗时异常、摄影师其他反馈。
+	                </p>
+	              </div>
+              <button
+                type="button"
+                onClick={closeCompletionRegistrationModal}
+                disabled={completionRegistrationSaving}
+                className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl bg-white/50 text-[18px] font-bold text-[--text-muted] transition-colors hover:bg-white/80 disabled:opacity-50"
+                aria-label="关闭异常登记"
+              >
+                ×
+              </button>
+            </div>
+
+	            <div className="mt-4 flex min-h-[48px] items-center gap-2 overflow-hidden rounded-2xl bg-white/46 px-3 py-2 text-[12px] font-semibold leading-relaxed text-[--text-secondary]">
+	              <span className={`flex h-5 min-w-8 shrink-0 items-center justify-center rounded-lg px-2 text-[10px] font-extrabold shadow-sm ${publicQueuePriorityLevelCls(completionRegistrationTask.priority)}`}>
+	                P{completionRegistrationTask.priority}
+	              </span>
+	              <span className="min-w-0 truncate whitespace-nowrap">
+	                {formatRoomOrVenue(completionRegistrationTask.roomNumber)} · {completionRegistrationTask.photographer?.name ?? "摄影师"} · {completionRegistrationTask.category?.name ?? "任务"} · {taskCategoryDurationCaption(completionRegistrationTask.category, completionRegistrationTask.priority)}
+	              </span>
+	            </div>
+
+			            <div className="mt-4 grid gap-3 md:grid-cols-[0.84fr_1.16fr]">
+		              <div>
+		                <label className="block text-[12px] font-extrabold text-[--text-primary]">
+		                  完成 SKU <span className="text-red-500">*</span>
+	                </label>
+	                <input
+	                  value={completionRegistrationSku}
+	                  onChange={(event) => {
+	                    setCompletionRegistrationSku(event.target.value);
+	                    if (completionRegistrationError) setCompletionRegistrationError(null);
+	                  }}
+	                  maxLength={80}
+		                  className="mt-2 min-h-[48px] w-full rounded-2xl border border-orange-200/70 bg-white/72 px-3 text-[12px] font-semibold text-slate-700 outline-none transition placeholder:text-slate-400 focus:border-orange-300 focus:bg-white"
+		                  placeholder="输入SKU,例如HAP2456"
+			                />
+			              </div>
+	              <div>
+	                <label className="block text-[12px] font-extrabold text-[--text-primary]">
+	                  异常原因 <span className="text-red-500">*</span>
+	                </label>
+	                <div className="mt-2 grid grid-cols-3 gap-1.5">
+	                  {COMPLETION_REGISTRATION_REASON_OPTIONS.map((reason) => {
+	                    const selected = completionRegistrationReasonType === reason;
+	                    return (
+	                      <button
+	                        key={reason}
+	                        type="button"
+	                        onClick={() => {
+	                          setCompletionRegistrationReasonType(reason);
+	                          if (completionRegistrationError) setCompletionRegistrationError(null);
+	                        }}
+	                        className={`flex min-h-[48px] items-center justify-center rounded-2xl border px-2 text-[11px] font-extrabold transition-colors ${
+	                          selected
+	                            ? "border-orange-300 bg-orange-50 text-orange-600"
+	                            : "border-white/70 bg-white/56 text-[--text-secondary] hover:border-orange-200 hover:bg-orange-50/60 hover:text-orange-600"
+	                        }`}
+	                      >
+	                        <span className={`mr-1 flex h-3.5 w-3.5 items-center justify-center rounded-full border text-[9px] ${
+	                          selected ? "border-orange-500 bg-orange-500 text-white" : "border-slate-300 text-transparent"
+	                        }`}>
+	                          ✓
+	                        </span>
+	                        {reason}
+	                      </button>
+	                    );
+	                  })}
+	                </div>
+	              </div>
+		            </div>
+
+	            <div className="mt-4">
+	              <label className="block text-[12px] font-extrabold text-[--text-primary]">图片记录</label>
+              {(() => {
+                const previewItems = [
+                  ...completionRegistrationExistingImages.map((url, index) => ({ key: `existing-${url}`, url, existing: true, index })),
+                  ...completionRegistrationFilePreviewUrls.map((url, index) => ({ key: `file-${url}`, url, existing: false, index })),
+                ];
+			                const rotateCls = ["-rotate-6", "rotate-3", "-rotate-2"];
+		                const zCls = ["z-10", "z-20", "z-30"];
+		                return (
+			                  <div className="group/image-tray mt-2 flex min-h-[104px] items-center rounded-2xl border border-orange-100/80 bg-white/52 px-4 py-2 transition-all duration-300 hover:border-orange-200 hover:bg-white/68">
+			                    {previewItems.length > 0 ? (
+				                      <div className="scrollbar-none flex min-w-0 flex-1 items-center overflow-x-auto overflow-y-visible pb-3 pl-1 pr-8 pt-5">
+			                        {previewItems.map((item, index) => (
+			                          <div
+			                            key={item.key}
+			                            className={`group/card relative h-[70px] w-[56px] shrink-0 overflow-visible rounded-lg transition-all duration-300 ease-out group-hover/image-tray:-translate-y-1 group-hover/image-tray:rotate-0 hover:z-[80] hover:!-translate-y-2 hover:translate-x-2 hover:scale-110 ${zCls[index % zCls.length]} ${rotateCls[index % rotateCls.length]} ${index === 0 ? "" : "-ml-7 group-hover/image-tray:ml-2"}`}
+			                          >
+			                            <div className="h-full w-full overflow-hidden rounded-lg border border-white bg-white shadow-md shadow-slate-300/35 transition-shadow duration-300 group-hover/image-tray:shadow-lg group-hover/image-tray:shadow-orange-200/30">
+			                              <img src={item.url} alt="登记图片" className="h-full w-full object-cover" />
+			                            </div>
+			                            {index === previewItems.length - 1 && (
+			                              <label className="absolute -bottom-3 -right-3 z-[70] flex h-9 w-9 cursor-pointer items-center justify-center rounded-full border border-white/80 bg-white text-[24px] font-light leading-none text-slate-700 shadow-md shadow-slate-300/40 transition-all duration-300 hover:border-orange-300 hover:text-orange-500 group-hover/image-tray:scale-95 group-hover/image-tray:opacity-0 group-hover/image-tray:pointer-events-none">
+		                                +
+		                                <input
+		                                  type="file"
+		                                  accept="image/*"
+		                                  capture="environment"
+		                                  multiple
+		                                  className="hidden"
+		                                  onChange={(event) => {
+		                                    handleCompletionRegistrationFiles(event.currentTarget.files);
+		                                    event.currentTarget.value = "";
+		                                  }}
+		                                />
+		                              </label>
+		                            )}
+			                            <button
+			                              type="button"
+				                              className="absolute -right-1.5 -top-1.5 z-[120] flex h-5 w-5 items-center justify-center rounded-full bg-slate-900 text-[14px] font-bold leading-none text-white opacity-0 shadow-sm ring-1 ring-white/70 transition-opacity duration-150 group-hover/card:delay-500 group-hover/card:opacity-100"
+		                              onClick={() => {
+		                                if (item.existing) {
+                                  setCompletionRegistrationExistingImages((prev) => prev.filter((_, itemIndex) => itemIndex !== item.index));
+                                } else {
+                                  setCompletionRegistrationFiles((prev) => prev.filter((_, itemIndex) => itemIndex !== item.index));
+                                }
+                              }}
+                              aria-label="移除图片"
+                            >
+                              ×
+                            </button>
+                          </div>
+		                        ))}
+				                        {
+			                          <label className={`pointer-events-none relative mt-8 flex h-10 w-10 shrink-0 cursor-pointer items-center justify-center rounded-full border border-white/80 bg-white text-[26px] font-light text-slate-700 opacity-0 shadow-md shadow-slate-300/30 transition-all duration-300 hover:border-orange-300 hover:text-orange-500 group-hover/image-tray:pointer-events-auto group-hover/image-tray:mt-0 group-hover/image-tray:h-[70px] group-hover/image-tray:w-[58px] group-hover/image-tray:-translate-y-1 group-hover/image-tray:rounded-lg group-hover/image-tray:border-dashed group-hover/image-tray:border-slate-300 group-hover/image-tray:bg-white/70 group-hover/image-tray:text-slate-400 group-hover/image-tray:opacity-100 ${previewItems.length === 0 ? "" : "-ml-4 group-hover/image-tray:ml-3"}`}>
+	                            +
+	                            <input
+                              type="file"
+                              accept="image/*"
+                              capture="environment"
+                              multiple
+                              className="hidden"
+                              onChange={(event) => {
+                                handleCompletionRegistrationFiles(event.currentTarget.files);
+                                event.currentTarget.value = "";
+                              }}
+			                            />
+			                          </label>
+	                        }
+                      </div>
+                    ) : (
+                      <label className="flex min-h-[66px] w-full cursor-pointer items-center justify-center rounded-2xl border border-dashed border-orange-200 bg-orange-50/36 text-[12px] font-extrabold text-orange-600 transition-colors hover:bg-orange-50">
+                        <span className="mr-2 text-[20px] leading-none">+</span>
+                        拍摄或上传图片
+                        <input
+                          type="file"
+                          accept="image/*"
+                          capture="environment"
+                          multiple
+                          className="hidden"
+                          onChange={(event) => {
+                            handleCompletionRegistrationFiles(event.currentTarget.files);
+                            event.currentTarget.value = "";
+                          }}
+                        />
+                      </label>
+                    )}
+                  </div>
+                );
+              })()}
+            </div>
+
+	            <label className="mt-4 block text-[12px] font-extrabold text-[--text-primary]">补充说明</label>
+	            <div className="relative mt-2">
+	              <textarea
+	                value={completionRegistrationDescription}
+	                onChange={(event) => setCompletionRegistrationDescription(event.target.value)}
+	                rows={4}
+	                maxLength={100}
+	                className="min-h-[184px] w-full resize-none rounded-2xl border border-white/70 bg-white/70 px-3 py-3 pb-8 text-[13px] font-semibold leading-relaxed text-slate-700 outline-none transition focus:border-orange-200 focus:bg-white"
+	                placeholder="记录异常原因，例如 SKU 配件复杂、等待样衣、返工、超时较长等。"
+	              />
+	              <span className="pointer-events-none absolute bottom-3 right-4 text-[11px] font-semibold text-[--text-muted]">
+	                {completionRegistrationDescription.trim().length}/100
+	              </span>
+	            </div>
+	            <div className="mt-1 min-h-[16px] text-[11px] font-semibold text-red-500">
+	              {completionRegistrationError ?? ""}
+	            </div>
+
+            <div className="mt-5 flex gap-2">
+              <button
+                type="button"
+                onClick={closeCompletionRegistrationModal}
+                disabled={completionRegistrationSaving}
+                className="min-h-[42px] flex-1 rounded-2xl bg-white/56 px-4 text-[13px] font-extrabold text-[--text-secondary] transition-colors hover:bg-white/80 disabled:opacity-60"
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleSubmitCompletionRegistration()}
+                disabled={completionRegistrationSaving || completionRegistrationSku.trim().length === 0 || !completionRegistrationReasonType}
+                className="min-h-[42px] flex-1 rounded-2xl bg-orange-500 px-4 text-[13px] font-extrabold text-white shadow-lg shadow-orange-500/20 transition-colors hover:bg-orange-600 disabled:cursor-not-allowed disabled:opacity-55"
+              >
+                {completionRegistrationSaving ? "保存中..." : completionRegistrationTask.completionRegistration ? "保存修改" : "保存登记"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {priorityUpgradeTask && (
+        <div
+          className="fixed inset-0 z-[220] flex items-center justify-center bg-black/35 px-4 backdrop-blur-sm"
+          onMouseDown={closePriorityUpgradeModal}
+        >
+          <div
+            className={`w-full max-w-md rounded-3xl border p-5 shadow-2xl ${resolvedTheme === "dark" ? "border-white/[0.16] bg-slate-950/92 shadow-black/50" : "border-white/75 bg-white/92 shadow-slate-300/40"}`}
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <h3 className="text-[17px] font-extrabold text-[--text-primary]">申请任务提权</h3>
+                <p className="mt-1 text-[12px] font-semibold text-[--text-muted]">
+                  当前 P{priorityUpgradeTask.priority}，申请提升到 P1，后台可按实际情况批准为 P1/P2/P3。
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={closePriorityUpgradeModal}
+                disabled={priorityUpgradeSaving}
+                className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl bg-white/50 text-[18px] font-bold text-[--text-muted] transition-colors hover:bg-white/80 disabled:opacity-50"
+                aria-label="关闭提权申请"
+              >
+                ×
+              </button>
+            </div>
+            <div className="mt-4 rounded-2xl bg-white/46 px-3 py-2 text-[12px] font-semibold text-[--text-secondary]">
+              {priorityUpgradeTask.roomNumber}室 · {priorityUpgradeTask.category?.name ?? "任务"} · P{priorityUpgradeTask.priority}
+            </div>
+            <label className="mt-4 block text-[12px] font-extrabold text-[--text-primary]">
+              SKU <span className="text-red-500">*</span>
+            </label>
+            <input
+              type="text"
+              value={priorityUpgradeSku}
+              onChange={(event) => {
+                setPriorityUpgradeSku(event.target.value);
+                if (priorityUpgradeError) setPriorityUpgradeError(null);
+              }}
+              maxLength={80}
+              className="mt-2 h-11 w-full rounded-2xl border border-white/70 bg-white/70 px-3 text-[13px] font-semibold text-slate-700 outline-none ring-0 transition focus:border-orange-200 focus:bg-white"
+              placeholder="输入需要提权的 SKU"
+            />
+            <label className="mt-4 block text-[12px] font-extrabold text-[--text-primary]">
+              申请理由 <span className="text-red-500">*</span>
+            </label>
+            <div className="relative mt-2">
+              <textarea
+                value={priorityUpgradeReason}
+                onChange={(event) => {
+                  setPriorityUpgradeReason(event.target.value);
+                  if (priorityUpgradeError) setPriorityUpgradeError(null);
+                }}
+                rows={5}
+                maxLength={160}
+                className="min-h-[190px] w-full resize-none rounded-2xl border border-white/70 bg-white/70 px-3 py-3 pb-8 text-[13px] font-semibold leading-relaxed text-slate-700 outline-none ring-0 transition focus:border-orange-200 focus:bg-white"
+                placeholder="例如：客户临时加急，必须先完成熨烫后才能拍摄下一组。"
+              />
+              <span className="pointer-events-none absolute bottom-3 right-4 text-[11px] font-semibold text-[--text-muted]">
+                {priorityUpgradeReason.trim().length}/160
+              </span>
+            </div>
+            <div className="mt-1 min-h-[16px] text-[11px] font-semibold text-red-500">
+              {priorityUpgradeError ?? ""}
+            </div>
+            <div className="mt-5 flex gap-2">
+              <button
+                type="button"
+                onClick={closePriorityUpgradeModal}
+                disabled={priorityUpgradeSaving}
+                className="min-h-[42px] flex-1 rounded-2xl bg-white/56 px-4 text-[13px] font-extrabold text-[--text-secondary] transition-colors hover:bg-white/80 disabled:opacity-60"
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleSubmitPriorityUpgrade()}
+                disabled={priorityUpgradeSaving || priorityUpgradeSku.trim().length === 0 || priorityUpgradeReason.trim().length === 0}
+                className="min-h-[42px] flex-1 rounded-2xl bg-red-500 px-4 text-[13px] font-extrabold text-white shadow-lg shadow-red-500/20 transition-colors hover:bg-red-600 disabled:cursor-not-allowed disabled:opacity-55"
+              >
+                {priorityUpgradeSaving ? "提交中..." : "提交申请"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <div className="hidden lg:block">
         <AssistantDock
           assistants={assistants}
@@ -10834,191 +10242,6 @@ export default function PhotographerPage() {
           }}
         />
       </div>
-      </div>
-    </div>
-  );
-}
-
-/* ─── Avatar Upload & Crop Modal ─── */
-
-function AvatarModal({
-  currentAvatar,
-  onClose,
-  onSave,
-}: {
-  currentAvatar: string | null;
-  onClose: () => void;
-  onSave: (dataUrl: string) => void;
-}) {
-  const fileInputRef = useRef<HTMLInputElement>(null);
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const [imgSrc, setImgSrc] = useState<string | null>(currentAvatar);
-  const [imgEl, setImgEl] = useState<HTMLImageElement | null>(null);
-  const [view, setView] = useState({ panX: 0, panY: 0, zoom: 1 });
-  const [dragging, setDragging] = useState<{ startX: number; startY: number; origPanX: number; origPanY: number } | null>(null);
-  const [saving, setSaving] = useState(false);
-
-  const VIEWPORT = 220;
-
-  // Base scale: make image cover the viewport at zoom=1
-  const baseScale = imgEl ? Math.max(VIEWPORT / imgEl.width, VIEWPORT / imgEl.height) : 1;
-  const baseW = imgEl ? imgEl.width * baseScale : 0;
-  const baseH = imgEl ? imgEl.height * baseScale : 0;
-
-  // Load image element when src changes
-  useEffect(() => {
-    if (!imgSrc) { setImgEl(null); return; }
-    const img = new Image();
-    img.onload = () => {
-      setImgEl(img);
-      setView({ panX: 0, panY: 0, zoom: 1 });
-    };
-    img.src = imgSrc;
-  }, [imgSrc]);
-
-  function handleFile(file: File) {
-    if (!file.type.startsWith("image/")) return;
-    const reader = new FileReader();
-    reader.onload = () => setImgSrc(reader.result as string);
-    reader.readAsDataURL(file);
-  }
-
-  // Drag to reposition
-  useEffect(() => {
-    if (!dragging) return;
-    const handleMove = (e: MouseEvent) => {
-      setView((v) => ({
-        ...v,
-        panX: dragging.origPanX + e.clientX - dragging.startX,
-        panY: dragging.origPanY + e.clientY - dragging.startY,
-      }));
-    };
-    const handleUp = () => setDragging(null);
-    window.addEventListener("mousemove", handleMove);
-    window.addEventListener("mouseup", handleUp);
-    return () => { window.removeEventListener("mousemove", handleMove); window.removeEventListener("mouseup", handleUp); };
-  }, [dragging]);
-
-  function handleSave() {
-    if (!imgEl) return;
-    setSaving(true);
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const size = 512;
-    canvas.width = size;
-    canvas.height = size;
-    const ctx = canvas.getContext("2d")!;
-    const ratio = size / VIEWPORT;
-    // Compute where the image visually sits relative to the viewport
-    const effScale = baseScale * view.zoom;
-    const imgLeft = VIEWPORT / 2 + view.panX - (imgEl.width * effScale) / 2;
-    const imgTop = VIEWPORT / 2 + view.panY - (imgEl.height * effScale) / 2;
-    ctx.beginPath();
-    ctx.arc(size / 2, size / 2, size / 2, 0, Math.PI * 2);
-    ctx.clip();
-    ctx.drawImage(imgEl, imgLeft * ratio, imgTop * ratio, imgEl.width * effScale * ratio, imgEl.height * effScale * ratio);
-    onSave(canvas.toDataURL("image/jpeg", 0.85));
-  }
-
-  return (
-    <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-[200]" onClick={onClose}>
-      <div className="bg-white rounded-2xl p-5 w-[320px] shadow-2xl" onClick={(e) => e.stopPropagation()}>
-        <div className="flex items-center justify-between mb-4">
-          <h3 className="text-sm font-bold text-gray-800">更换头像</h3>
-          <button
-            onClick={onClose}
-            className="w-7 h-7 rounded-lg hover:bg-black/5 flex items-center justify-center transition-colors"
-          >
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
-              <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
-            </svg>
-          </button>
-        </div>
-
-        {/* Circular preview */}
-        <div className="flex justify-center mb-4">
-          <div
-            className="relative rounded-full overflow-hidden border-2 border-gray-200"
-            style={{ width: VIEWPORT, height: VIEWPORT, cursor: imgEl ? "grab" : "default" }}
-            onMouseDown={(e) => {
-              if (!imgEl) return;
-              e.preventDefault();
-              setDragging({ startX: e.clientX, startY: e.clientY, origPanX: view.panX, origPanY: view.panY });
-            }}
-            onDragOver={(e) => e.preventDefault()}
-            onDrop={(e) => { e.preventDefault(); const f = e.dataTransfer.files[0]; if (f) handleFile(f); }}
-          >
-            {imgEl ? (
-              <img
-                src={imgSrc!}
-                alt="preview"
-                draggable={false}
-                style={{
-                  position: "absolute",
-                  left: (VIEWPORT - baseW) / 2,
-                  top: (VIEWPORT - baseH) / 2,
-                  width: baseW,
-                  height: baseH,
-                  transform: `translate(${view.panX}px, ${view.panY}px) scale(${view.zoom})`,
-                  transformOrigin: "center center",
-                  pointerEvents: "none",
-                }}
-              />
-            ) : (
-              <div
-                className="w-full h-full bg-gray-50 flex flex-col items-center justify-center text-gray-400 cursor-pointer"
-                onClick={() => fileInputRef.current?.click()}
-              >
-                <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="mb-2">
-                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-                  <polyline points="17 8 12 3 7 8" />
-                  <line x1="12" y1="3" x2="12" y2="15" />
-                </svg>
-                <span className="text-xs">拖拽或点击上传图片</span>
-              </div>
-            )}
-          </div>
-        </div>
-
-        <input ref={fileInputRef} type="file" accept="image/*" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) handleFile(f); }} />
-
-        {/* Scale slider */}
-        {imgEl && (
-          <div className="flex items-center gap-2 mb-4 px-2">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#9ca3af" strokeWidth="2"><circle cx="11" cy="11" r="8" /><line x1="21" y1="21" x2="16.65" y2="16.65" /><line x1="8" y1="11" x2="14" y2="11" /></svg>
-            <input
-              type="range"
-              min={100}
-              max={400}
-              value={Math.round(view.zoom * 100)}
-              onChange={(e) => {
-                const newZoom = parseInt(e.target.value) / 100;
-                setView((v) => ({ ...v, zoom: newZoom }));
-              }}
-              className="flex-1 accent-purple-500"
-            />
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#9ca3af" strokeWidth="2"><circle cx="11" cy="11" r="8" /><line x1="21" y1="21" x2="16.65" y2="16.65" /><line x1="8" y1="11" x2="14" y2="11" /><line x1="11" y1="8" x2="11" y2="14" /></svg>
-          </div>
-        )}
-
-        {/* Actions */}
-        <div className="flex gap-2">
-          <button
-            onClick={() => fileInputRef.current?.click()}
-            className="flex-1 py-2 rounded-xl border border-gray-200 text-xs font-medium text-gray-600 hover:bg-gray-50 transition-colors"
-          >
-            {imgEl ? "重新选择" : "选择图片"}
-          </button>
-          <button
-            onClick={handleSave}
-            disabled={!imgEl || saving}
-            className="flex-1 py-2 rounded-xl bg-gradient-to-r from-purple-500 to-purple-600 text-white text-xs font-semibold shadow-sm disabled:opacity-40 disabled:cursor-not-allowed transition-all active:scale-[0.98]"
-          >
-            {saving ? "保存中..." : "保存"}
-          </button>
-        </div>
-
-        <canvas ref={canvasRef} className="hidden" />
       </div>
     </div>
   );

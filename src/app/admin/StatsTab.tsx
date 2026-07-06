@@ -50,6 +50,20 @@ type TaskFromAPI = {
   status: TaskStatus;
   note: string | null;
   publisherFeedback?: Feedback | null;
+  completionRegistration?: {
+    id: string;
+    taskId: string;
+    assistantId: string;
+    sku: string;
+    imageUrls: string | string[];
+    reasonType?: string | null;
+    description: string | null;
+    overtimeMinutesSnapshot: number | null;
+    workSecondsSnapshot: number | null;
+    createdAt: string;
+    updatedAt: string;
+    assistant?: { id: string; name: string } | null;
+  } | null;
   createdAt: string;
   startedAt: string | null;
   completedAt: string | null;
@@ -266,6 +280,18 @@ function isCompletedOvertime(task: TaskFromAPI) {
   return new Date(task.completedAt).getTime() > new Date(task.estEndTime).getTime();
 }
 
+function registrationImageUrls(task: TaskFromAPI) {
+  const raw = task.completionRegistration?.imageUrls;
+  if (Array.isArray(raw)) return raw.filter((item): item is string => typeof item === "string");
+  if (typeof raw !== "string" || !raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
 function participantCompletedAtMs(task: TaskFromAPI, participant?: TaskParticipant | null) {
   const raw = participant?.completedAt ?? task.completedAt ?? task.createdAt;
   const ms = new Date(raw).getTime();
@@ -290,6 +316,8 @@ export default function StatsTab() {
   const [detailBuildingId, setDetailBuildingId] = useState("");
   const [detailTaskType, setDetailTaskType] = useState("");
   const [detailPriority, setDetailPriority] = useState("");
+  const [detailRegistration, setDetailRegistration] = useState("");
+  const [detailSku, setDetailSku] = useState("");
 
   const fetchData = useCallback(async () => {
     setLoading(true);
@@ -364,6 +392,10 @@ export default function StatsTab() {
       if (detailBuildingId && String(taskBuildingId(task) ?? "") !== detailBuildingId) return false;
       if (detailTaskType && taskTypeGroup(task.category?.name) !== detailTaskType) return false;
       if (detailPriority && task.priority !== Number(detailPriority)) return false;
+      if (detailRegistration === "registered" && !task.completionRegistration) return false;
+      if (detailRegistration === "unregistered" && (task.status !== "completed" || task.completionRegistration)) return false;
+      if (detailRegistration === "overtimeRegistered" && (!task.completionRegistration || !isCompletedOvertime(task))) return false;
+      if (detailSku && !(task.completionRegistration?.sku ?? "").toLowerCase().includes(detailSku.trim().toLowerCase())) return false;
       if (detailNameQuery) {
         const names = [
           task.photographer?.name,
@@ -374,11 +406,13 @@ export default function StatsTab() {
       }
       return true;
     });
-  }, [baseTasks, detailBuildingId, detailDepartment, detailNameQuery, detailPriority, detailTaskType, profileById]);
+  }, [baseTasks, detailBuildingId, detailDepartment, detailNameQuery, detailPriority, detailRegistration, detailSku, detailTaskType, profileById]);
 
   const analytics = useMemo(() => {
     const completed = baseTasks.filter((t) => t.status === "completed");
     const overtime = completed.filter(isCompletedOvertime);
+    const registered = completed.filter((t) => t.completionRegistration);
+    const registeredOvertime = registered.filter(isCompletedOvertime);
     const avgDuration = completed.length
       ? Math.round(completed.reduce((sum, t) => sum + effectiveWorkMinutesFromApi(t, nowMs), 0) / completed.length)
       : 0;
@@ -508,6 +542,8 @@ export default function StatsTab() {
       total: baseTasks.length,
       completed: completed.length,
       overtime: overtime.length,
+      registered: registered.length,
+      registeredOvertime: registeredOvertime.length,
       avgDuration,
       likes,
       dislikes,
@@ -588,11 +624,12 @@ export default function StatsTab() {
         </div>
       </div>
 
-      <div className="grid gap-3 lg:grid-cols-5">
+      <div className="grid gap-3 lg:grid-cols-6">
         {[
           { label: "发布总任务", value: analytics.total, unit: "单", cls: "text-slate-900" },
           { label: "已完成", value: analytics.completed, unit: "单", cls: "text-emerald-600" },
           { label: "已完成超时", value: analytics.overtime, unit: "单", cls: "text-red-500" },
+          { label: "异常登记", value: analytics.registered, unit: "条", cls: "text-orange-500" },
           { label: "平均用时", value: analytics.avgDuration, unit: "分钟", cls: "text-blue-600" },
           { label: "点赞率", value: analytics.likeRate, unit: "%", cls: "text-orange-500" },
         ].map((item) => (
@@ -706,23 +743,35 @@ export default function StatsTab() {
               className="w-[260px] rounded-xl border-0 bg-white/58 px-3 py-2 text-[12px] font-bold text-slate-600 outline-none ring-1 ring-white/70 placeholder:text-slate-400"
             />
           </div>
-          <div className="grid gap-2 md:grid-cols-4">
+          <div className="grid gap-2 md:grid-cols-6">
             <select value={detailDepartment} onChange={(e) => setDetailDepartment(e.target.value)} className="rounded-xl border-0 bg-white/58 px-3 py-2 text-[12px] font-bold text-slate-600 outline-none ring-1 ring-white/70"><option value="">全部部门</option>{departments.map((d) => <option key={d} value={d}>{d}</option>)}</select>
             <select value={detailBuildingId} onChange={(e) => setDetailBuildingId(e.target.value)} className="rounded-xl border-0 bg-white/58 px-3 py-2 text-[12px] font-bold text-slate-600 outline-none ring-1 ring-white/70"><option value="">全部楼座</option>{buildings.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}</select>
             <select value={detailTaskType} onChange={(e) => setDetailTaskType(e.target.value)} className="rounded-xl border-0 bg-white/58 px-3 py-2 text-[12px] font-bold text-slate-600 outline-none ring-1 ring-white/70"><option value="">全部类型</option>{TASK_TYPE_ORDER.map((t) => <option key={t} value={t}>{t}</option>)}</select>
             <select value={detailPriority} onChange={(e) => setDetailPriority(e.target.value)} className="rounded-xl border-0 bg-white/58 px-3 py-2 text-[12px] font-bold text-slate-600 outline-none ring-1 ring-white/70"><option value="">全部优先级</option>{[1, 2, 3, 4, 5].map((p) => <option key={p} value={p}>P{p}</option>)}</select>
+            <select value={detailRegistration} onChange={(e) => setDetailRegistration(e.target.value)} className="rounded-xl border-0 bg-white/58 px-3 py-2 text-[12px] font-bold text-slate-600 outline-none ring-1 ring-white/70">
+              <option value="">全部登记</option>
+              <option value="registered">已异常登记</option>
+              <option value="overtimeRegistered">超时且已登记</option>
+              <option value="unregistered">已完成未登记</option>
+            </select>
+            <input
+              value={detailSku}
+              onChange={(e) => setDetailSku(e.target.value)}
+              placeholder="搜索 SKU"
+              className="rounded-xl border-0 bg-white/58 px-3 py-2 text-[12px] font-bold text-slate-600 outline-none ring-1 ring-white/70 placeholder:text-slate-400"
+            />
           </div>
         </div>
         <div className="max-h-[520px] overflow-auto task-scroll">
-          <table className="w-full min-w-[1080px] border-collapse text-left text-[12px]">
+          <table className="w-full min-w-[1320px] border-collapse text-left text-[12px]">
             <thead className="sticky top-0 z-10 bg-white/90 backdrop-blur-xl">
               <tr className="border-b border-slate-200/70 text-[10px] font-extrabold uppercase tracking-wide text-[--text-muted]">
-                <th className="px-4 py-3">时间</th><th className="px-3 py-3">摄影师</th><th className="px-3 py-3">助理</th><th className="px-3 py-3">部门</th><th className="px-3 py-3">楼座</th><th className="px-3 py-3">房间</th><th className="px-3 py-3">类型</th><th className="px-3 py-3">优先级</th><th className="px-3 py-3">用时</th><th className="px-3 py-3">状态</th><th className="px-3 py-3">反馈</th>
+                <th className="px-4 py-3">时间</th><th className="px-3 py-3">摄影师</th><th className="px-3 py-3">助理</th><th className="px-3 py-3">部门</th><th className="px-3 py-3">楼座</th><th className="px-3 py-3">房间</th><th className="px-3 py-3">类型</th><th className="px-3 py-3">优先级</th><th className="px-3 py-3">用时</th><th className="px-3 py-3">SKU/登记</th><th className="px-3 py-3">状态</th><th className="px-3 py-3">反馈</th>
               </tr>
             </thead>
             <tbody>
               {detailTasks.length === 0 ? (
-                <tr><td colSpan={11} className="py-10 text-center text-[12px] font-semibold text-[--text-muted]">暂无匹配任务</td></tr>
+                <tr><td colSpan={12} className="py-10 text-center text-[12px] font-semibold text-[--text-muted]">暂无匹配任务</td></tr>
               ) : detailTasks.map((task) => {
                 const assistantProfile = task.assistantId ? profileById.get(task.assistantId) : null;
                 const participantNames = taskParticipants(task).filter((p) => p.role !== "primary" && p.assistantId !== task.assistantId).map((p) => p.assistant.name);
@@ -732,6 +781,9 @@ export default function StatsTab() {
                 const pr = PRIORITY_LABEL[task.priority] || PRIORITY_LABEL[4];
                 const st = STATUS_STYLE[task.status];
                 const type = taskTypeGroup(task.category?.name);
+                const registration = task.completionRegistration;
+                const imageUrls = registrationImageUrls(task);
+                const imageCount = imageUrls.length;
                 return (
                   <tr key={task.id} className="border-b border-slate-100/80 transition-colors hover:bg-white/44">
                     <td className="whitespace-nowrap px-4 py-3 tabular-nums text-[--text-muted]">{formatDateTime(task.createdAt)}</td>
@@ -743,6 +795,23 @@ export default function StatsTab() {
                     <td className={`px-3 py-3 font-extrabold ${TYPE_META[type].text}`}>{type}</td>
                     <td className="px-3 py-3"><span className={`rounded-md px-2 py-1 text-[10px] font-black ${pr.cls}`}>{pr.label}</span></td>
                     <td className="px-3 py-3 text-[--text-muted]">{task.status === "completed" || task.status === "executing" || task.status === "paused" ? fmtMin(effectiveWorkMinutesFromApi(task, nowMs)) : durationLabel(task.category)}</td>
+                    <td className="max-w-[220px] px-3 py-3">
+                      {registration ? (
+                        <div className="space-y-1">
+                          <div className="flex items-center gap-1">
+                            <span className="rounded-md bg-orange-50 px-2 py-1 text-[10px] font-black text-orange-600">{registration.sku}</span>
+                            {registration.reasonType ? <span className="rounded-md bg-slate-50 px-1.5 py-1 text-[10px] font-bold text-slate-500">{registration.reasonType}</span> : null}
+                            {registration.overtimeMinutesSnapshot ? <span className="rounded-md bg-red-50 px-1.5 py-1 text-[10px] font-bold text-red-500">超{registration.overtimeMinutesSnapshot}分</span> : null}
+                            {imageCount > 0 ? <a href={imageUrls[0]} target="_blank" rel="noreferrer" className="rounded-md bg-blue-50 px-1.5 py-1 text-[10px] font-bold text-blue-500 hover:bg-blue-100">图{imageCount}</a> : null}
+                          </div>
+                          {registration.description && <p className="truncate text-[10px] font-semibold text-[--text-muted]" title={registration.description}>{registration.description}</p>}
+                        </div>
+                      ) : task.status === "completed" ? (
+                        <span className="rounded-md bg-slate-50 px-2 py-1 text-[10px] font-bold text-slate-400">未登记</span>
+                      ) : (
+                        <span className="text-[--text-muted]">—</span>
+                      )}
+                    </td>
                     <td className="px-3 py-3"><span className={`rounded-md px-2 py-1 text-[10px] font-black ${st.cls}`}>{st.label}</span></td>
                     <td className="px-3 py-3 text-[--text-muted]">{task.publisherFeedback === "like" ? "点赞" : task.publisherFeedback === "dislike" ? "点踩" : "—"}</td>
                   </tr>

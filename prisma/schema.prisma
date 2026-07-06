@@ -127,6 +127,9 @@ model Profile {
   createdTasks  BookingTask[] @relation("TaskPhotographer")
   assignedTasks BookingTask[] @relation("TaskAssistant")
   collaboratedTasks TaskCollaborator[]
+  priorityUpgradeRequests TaskPriorityUpgradeRequest[] @relation("PriorityUpgradeRequester")
+  reviewedPriorityUpgradeRequests TaskPriorityUpgradeRequest[] @relation("PriorityUpgradeReviewer")
+  taskCompletionRegistrations TaskCompletionRegistration[] @relation("TaskCompletionRegistrar")
 
   @@map("profiles")
 }
@@ -146,6 +149,12 @@ enum IroningTaskStage {
   waiting_machine
   notified
   using
+}
+
+enum PriorityUpgradeRequestStatus {
+  pending
+  approved
+  rejected
 }
 
 // ============================================
@@ -223,6 +232,8 @@ model BookingTask {
   interruptTasks  BookingTask[] @relation("TaskInterrupt")
   collaborators   TaskCollaborator[]
   standbyReassignmentNotices StandbyReassignmentNotice[]
+  priorityUpgradeRequests TaskPriorityUpgradeRequest[]
+  completionRegistration TaskCompletionRegistration?
 
   // 关系
   photographer    Profile      @relation("TaskPhotographer", fields: [photographerId], references: [id])
@@ -239,6 +250,54 @@ model BookingTask {
   @@index([locationBuildingId])
   @@index([createdAt])
   @@map("booking_tasks")
+}
+
+model TaskCompletionRegistration {
+  id                      String      @id @default(uuid())
+  taskId                  String      @unique @map("task_id")
+  assistantId             String      @map("assistant_id")
+  sku                     String
+  imageUrls               String      @default("[]") @map("image_urls")
+  reasonType              String?     @map("reason_type")
+  description             String?
+  overtimeMinutesSnapshot Int?        @map("overtime_minutes_snapshot")
+  workSecondsSnapshot     Int?        @map("work_seconds_snapshot")
+  createdAt               DateTime    @default(now()) @map("created_at")
+  updatedAt               DateTime    @updatedAt @map("updated_at")
+
+  task                    BookingTask @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  assistant               Profile     @relation("TaskCompletionRegistrar", fields: [assistantId], references: [id])
+
+  @@index([assistantId, createdAt])
+  @@index([sku])
+  @@map("task_completion_registrations")
+}
+
+model TaskPriorityUpgradeRequest {
+  id               String      @id @default(uuid())
+  taskId           String      @map("task_id")
+  requestedById    String      @map("requested_by_id")
+  fromPriority     Int         @map("from_priority")
+  targetPriority   Int         @map("target_priority")
+  approvedPriority Int?        @map("approved_priority")
+  sku              String      @default("")
+  reason           String
+  status           PriorityUpgradeRequestStatus @default(pending)
+  reviewedById     String?     @map("reviewed_by_id")
+  reviewedAt       DateTime?   @map("reviewed_at")
+  reviewNote       String?     @map("review_note")
+  createdAt        DateTime    @default(now()) @map("created_at")
+  updatedAt        DateTime    @updatedAt @map("updated_at")
+
+  task        BookingTask @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  requestedBy Profile     @relation("PriorityUpgradeRequester", fields: [requestedById], references: [id])
+  reviewedBy  Profile?    @relation("PriorityUpgradeReviewer", fields: [reviewedById], references: [id])
+
+  @@index([status, createdAt])
+  @@index([taskId, status])
+  @@index([requestedById, status])
+  @@index([sku])
+  @@map("task_priority_upgrade_requests")
 }
 
 model StandbyReassignmentNotice {

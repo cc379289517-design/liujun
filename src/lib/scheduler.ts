@@ -510,6 +510,18 @@ function taskEffectiveBuildingId(task: {
   return task.locationBuildingId ?? task.photographer?.buildingId ?? null;
 }
 
+function taskDurationSortMinutes(task: {
+  category?: { minDuration?: number | null; estDuration?: number | null; maxDuration?: number | null } | null;
+}): number {
+  return task.category?.minDuration ?? task.category?.estDuration ?? task.category?.maxDuration ?? 9999;
+}
+
+function taskMaxDurationSortMinutes(task: {
+  category?: { maxDuration?: number | null; estDuration?: number | null; minDuration?: number | null } | null;
+}): number {
+  return task.category?.maxDuration ?? task.category?.estDuration ?? task.category?.minDuration ?? 9999;
+}
+
 export async function hasIroningQueuePressure(buildingId: number): Promise<boolean> {
   const task = await prisma.bookingTask.findFirst({
     where: {
@@ -568,6 +580,135 @@ async function availableIroningMachineSlots(buildingId: number, excludeTaskId?: 
     executingIroningTaskCount(buildingId, excludeTaskId),
   ]);
   return Math.max(0, machines - executing);
+}
+
+export async function hasAvailableIroningMachineForTask(taskId: string): Promise<boolean> {
+  const task = await prisma.bookingTask.findUnique({
+    where: { id: taskId },
+    select: {
+      locationBuildingId: true,
+      photographer: { select: { buildingId: true } },
+    },
+  });
+  if (!task) return false;
+  const buildingId = task.locationBuildingId ?? task.photographer.buildingId;
+  return (await availableIroningMachineSlots(buildingId, taskId)) > 0;
+}
+
+export async function prepareWaitingTaskForAssistantStart(taskId: string, assistantId: string): Promise<void> {
+  const task = await prisma.bookingTask.findUnique({
+    where: { id: taskId },
+    include: {
+      photographer: { select: { buildingId: true } },
+      category: { select: { name: true } },
+      collaborators: {
+        where: { status: { not: "left" } },
+        select: { assistantId: true, role: true, status: true },
+      },
+    },
+  });
+  if (!task || task.status !== TaskStatus.waiting) return;
+
+  const actorParticipant = task.collaborators.find((participant) => participant.assistantId === assistantId);
+  if (task.assistantId === assistantId || actorParticipant) return;
+
+  if (!isIroningTaskCategory(task.category)) return;
+  if (task.parentTaskId != null || isPhotographerLimitQueuedTask(task)) {
+    throw new Error("该熨烫任务暂不能被当前助理接手");
+  }
+  if (await taskHasActiveHelperParticipants(taskId)) {
+    throw new Error("多人协作任务不能被临时接手");
+  }
+
+  const assistant = await prisma.profile.findUnique({
+    where: { id: assistantId },
+    select: {
+      role: true,
+      onlineStatus: true,
+      subStatus: true,
+      buildingId: true,
+      activeBuildingId: true,
+    },
+  });
+  if (!assistant || (assistant.role !== "assistant" && assistant.role !== "assistant_leader")) {
+    throw new Error("只有助理可以开始该任务");
+  }
+  if (assistant.onlineStatus !== OnlineStatus.online || assistant.subStatus) {
+    throw new Error("当前助理暂不可接手该任务");
+  }
+
+  const buildingId = taskEffectiveBuildingId(task);
+  const assistantBuildingId = assistant.activeBuildingId ?? assistant.buildingId;
+  if (buildingId == null || assistantBuildingId !== buildingId) {
+    throw new Error("当前助理不在该任务区域，不能接手熨烫任务");
+  }
+
+  const hasActiveWork = await assistantHasActiveNonPassiveWork(assistantId);
+  if (hasActiveWork) {
+    throw new Error("当前助理已有执行中或暂停中的任务，不能接手熨烫任务");
+  }
+
+  const activePrimary = task.collaborators.find((participant) =>
+    participant.role === "primary" &&
+    participant.status !== "left"
+  );
+  if (activePrimary && activePrimary.status !== "waiting") {
+    throw new Error("该熨烫任务已被其他助理开始，不能接手");
+  }
+
+  const canUseMachine =
+    task.ironingStage === IroningTaskStage.notified ||
+    (buildingId != null && (await availableIroningMachineSlots(buildingId, taskId)) > 0);
+  if (!canUseMachine) {
+    await prisma.bookingTask.update({
+      where: { id: taskId },
+      data: {
+        ironingStage: IroningTaskStage.waiting_machine,
+        ironingQueuedAt: task.ironingQueuedAt ?? new Date(),
+      },
+    });
+    throw new Error("当前区域熨烫机正在使用，请等待上一位助理完成后再开始");
+  }
+
+  const now = new Date();
+  await prisma.$transaction(async (tx) => {
+    await tx.taskCollaborator.updateMany({
+      where: {
+        taskId,
+        assistantId: { not: assistantId },
+        role: "primary",
+        status: { not: "left" },
+      },
+      data: { status: "left", leftAt: now },
+    });
+    await tx.bookingTask.update({
+      where: { id: taskId },
+      data: {
+        assistantId,
+        ironingStage: IroningTaskStage.notified,
+        ironingNotifiedAt: task.ironingNotifiedAt ?? now,
+      },
+    });
+    await tx.taskCollaborator.upsert({
+      where: { taskId_assistantId: { taskId, assistantId } },
+      create: { taskId, assistantId, role: "primary", status: "waiting", joinedAt: now },
+      update: {
+        role: "primary",
+        status: "waiting",
+        joinedAt: now,
+        startedAt: null,
+        completedAt: null,
+        effectiveWorkSeconds: 0,
+        workSegmentStartedAt: null,
+        leftAt: null,
+      },
+    });
+    await tx.profile.update({
+      where: { id: assistantId },
+      data: { status: ProfileStatus.assigned },
+    });
+  });
+  await syncProfileStatus();
 }
 
 async function notifiedIroningMachineClaimCountsByBuilding(): Promise<Map<number, number>> {
@@ -859,7 +1000,11 @@ export async function updateTaskParticipantStatus(
     const buildingId = taskEffectiveBuildingId(task);
     if (buildingId == null) throw new Error("Cannot resolve ironing task building");
     const slots = await availableIroningMachineSlots(buildingId, taskId);
-    if (slots <= 0 && task.ironingStage !== IroningTaskStage.using) {
+    if (
+      slots <= 0 &&
+      task.ironingStage !== IroningTaskStage.using &&
+      task.ironingStage !== IroningTaskStage.notified
+    ) {
       await prisma.bookingTask.update({
         where: { id: taskId },
         data: {
@@ -1703,10 +1848,10 @@ export async function sweepIroningMachineQueue(): Promise<number> {
       ironingStage: { in: [IroningTaskStage.waiting_machine, IroningTaskStage.none] },
       AND: [NOT_PHOTOGRAPHER_LIMIT_QUEUE_WHERE],
     },
-    include: {
-      photographer: { select: { buildingId: true } },
-      category: { select: { name: true, maxDuration: true, estDuration: true } },
-    },
+	    include: {
+	      photographer: { select: { buildingId: true } },
+	      category: { select: { name: true, minDuration: true, maxDuration: true, estDuration: true } },
+	    },
     orderBy: [{ priority: "asc" }, { createdAt: "asc" }],
   });
   if (candidateTasks.length === 0) return 0;
@@ -1728,11 +1873,13 @@ export async function sweepIroningMachineQueue(): Promise<number> {
     slots = Math.max(0, slots - (reservedSlotsByBuilding.get(buildingId) ?? 0));
     if (slots <= 0) continue;
 
-    const sortedTasks = [...tasks].sort((a, b) =>
-      a.priority - b.priority ||
-      (a.ironingQueuedAt ?? a.createdAt).getTime() - (b.ironingQueuedAt ?? b.createdAt).getTime() ||
-      a.createdAt.getTime() - b.createdAt.getTime()
-    );
+	    const sortedTasks = [...tasks].sort((a, b) =>
+	      a.priority - b.priority ||
+	      taskDurationSortMinutes(a) - taskDurationSortMinutes(b) ||
+	      taskMaxDurationSortMinutes(a) - taskMaxDurationSortMinutes(b) ||
+	      (a.ironingQueuedAt ?? a.createdAt).getTime() - (b.ironingQueuedAt ?? b.createdAt).getTime() ||
+	      a.createdAt.getTime() - b.createdAt.getTime()
+	    );
 
     for (const task of sortedTasks) {
       if (slots <= 0) break;

@@ -12,6 +12,13 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    "**/._*",
+    "**/.DS_Store",
+    "node_modules/**",
+    "database-backups/**",
+    "logs/**",
+    ".next-cache-backups/**",
+    ".codex-artifacts/**",
   ]),
 ]);
 

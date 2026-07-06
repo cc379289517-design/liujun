@@ -1,6 +1,6 @@
 import { NextRequest } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { OnlineStatus, Role, TaskStatus } from "@/generated/prisma/client";
+import { OnlineStatus, PriorityUpgradeRequestStatus, Role, TaskStatus } from "@/generated/prisma/client";
 import {
   assignTask,
   buildP1InterruptCandidateOrderFromFiltered,
@@ -23,6 +23,11 @@ import {
   photographerLimitQueueFullPrompt,
 } from "@/lib/photographerTaskLimit";
 
+const VISIBLE_PRIORITY_UPGRADE_REQUEST_STATUSES: PriorityUpgradeRequestStatus[] = [
+  PriorityUpgradeRequestStatus.pending,
+  PriorityUpgradeRequestStatus.approved,
+];
+
 const TASK_INCLUDE = {
   photographer: { select: { id: true, name: true, currentRoom: true, buildingId: true } },
   assistant: { select: { id: true, name: true, currentRoom: true } },
@@ -42,7 +47,64 @@ const TASK_INCLUDE = {
       assistant: { select: { id: true, name: true, currentRoom: true, avatar: true, buildingId: true } },
     },
   },
+  priorityUpgradeRequests: {
+    where: { status: { in: VISIBLE_PRIORITY_UPGRADE_REQUEST_STATUSES } },
+    orderBy: { createdAt: "desc" },
+    take: 1,
+    select: {
+      id: true,
+      status: true,
+      fromPriority: true,
+      targetPriority: true,
+      reason: true,
+      createdAt: true,
+    },
+  },
+  completionRegistration: {
+    select: {
+      id: true,
+      taskId: true,
+      assistantId: true,
+      sku: true,
+      imageUrls: true,
+      reasonType: true,
+      description: true,
+      overtimeMinutesSnapshot: true,
+      workSecondsSnapshot: true,
+      createdAt: true,
+      updatedAt: true,
+      assistant: { select: { id: true, name: true } },
+    },
+  },
 } as const;
+
+const TASK_INCLUDE_WITHOUT_COLLABORATORS = {
+  photographer: { select: { id: true, name: true, currentRoom: true, buildingId: true } },
+  assistant: { select: { id: true, name: true, currentRoom: true } },
+  category: TASK_INCLUDE.category,
+  priorityUpgradeRequests: TASK_INCLUDE.priorityUpgradeRequests,
+  completionRegistration: TASK_INCLUDE.completionRegistration,
+} as const;
+
+const TASK_QUERY_LIMIT_MAX = 500;
+
+function parsePositiveIntParam(value: string | null, name: string): { value?: number; error?: Response } {
+  if (value == null || value.trim() === "") return {};
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return { error: Response.json({ error: `${name} must be a positive integer` }, { status: 400 }) };
+  }
+  return { value: parsed };
+}
+
+function taskBuildingWhere(buildingId: number) {
+  return {
+    OR: [
+      { locationBuildingId: buildingId },
+      { locationBuildingId: null, photographer: { buildingId } },
+    ],
+  };
+}
 
 async function createdTaskResponse(task: unknown) {
   await runTaskMaintenance();
@@ -91,7 +153,7 @@ async function validateSpecifiedAssistant(
 
 /**
  * GET /api/tasks - 查询任务列表
- * 支持 ?status=waiting&priority=1&photographerId=xxx&assistantId=xxx
+ * 支持 ?status=waiting&priority=1&photographerId=xxx&assistantId=xxx&buildingId=1&limit=100
  */
 export async function GET(request: NextRequest) {
   try {
@@ -100,18 +162,48 @@ export async function GET(request: NextRequest) {
     const priority = searchParams.get("priority");
     const photographerId = searchParams.get("photographerId");
     const assistantId = searchParams.get("assistantId");
+    const profileId = searchParams.get("profileId");
+    const view = searchParams.get("view");
+    const buildingIdParam = searchParams.get("buildingId");
+    const limitParam = searchParams.get("limit");
+    const includeCollaborators = searchParams.get("includeCollaborators") !== "false";
 
     const todayOnly = searchParams.get("todayOnly");
 
     const where: Record<string, unknown> = {};
+    const andFilters: Record<string, unknown>[] = [];
     if (status) where.status = status;
-    if (priority) where.priority = parseInt(priority);
-    if (photographerId) where.photographerId = photographerId;
-    if (assistantId) {
-      where.OR = [
-        { assistantId },
-        { collaborators: { some: { assistantId, status: { not: "left" } } } },
-      ];
+    const parsedPriority = parsePositiveIntParam(priority, "priority");
+    if (parsedPriority.error) return parsedPriority.error;
+    if (parsedPriority.value != null) where.priority = parsedPriority.value;
+
+    const parsedLimit = parsePositiveIntParam(limitParam, "limit");
+    if (parsedLimit.error) return parsedLimit.error;
+    const take = parsedLimit.value == null ? undefined : Math.min(parsedLimit.value, TASK_QUERY_LIMIT_MAX);
+
+    const parsedBuildingId = parsePositiveIntParam(buildingIdParam, "buildingId");
+    if (parsedBuildingId.error) return parsedBuildingId.error;
+    if (parsedBuildingId.value != null) {
+      andFilters.push(taskBuildingWhere(parsedBuildingId.value));
+    }
+
+    const scopedPhotographerId = photographerId || (view === "photographer" ? profileId : null);
+    const scopedAssistantId = assistantId || (view === "assistant" ? profileId : null);
+    if (view && !["photographer", "assistant", "admin", "building"].includes(view)) {
+      return Response.json({ error: "view must be photographer, assistant, admin, or building" }, { status: 400 });
+    }
+    if ((view === "photographer" || view === "assistant") && !profileId && !photographerId && !assistantId) {
+      return Response.json({ error: "profileId is required for photographer or assistant view" }, { status: 400 });
+    }
+
+    if (scopedPhotographerId) where.photographerId = scopedPhotographerId;
+    if (scopedAssistantId) {
+      andFilters.push({
+        OR: [
+          { assistantId: scopedAssistantId },
+          { collaborators: { some: { assistantId: scopedAssistantId, status: { not: "left" } } } },
+        ],
+      });
     }
 
     // 只返回今天的任务（基于 createdAt，过了24点自动不显示昨天的）
@@ -135,10 +227,15 @@ export async function GET(request: NextRequest) {
       where.createdAt = { gte: monday, lt: nextMonday };
     }
 
+    if (andFilters.length > 0) {
+      where.AND = [...(Array.isArray(where.AND) ? where.AND : []), ...andFilters];
+    }
+
     const tasks = await prisma.bookingTask.findMany({
       where,
-      include: TASK_INCLUDE,
+      include: includeCollaborators ? TASK_INCLUDE : TASK_INCLUDE_WITHOUT_COLLABORATORS,
       orderBy: [{ priority: "asc" }, { createdAt: "asc" }],
+      take,
     });
 
     return Response.json(tasks);

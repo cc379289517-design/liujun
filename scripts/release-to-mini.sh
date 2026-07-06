@@ -61,16 +61,8 @@ require_cmd ssh
 
 print_step "检查数据库提交边界"
 if [ "${ALLOW_DB_COMMIT}" != "1" ] && [ -n "$(git status --short -- prisma/dev.db)" ]; then
-  cat >&2 <<'MSG'
-检测到 prisma/dev.db 有本地改动。
-为避免把本地开发数据库推送并覆盖 Mac mini 生产数据库，发布脚本默认停止。
-
-如果这是明确需要同步的数据库变更，请设置：
-  ALLOW_DB_COMMIT=1 ./scripts/release-to-mini.sh "提交信息"
-
-否则请先处理或还原 prisma/dev.db 的本地改动，再重新发布。
-MSG
-  exit 1
+  echo "检测到 prisma/dev.db 有本地改动；默认不会提交本机 SQLite，以保护 Mac mini 数据。"
+  echo "如需明确同步数据库，可设置：ALLOW_DB_COMMIT=1 ./scripts/release-to-mini.sh \"提交信息\""
 fi
 
 print_step "本地验证"
@@ -163,6 +155,7 @@ fi
 
 ./scripts/backup-sqlite.sh
 npm install
+npx prisma db push --skip-generate
 
 if [ "${RUN_REMOTE_BUILD}" = "1" ]; then
   npm run build
