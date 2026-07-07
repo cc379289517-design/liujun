@@ -1,5 +1,5 @@
 import { prisma } from "./prisma";
-import { TaskStatus, ProfileStatus, OnlineStatus, IroningTaskStage } from "@/generated/prisma/client";
+import { TaskStatus, ProfileStatus, OnlineStatus, IroningTaskStage, PriorityUpgradeRequestStatus, Role } from "@/generated/prisma/client";
 import { PRIORITY, SCHEDULER_CONFIG } from "@/types";
 import { flushExecutingSegment } from "@/lib/taskEffectiveTime";
 import { isIroningCategoryName } from "@/lib/ironingRules";
@@ -178,6 +178,17 @@ export function taskCategoryCanBeInterrupted(category: {
     return false;
   }
   return true;
+}
+
+export function isExternalModelFollowTask(task: {
+  priority: number;
+  category?: { name?: string | null } | null;
+}): boolean {
+  const categoryName = task.category?.name?.trim() ?? "";
+  const isNamedExternalModelTask =
+    categoryName.includes("外模") &&
+    (categoryName.includes("协助") || categoryName.includes("跟拍") || categoryName.includes("拍摄"));
+  return isNamedExternalModelTask || (task.priority === 6 && categoryName === "其他");
 }
 
 export function taskLeaveUpperMinutes(category: {
@@ -510,6 +521,36 @@ function taskEffectiveBuildingId(task: {
   return task.locationBuildingId ?? task.photographer?.buildingId ?? null;
 }
 
+function profileEffectiveBuildingId(profile: {
+  activeBuildingId?: number | null;
+  buildingId: number;
+}): number {
+  return profile.activeBuildingId ?? profile.buildingId;
+}
+
+export function ironingMachineSlotsForTask(task: {
+  assistantId?: string | null;
+  collaborators?: { assistantId: string; status: string }[] | null;
+}): number {
+  const activeAssistantIds = new Set<string>();
+  const participants = task.collaborators ?? [];
+
+  for (const participant of participants) {
+    if (participant.status !== "left" && participant.status !== "completed") {
+      activeAssistantIds.add(participant.assistantId);
+    }
+  }
+
+  if (task.assistantId) {
+    const primaryParticipant = participants.find((participant) => participant.assistantId === task.assistantId);
+    if (!primaryParticipant || (primaryParticipant.status !== "left" && primaryParticipant.status !== "completed")) {
+      activeAssistantIds.add(task.assistantId);
+    }
+  }
+
+  return Math.max(1, activeAssistantIds.size);
+}
+
 function taskDurationSortMinutes(task: {
   category?: { minDuration?: number | null; estDuration?: number | null; maxDuration?: number | null } | null;
 }): number {
@@ -560,8 +601,8 @@ async function normalIroningMachineCount(buildingId: number): Promise<number> {
   });
 }
 
-async function executingIroningTaskCount(buildingId: number, excludeTaskId?: string): Promise<number> {
-  return prisma.bookingTask.count({
+async function executingIroningMachineSlotCount(buildingId: number, excludeTaskId?: string): Promise<number> {
+  const tasks = await prisma.bookingTask.findMany({
     where: {
       id: excludeTaskId ? { not: excludeTaskId } : undefined,
       status: TaskStatus.executing,
@@ -571,31 +612,88 @@ async function executingIroningTaskCount(buildingId: number, excludeTaskId?: str
         { locationBuildingId: null, photographer: { buildingId } },
       ],
     },
+    select: {
+      assistantId: true,
+      collaborators: {
+        where: { status: { notIn: ["left", "completed"] } },
+        select: { assistantId: true, status: true },
+      },
+    },
   });
+
+  return tasks.reduce((total, task) => total + ironingMachineSlotsForTask(task), 0);
 }
 
 async function availableIroningMachineSlots(buildingId: number, excludeTaskId?: string): Promise<number> {
-  const [machines, executing] = await Promise.all([
+  const [machines, occupiedSlots] = await Promise.all([
     normalIroningMachineCount(buildingId),
-    executingIroningTaskCount(buildingId, excludeTaskId),
+    executingIroningMachineSlotCount(buildingId, excludeTaskId),
   ]);
-  return Math.max(0, machines - executing);
+  return Math.max(0, machines - occupiedSlots);
+}
+
+export async function ironingMachineAvailabilityForTask(taskId: string): Promise<{
+  ok: boolean;
+  available: number;
+  occupied: number;
+  required: number;
+}> {
+  const task = await prisma.bookingTask.findUnique({
+    where: { id: taskId },
+    include: {
+      photographer: { select: { buildingId: true } },
+      category: { select: { name: true } },
+      collaborators: {
+        where: { status: { notIn: ["left", "completed"] } },
+        select: { assistantId: true, status: true },
+      },
+    },
+  });
+  if (!task || !isIroningTaskCategory(task.category)) {
+    return { ok: true, available: 0, occupied: 0, required: 0 };
+  }
+
+  const buildingId = taskEffectiveBuildingId(task);
+  if (buildingId == null) return { ok: false, available: 0, occupied: 0, required: 0 };
+
+  const [available, occupied] = await Promise.all([
+    normalIroningMachineCount(buildingId),
+    executingIroningMachineSlotCount(buildingId, taskId),
+  ]);
+  const required = ironingMachineSlotsForTask(task);
+
+  return {
+    ok: Math.max(0, available - occupied) >= required,
+    available,
+    occupied,
+    required,
+  };
 }
 
 export async function hasAvailableIroningMachineForTask(taskId: string): Promise<boolean> {
-  const task = await prisma.bookingTask.findUnique({
-    where: { id: taskId },
-    select: {
-      locationBuildingId: true,
-      photographer: { select: { buildingId: true } },
-    },
-  });
-  if (!task) return false;
-  const buildingId = task.locationBuildingId ?? task.photographer.buildingId;
-  return (await availableIroningMachineSlots(buildingId, taskId)) > 0;
+  return (await ironingMachineAvailabilityForTask(taskId)).ok;
 }
 
 export async function prepareWaitingTaskForAssistantStart(taskId: string, assistantId: string): Promise<void> {
+  const readyTransfer = await prisma.taskAssistantTransferRequest.findFirst({
+    where: {
+      taskId,
+      targetAssistantId: assistantId,
+      status: "ready_to_takeover",
+      responseMode: "after_complete",
+    },
+    orderBy: { targetConfirmedAt: "desc" },
+  });
+  if (readyTransfer) {
+    await executePrimaryAssistantTransfer(
+      readyTransfer.taskId,
+      readyTransfer.fromAssistantId,
+      readyTransfer.targetAssistantId,
+      readyTransfer.id,
+    );
+    return;
+  }
+
   const task = await prisma.bookingTask.findUnique({
     where: { id: taskId },
     include: {
@@ -658,7 +756,7 @@ export async function prepareWaitingTaskForAssistantStart(taskId: string, assist
 
   const canUseMachine =
     task.ironingStage === IroningTaskStage.notified ||
-    (buildingId != null && (await availableIroningMachineSlots(buildingId, taskId)) > 0);
+    (buildingId != null && (await availableIroningMachineSlots(buildingId, taskId)) >= ironingMachineSlotsForTask(task));
   if (!canUseMachine) {
     await prisma.bookingTask.update({
       where: { id: taskId },
@@ -721,6 +819,10 @@ async function notifiedIroningMachineClaimCountsByBuilding(): Promise<Map<number
     include: {
       photographer: { select: { buildingId: true } },
       category: { select: { name: true } },
+      collaborators: {
+        where: { status: { notIn: ["left", "completed"] } },
+        select: { assistantId: true, status: true },
+      },
     },
   });
 
@@ -729,7 +831,7 @@ async function notifiedIroningMachineClaimCountsByBuilding(): Promise<Map<number
     if (!isIroningTaskCategory(task.category)) continue;
     const buildingId = taskEffectiveBuildingId(task);
     if (buildingId == null) continue;
-    counts.set(buildingId, (counts.get(buildingId) ?? 0) + 1);
+    counts.set(buildingId, (counts.get(buildingId) ?? 0) + ironingMachineSlotsForTask(task));
   }
   return counts;
 }
@@ -914,6 +1016,15 @@ export async function syncTaskAggregateFromParticipants(taskId: string): Promise
   if (!task) return null;
 
   if (task.assistantId && !isPassiveIroningStage(task.ironingStage)) {
+    await prisma.taskCollaborator.updateMany({
+      where: {
+        taskId,
+        role: "primary",
+        assistantId: { not: task.assistantId },
+        status: { not: "left" },
+      },
+      data: { status: "left", leftAt: new Date() },
+    });
     await prisma.taskCollaborator.upsert({
       where: { taskId_assistantId: { taskId, assistantId: task.assistantId } },
       create: {
@@ -992,6 +1103,10 @@ export async function updateTaskParticipantStatus(
     include: {
       photographer: { select: { buildingId: true } },
       category: { select: { name: true } },
+      collaborators: {
+        where: { status: { notIn: ["left", "completed"] } },
+        select: { assistantId: true, status: true },
+      },
     },
   });
   if (!task) throw new Error("Task not found");
@@ -1000,8 +1115,9 @@ export async function updateTaskParticipantStatus(
     const buildingId = taskEffectiveBuildingId(task);
     if (buildingId == null) throw new Error("Cannot resolve ironing task building");
     const slots = await availableIroningMachineSlots(buildingId, taskId);
+    const requiredSlots = ironingMachineSlotsForTask(task);
     if (
-      slots <= 0 &&
+      slots < requiredSlots &&
       task.ironingStage !== IroningTaskStage.using &&
       task.ironingStage !== IroningTaskStage.notified
     ) {
@@ -1102,6 +1218,611 @@ export async function updateTaskParticipantStatus(
   await syncProfileStatus();
 }
 
+type ManualTransferMode = "immediate" | "reserved";
+type AssistantTransferKind = "handoff" | "swap";
+type AssistantTransferResponseMode = "pause_and_go" | "after_complete";
+
+type ManualTransferTargetEligibility = {
+  ok: boolean;
+  mode?: ManualTransferMode;
+  reason?: string;
+};
+
+async function manualTransferTargetEligibility(
+  targetAssistantId: string,
+  taskBuildingId: number,
+): Promise<ManualTransferTargetEligibility> {
+  const target = await prisma.profile.findUnique({
+    where: { id: targetAssistantId },
+    select: {
+      id: true,
+      role: true,
+      status: true,
+      onlineStatus: true,
+      subStatus: true,
+      buildingId: true,
+      activeBuildingId: true,
+    },
+  });
+  if (!target) return { ok: false, reason: "目标助理不存在" };
+  if (target.role !== Role.assistant && target.role !== Role.assistant_leader) {
+    return { ok: false, reason: "只能移交给助理或助理组长" };
+  }
+  if (target.onlineStatus !== OnlineStatus.online) return { ok: false, reason: "目标助理不在线" };
+  if (target.subStatus) return { ok: false, reason: "目标助理当前处于吃饭/休假等状态" };
+  if (profileEffectiveBuildingId(target) !== taskBuildingId) {
+    return { ok: false, reason: "目标助理不在当前任务区域" };
+  }
+
+  const dispatchable = await dispatchableAssistantIds([targetAssistantId]);
+  if (dispatchable.has(targetAssistantId)) return { ok: true, mode: "immediate" };
+
+  const working = await activeWorkingAssistantIds([targetAssistantId]);
+  if (working.has(targetAssistantId)) return { ok: true, mode: "reserved" };
+
+  return { ok: false, reason: "目标助理已有待就位任务，暂不能接手" };
+}
+
+async function validateManualTransferTask(
+  taskId: string,
+  fromAssistantId: string,
+) {
+  const task = await prisma.bookingTask.findUnique({
+    where: { id: taskId },
+    include: {
+      photographer: { select: { buildingId: true } },
+      assistant: { select: { id: true, name: true } },
+      category: { select: { name: true } },
+      collaborators: { where: { status: { not: "left" } } },
+      interruptTasks: {
+        where: { status: { in: [TaskStatus.waiting, TaskStatus.executing, TaskStatus.paused] } },
+        select: { id: true },
+      },
+    },
+  });
+  if (!task) throw new Error("任务不存在");
+  if (task.assistantId !== fromAssistantId) throw new Error("只有当前主助理可以发起移交");
+  if (task.status === TaskStatus.completed) throw new Error("已完成任务不能移交");
+  if (!task.startedAt) throw new Error("任务尚未开始，不能使用交换/移交");
+  if (isIroningTaskCategory(task.category)) throw new Error("熨烫任务暂不支持交换/移交");
+  if (isExternalModelFollowTask(task)) throw new Error("外模协助跟拍任务暂不支持交换/移交");
+  if (task.parentTaskId || task.interruptTasks.length > 0) throw new Error("插单流程中的任务暂不支持交换/移交");
+  if (task.collaborators.some((participant) => participant.role !== "primary")) {
+    throw new Error("多人协作任务暂不支持交换/移交");
+  }
+  const taskBuildingId = taskEffectiveBuildingId(task);
+  if (taskBuildingId == null) throw new Error("无法确认任务区域，不能移交");
+  return { task, taskBuildingId };
+}
+
+async function activePrimaryWorkingTaskForAssistant(assistantId: string) {
+  return prisma.bookingTask.findFirst({
+    where: {
+      assistantId,
+      status: { in: [TaskStatus.executing, TaskStatus.paused] },
+      collaborators: {
+        some: {
+          assistantId,
+          role: "primary",
+          status: { in: WORKING_PARTICIPANT_STATUSES },
+        },
+      },
+    },
+    include: {
+      photographer: { select: { buildingId: true } },
+      assistant: { select: { id: true, name: true } },
+      category: { select: { name: true } },
+      collaborators: { where: { status: { not: "left" } } },
+      interruptTasks: {
+        where: { status: { in: [TaskStatus.waiting, TaskStatus.executing, TaskStatus.paused] } },
+        select: { id: true },
+      },
+    },
+    orderBy: [{ status: "asc" }, { createdAt: "asc" }],
+  });
+}
+
+function flushPrimaryParticipant(
+  task: Awaited<ReturnType<typeof validateManualTransferTask>>["task"],
+  assistantId: string,
+) {
+  const participant = task.collaborators.find(
+    (item) => item.role === "primary" && item.assistantId === assistantId
+  );
+  if (!participant) return { effectiveWorkSeconds: 0 };
+  return flushExecutingSegment({
+    effectiveWorkSeconds: participant.effectiveWorkSeconds,
+    workSegmentStartedAt: participant.workSegmentStartedAt,
+    startedAt: participant.startedAt,
+    status: participant.status,
+  });
+}
+
+function flushTaskWorkSegment(task: Awaited<ReturnType<typeof validateManualTransferTask>>["task"]) {
+  return flushExecutingSegment({
+    effectiveWorkSeconds: task.effectiveWorkSeconds,
+    workSegmentStartedAt: task.workSegmentStartedAt,
+    startedAt: task.startedAt,
+    status: task.status,
+  });
+}
+
+async function executePrimaryAssistantTransfer(
+  taskId: string,
+  fromAssistantId: string,
+  targetAssistantId: string,
+  transferRequestId?: string,
+): Promise<"immediate"> {
+  if (fromAssistantId === targetAssistantId) throw new Error("不能移交给自己");
+  const { task, taskBuildingId } = await validateManualTransferTask(taskId, fromAssistantId);
+  const targetEligibility = await manualTransferTargetEligibility(targetAssistantId, taskBuildingId);
+  if (!targetEligibility.ok || targetEligibility.mode !== "immediate") {
+    throw new Error(targetEligibility.reason ?? "目标助理当前不能立即接手");
+  }
+
+  const now = new Date();
+  const flushedTask = flushTaskWorkSegment(task);
+  const flushedPrimary = flushPrimaryParticipant(task, fromAssistantId);
+
+  await prisma.$transaction(async (tx) => {
+    await tx.taskCollaborator.updateMany({
+      where: {
+        taskId,
+        role: "primary",
+        status: { not: "left" },
+      },
+      data: {
+        status: "left",
+        leftAt: now,
+        effectiveWorkSeconds: flushedPrimary.effectiveWorkSeconds,
+        workSegmentStartedAt: null,
+      },
+    });
+    await tx.taskCollaborator.upsert({
+      where: { taskId_assistantId: { taskId, assistantId: targetAssistantId } },
+      create: {
+        taskId,
+        assistantId: targetAssistantId,
+        role: "primary",
+        status: "waiting",
+        joinedAt: now,
+      },
+      update: {
+        role: "primary",
+        status: "waiting",
+        joinedAt: now,
+        leftAt: null,
+        completedAt: null,
+        workSegmentStartedAt: null,
+      },
+    });
+    await tx.bookingTask.update({
+      where: { id: taskId },
+      data: {
+        assistantId: targetAssistantId,
+        status: TaskStatus.waiting,
+        pausedAt: null,
+        effectiveWorkSeconds: flushedTask.effectiveWorkSeconds,
+        workSegmentStartedAt: null,
+      },
+    });
+    if (transferRequestId) {
+      await tx.taskAssistantTransferRequest.update({
+        where: { id: transferRequestId },
+        data: { status: "completed", completedAt: now },
+      });
+    }
+    await tx.taskAssistantTransferRequest.updateMany({
+      where: {
+        taskId,
+        status: { in: ["confirming", "pending", "pending_after_complete"] },
+        ...(transferRequestId ? { id: { not: transferRequestId } } : {}),
+      },
+      data: { status: "canceled", canceledAt: now, reason: "任务已完成其他移交" },
+    });
+    await tx.profile.update({
+      where: { id: targetAssistantId },
+      data: { status: ProfileStatus.assigned },
+    });
+  });
+
+  await syncProfileStatus();
+  return "immediate";
+}
+
+async function executeImmediateAssistantSwap(
+  taskId: string,
+  fromAssistantId: string,
+  targetAssistantId: string,
+  counterpartTaskId: string,
+  transferRequestId: string,
+): Promise<"swap_immediate"> {
+  if (fromAssistantId === targetAssistantId) throw new Error("不能和自己互换任务");
+  if (taskId === counterpartTaskId) throw new Error("互换任务无效");
+
+  const { task: sourceTask, taskBuildingId } = await validateManualTransferTask(taskId, fromAssistantId);
+  const { task: counterpartTask, taskBuildingId: counterpartBuildingId } = await validateManualTransferTask(
+    counterpartTaskId,
+    targetAssistantId,
+  );
+  if (taskBuildingId !== counterpartBuildingId) throw new Error("互换任务不在同一区域");
+
+  const targetEligibility = await manualTransferTargetEligibility(targetAssistantId, taskBuildingId);
+  if (!targetEligibility.ok || targetEligibility.mode !== "reserved") {
+    throw new Error(targetEligibility.reason ?? "目标助理当前不能互换任务");
+  }
+
+  const now = new Date();
+  const flushedSourceTask = flushTaskWorkSegment(sourceTask);
+  const flushedSourcePrimary = flushPrimaryParticipant(sourceTask, fromAssistantId);
+  const flushedCounterpartTask = flushTaskWorkSegment(counterpartTask);
+  const flushedCounterpartPrimary = flushPrimaryParticipant(counterpartTask, targetAssistantId);
+
+  await prisma.$transaction(async (tx) => {
+    await tx.taskCollaborator.updateMany({
+      where: {
+        taskId,
+        role: "primary",
+        status: { not: "left" },
+      },
+      data: {
+        status: "left",
+        leftAt: now,
+        effectiveWorkSeconds: flushedSourcePrimary.effectiveWorkSeconds,
+        workSegmentStartedAt: null,
+      },
+    });
+    await tx.taskCollaborator.updateMany({
+      where: {
+        taskId: counterpartTaskId,
+        role: "primary",
+        status: { not: "left" },
+      },
+      data: {
+        status: "left",
+        leftAt: now,
+        effectiveWorkSeconds: flushedCounterpartPrimary.effectiveWorkSeconds,
+        workSegmentStartedAt: null,
+      },
+    });
+    await tx.taskCollaborator.upsert({
+      where: { taskId_assistantId: { taskId, assistantId: targetAssistantId } },
+      create: { taskId, assistantId: targetAssistantId, role: "primary", status: "waiting", joinedAt: now },
+      update: {
+        role: "primary",
+        status: "waiting",
+        joinedAt: now,
+        startedAt: null,
+        completedAt: null,
+        leftAt: null,
+        workSegmentStartedAt: null,
+      },
+    });
+    await tx.taskCollaborator.upsert({
+      where: { taskId_assistantId: { taskId: counterpartTaskId, assistantId: fromAssistantId } },
+      create: {
+        taskId: counterpartTaskId,
+        assistantId: fromAssistantId,
+        role: "primary",
+        status: "waiting",
+        joinedAt: now,
+      },
+      update: {
+        role: "primary",
+        status: "waiting",
+        joinedAt: now,
+        startedAt: null,
+        completedAt: null,
+        leftAt: null,
+        workSegmentStartedAt: null,
+      },
+    });
+    await tx.bookingTask.update({
+      where: { id: taskId },
+      data: {
+        assistantId: targetAssistantId,
+        status: TaskStatus.waiting,
+        pausedAt: null,
+        effectiveWorkSeconds: flushedSourceTask.effectiveWorkSeconds,
+        workSegmentStartedAt: null,
+      },
+    });
+    await tx.bookingTask.update({
+      where: { id: counterpartTaskId },
+      data: {
+        assistantId: fromAssistantId,
+        status: TaskStatus.waiting,
+        pausedAt: null,
+        effectiveWorkSeconds: flushedCounterpartTask.effectiveWorkSeconds,
+        workSegmentStartedAt: null,
+      },
+    });
+    await tx.taskAssistantTransferRequest.update({
+      where: { id: transferRequestId },
+      data: {
+        status: "completed",
+        responseMode: "pause_and_go",
+        targetConfirmedAt: now,
+        completedAt: now,
+      },
+    });
+    await tx.taskAssistantTransferRequest.updateMany({
+      where: {
+        id: { not: transferRequestId },
+        status: { in: ["confirming", "pending", "pending_after_complete"] },
+        OR: [
+          { taskId },
+          { taskId: counterpartTaskId },
+          { counterpartTaskId: taskId },
+          { counterpartTaskId },
+        ],
+      },
+      data: { status: "canceled", canceledAt: now, reason: "任务已互换，其他移交请求取消" },
+    });
+    await tx.profile.updateMany({
+      where: { id: { in: [fromAssistantId, targetAssistantId] } },
+      data: { status: ProfileStatus.assigned },
+    });
+  });
+
+  await syncProfileStatus();
+  return "swap_immediate";
+}
+
+export async function requestPrimaryAssistantTransfer(
+  taskId: string,
+  fromAssistantId: string,
+  targetAssistantId: string,
+): Promise<{ mode: ManualTransferMode; kind: AssistantTransferKind; requestId?: string; counterpartTaskId?: string | null }> {
+  if (fromAssistantId === targetAssistantId) throw new Error("不能移交给自己");
+  const { taskBuildingId } = await validateManualTransferTask(taskId, fromAssistantId);
+  const existing = await prisma.taskAssistantTransferRequest.findFirst({
+    where: { taskId, status: { in: ["confirming", "pending", "pending_after_complete"] } },
+    select: { id: true },
+  });
+  if (existing) throw new Error("该任务已有移交请求，请等待目标助理处理后再操作");
+
+  const targetEligibility = await manualTransferTargetEligibility(targetAssistantId, taskBuildingId);
+  if (!targetEligibility.ok || !targetEligibility.mode) {
+    throw new Error(targetEligibility.reason ?? "目标助理当前不能接手");
+  }
+
+  let kind: AssistantTransferKind = "handoff";
+  let counterpartTaskId: string | null = null;
+  if (targetEligibility.mode === "reserved") {
+    const counterpartTask = await activePrimaryWorkingTaskForAssistant(targetAssistantId);
+    if (!counterpartTask) throw new Error("未找到目标助理当前可互换的进行中任务");
+    await validateManualTransferTask(counterpartTask.id, targetAssistantId);
+    kind = "swap";
+    counterpartTaskId = counterpartTask.id;
+  }
+
+  const request = await prisma.taskAssistantTransferRequest.create({
+    data: {
+      taskId,
+      fromAssistantId,
+      targetAssistantId,
+      counterpartTaskId,
+      kind,
+      status: "confirming",
+      reason: kind === "swap" ? "assistant_swap_confirming" : "assistant_handoff_confirming",
+    },
+  });
+  return { mode: targetEligibility.mode, kind, requestId: request.id, counterpartTaskId };
+}
+
+export async function respondPrimaryAssistantTransfer(
+  taskId: string,
+  targetAssistantId: string,
+  accepted: boolean,
+  responseMode?: AssistantTransferResponseMode,
+): Promise<{
+  mode: "accepted" | "rejected";
+  requestId: string;
+  kind: AssistantTransferKind;
+  responseMode?: AssistantTransferResponseMode | null;
+}> {
+  const request = await prisma.taskAssistantTransferRequest.findFirst({
+    where: {
+      taskId,
+      targetAssistantId,
+      status: "confirming",
+    },
+    include: {
+      task: { select: { id: true, assistantId: true, status: true, completedAt: true } },
+    },
+    orderBy: { requestedAt: "desc" },
+  });
+  if (!request) throw new Error("未找到待确认的移交请求");
+  if (!request.task || request.task.status === TaskStatus.completed || request.task.completedAt) {
+    await prisma.taskAssistantTransferRequest.update({
+      where: { id: request.id },
+      data: { status: "expired", canceledAt: new Date(), reason: "任务已完成，移交请求失效" },
+    });
+    throw new Error("任务已完成，移交请求已失效");
+  }
+  if (request.task.assistantId !== request.fromAssistantId) {
+    await prisma.taskAssistantTransferRequest.update({
+      where: { id: request.id },
+      data: { status: "expired", canceledAt: new Date(), reason: "任务负责人已变化，移交请求失效" },
+    });
+    throw new Error("任务负责人已变化，移交请求已失效");
+  }
+
+  const now = new Date();
+  if (!accepted) {
+    await prisma.taskAssistantTransferRequest.update({
+      where: { id: request.id },
+      data: { status: "rejected", canceledAt: now, reason: "目标助理拒绝接替" },
+    });
+    return { mode: "rejected", requestId: request.id, kind: request.kind as AssistantTransferKind };
+  }
+
+  const kind = request.kind as AssistantTransferKind;
+  if (kind === "handoff") {
+    await prisma.taskAssistantTransferRequest.update({
+      where: { id: request.id },
+      data: {
+        status: "pending",
+        responseMode: null,
+        targetConfirmedAt: now,
+        reason: "target_assistant_confirmed_handoff",
+      },
+    });
+    await processPendingTaskAssistantTransfers();
+    return { mode: "accepted", requestId: request.id, kind, responseMode: null };
+  }
+
+  if (!request.counterpartTaskId) {
+    await prisma.taskAssistantTransferRequest.update({
+      where: { id: request.id },
+      data: { status: "expired", canceledAt: now, reason: "互换任务不存在，交换请求失效" },
+    });
+    throw new Error("互换任务不存在，交换请求已失效");
+  }
+  if (responseMode !== "pause_and_go" && responseMode !== "after_complete") {
+    throw new Error("请选择暂停并前往或结束后前往");
+  }
+
+  if (responseMode === "pause_and_go") {
+    await executeImmediateAssistantSwap(
+      request.taskId,
+      request.fromAssistantId,
+      request.targetAssistantId,
+      request.counterpartTaskId,
+      request.id,
+    );
+    return { mode: "accepted", requestId: request.id, kind, responseMode };
+  }
+
+  await prisma.taskAssistantTransferRequest.update({
+    where: { id: request.id },
+    data: {
+      status: "pending_after_complete",
+      responseMode,
+      targetConfirmedAt: now,
+      reason: "target_assistant_confirmed_after_complete",
+    },
+  });
+  return { mode: "accepted", requestId: request.id, kind, responseMode };
+}
+
+export async function processPendingTaskAssistantTransfers(): Promise<number> {
+  const requests = await prisma.taskAssistantTransferRequest.findMany({
+    where: { status: { in: ["pending", "pending_after_complete", "ready_to_takeover"] } },
+    include: {
+      task: {
+        select: {
+          id: true,
+          assistantId: true,
+          status: true,
+          completedAt: true,
+          roomNumber: true,
+          priority: true,
+          category: { select: { name: true } },
+          assistant: { select: { name: true } },
+        },
+      },
+      targetAssistant: { select: { name: true } },
+    },
+    orderBy: { requestedAt: "asc" },
+    take: 20,
+  });
+
+  let completed = 0;
+  for (const request of requests) {
+    if (!request.task || request.task.status === TaskStatus.completed || request.task.completedAt) {
+      await prisma.taskAssistantTransferRequest.update({
+        where: { id: request.id },
+        data: { status: "expired", canceledAt: new Date(), reason: "任务已完成，预约移交失效" },
+      });
+      continue;
+    }
+    if (request.task.assistantId !== request.fromAssistantId) {
+      await prisma.taskAssistantTransferRequest.update({
+        where: { id: request.id },
+        data: { status: "expired", canceledAt: new Date(), reason: "任务负责人已变化，预约移交失效" },
+      });
+      continue;
+    }
+
+    if (request.status === "pending_after_complete") {
+      const counterpartTask = request.counterpartTaskId
+        ? await prisma.bookingTask.findUnique({
+            where: { id: request.counterpartTaskId },
+            select: { id: true, status: true, completedAt: true },
+          })
+        : null;
+      if (!counterpartTask) {
+        await prisma.taskAssistantTransferRequest.update({
+          where: { id: request.id },
+          data: { status: "expired", canceledAt: new Date(), reason: "候选助理原任务不存在，交换请求失效" },
+        });
+        continue;
+      }
+      if (counterpartTask.status !== TaskStatus.completed && !counterpartTask.completedAt) {
+        continue;
+      }
+      await prisma.$transaction(async (tx) => {
+        await tx.taskAssistantTransferRequest.update({
+          where: { id: request.id },
+          data: {
+            status: "ready_to_takeover",
+            reason: "target_assistant_completed_counterpart_ready_to_takeover",
+          },
+        });
+        await tx.standbyReassignmentNotice.create({
+          data: {
+            taskId: request.taskId,
+            oldAssistantId: request.fromAssistantId,
+            oldAssistantName: request.task.assistant?.name ?? "原助理",
+            newAssistantId: request.targetAssistantId,
+            newAssistantName: request.targetAssistant.name,
+            taskRoomNumber: request.task.roomNumber,
+            taskCategoryName: request.task.category?.name ?? "任务",
+            taskPriority: request.task.priority,
+            waitedMinutes: 0,
+            thresholdMinutes: 0,
+            score: 0,
+            reason: "assistant_swap_after_complete_ready",
+            oldAssistantSetOffline: false,
+            newAssistantAcknowledgedAt: new Date(),
+          },
+        });
+      });
+      completed++;
+      continue;
+    }
+
+    if (request.status === "ready_to_takeover") {
+      continue;
+    }
+
+    const task = await prisma.bookingTask.findUnique({
+      where: { id: request.taskId },
+      include: { photographer: { select: { buildingId: true } } },
+    });
+    const taskBuildingId = task ? taskEffectiveBuildingId(task) : null;
+    if (taskBuildingId == null) continue;
+    const targetEligibility = await manualTransferTargetEligibility(request.targetAssistantId, taskBuildingId);
+    if (!targetEligibility.ok || targetEligibility.mode !== "immediate") continue;
+
+    try {
+      await executePrimaryAssistantTransfer(
+        request.taskId,
+        request.fromAssistantId,
+        request.targetAssistantId,
+        request.id,
+      );
+      completed++;
+    } catch (error) {
+      console.warn("[processPendingTaskAssistantTransfers]", error);
+    }
+  }
+
+  return completed;
+}
+
 /**
  * 自动分配最优空闲助理
  * 优先匹配同楼座、状态空闲的助理；同楼座内按轮询指针派发，避免总给同一个人
@@ -1110,7 +1831,14 @@ export async function assignTask(taskId: string, buildingId?: number): Promise<s
   let effectiveBuildingId = buildingId;
   const task = await prisma.bookingTask.findUnique({
     where: { id: taskId },
-    include: { photographer: true, category: { select: { name: true } } },
+    include: {
+      photographer: true,
+      category: { select: { name: true } },
+      collaborators: {
+        where: { status: { notIn: ["left", "completed"] } },
+        select: { assistantId: true, status: true },
+      },
+    },
   });
   if (!task || isPhotographerLimitQueuedTask(task)) return null;
 
@@ -1120,6 +1848,7 @@ export async function assignTask(taskId: string, buildingId?: number): Promise<s
 
   const isIroning = isIroningTaskCategory(task.category);
   const ironingSlots = isIroning ? await availableIroningMachineSlots(effectiveBuildingId, taskId) : 0;
+  const requiredIroningSlots = isIroning ? ironingMachineSlotsForTask(task) : 0;
 
   // 查找同楼座可派发助理：真正空闲，或只挂着未开始熨烫等待的助理。
   const dispatchableAssistants = await dispatchableAssistantsForBuilding(effectiveBuildingId);
@@ -1132,8 +1861,8 @@ export async function assignTask(taskId: string, buildingId?: number): Promise<s
     await attachIroningTaskToAssistant(
       taskId,
       selected.id,
-      ironingSlots > 0 ? IroningTaskStage.notified : IroningTaskStage.waiting_machine,
-      ironingSlots > 0
+      ironingSlots >= requiredIroningSlots ? IroningTaskStage.notified : IroningTaskStage.waiting_machine,
+      ironingSlots >= requiredIroningSlots
     );
   } else {
     // 分配任务（助理状态设为待就位，等待助理确认开始）
@@ -1222,8 +1951,8 @@ export async function autoClaimWaitingTask(assistantId: string): Promise<string 
 }
 
 function standbyReassignmentScore(priority: number, waitedMinutes: number, thresholdMinutes: number): number {
-  const boundedPriority = Math.min(5, Math.max(1, Math.round(priority)));
-  const priorityScore = (6 - boundedPriority) * thresholdMinutes;
+  const boundedPriority = Math.min(6, Math.max(1, Math.round(priority)));
+  const priorityScore = (7 - boundedPriority) * thresholdMinutes;
   const overtimeScore = Math.max(0, waitedMinutes - thresholdMinutes);
   return priorityScore + overtimeScore;
 }
@@ -1321,13 +2050,30 @@ export async function reassignOverdueStandbyTasks(): Promise<number> {
     const oldAssistantId = candidate.task.assistantId;
     if (!oldAssistantId || !candidate.task.assistant) continue;
     if (!available || available.length === 0) {
-      if (!isIroningTaskCategory(candidate.task.category) || candidate.task.ironingStage !== IroningTaskStage.notified) {
+      const isNotifiedIroning = isIroningTaskCategory(candidate.task.category) &&
+        candidate.task.ironingStage === IroningTaskStage.notified;
+      if (!isNotifiedIroning && await assistantHasPendingIroningWait(oldAssistantId)) {
         continue;
       }
       const hasActiveWork = await assistantHasActiveNonPassiveWork(oldAssistantId);
       if (hasActiveWork) continue;
 
       await prisma.$transaction(async (tx) => {
+        if (!isNotifiedIroning) {
+          await tx.bookingTask.update({
+            where: { id: candidate.task.id },
+            data: { assistantId: null },
+          });
+          await tx.taskCollaborator.updateMany({
+            where: {
+              taskId: candidate.task.id,
+              assistantId: oldAssistantId,
+              role: "primary",
+              status: { not: "left" },
+            },
+            data: { status: "left", leftAt: now },
+          });
+        }
         await tx.profile.update({
           where: { id: oldAssistantId },
           data: { status: ProfileStatus.idle, onlineStatus: OnlineStatus.offline, isOnline: false },
@@ -1347,12 +2093,13 @@ export async function reassignOverdueStandbyTasks(): Promise<number> {
             score: candidate.score,
             reason: "standby_timeout_no_replacement_offline",
             oldAssistantSetOffline: true,
+            newAssistantAcknowledgedAt: now,
           },
         });
       });
       reassignedCount++;
       console.log(
-        `[reassignOverdueStandbyTasks] ${candidate.task.id} ${candidate.task.assistant.name} 准备熨烫超时且无可替换助理，已离线`
+        `[reassignOverdueStandbyTasks] ${candidate.task.id} ${candidate.task.assistant.name} 待就位超时且无可替换助理，已离线`
       );
       continue;
     }
@@ -1851,6 +2598,10 @@ export async function sweepIroningMachineQueue(): Promise<number> {
 	    include: {
 	      photographer: { select: { buildingId: true } },
 	      category: { select: { name: true, minDuration: true, maxDuration: true, estDuration: true } },
+	      collaborators: {
+	        where: { status: { notIn: ["left", "completed"] } },
+	        select: { assistantId: true, status: true },
+	      },
 	    },
     orderBy: [{ priority: "asc" }, { createdAt: "asc" }],
   });
@@ -1883,6 +2634,8 @@ export async function sweepIroningMachineQueue(): Promise<number> {
 
     for (const task of sortedTasks) {
       if (slots <= 0) break;
+      const requiredSlots = ironingMachineSlotsForTask(task);
+      if (slots < requiredSlots) continue;
       const ownerId = task.assistantId;
       let targetAssistantId: string | null = null;
 
@@ -1910,7 +2663,7 @@ export async function sweepIroningMachineQueue(): Promise<number> {
       await attachIroningTaskToAssistant(task.id, targetAssistantId, IroningTaskStage.notified, true, now);
       await recordIdleDispatchRoundRobin(buildingId, targetAssistantId);
       touched++;
-      slots--;
+      slots -= requiredSlots;
       console.log(
         `[sweepIroningMachineQueue] 熨烫机空档 ${buildingId} → 任务 ${task.id} 分配/通知助理 ${targetAssistantId}, prep=${cfg.prepWindowMinutes}m timeout=${cfg.confirmTimeoutSeconds}s claimTtl=${cfg.machineClaimTtlMinutes}m`
       );
@@ -1935,6 +2688,7 @@ export async function sweepWaitingTasks(): Promise<number> {
 	  try {
 	    let assignedCount = 0;
 	    await releaseAllEligiblePhotographerLimitQueuedTasks();
+	    assignedCount += await processPendingTaskAssistantTransfers();
 	    assignedCount += await reassignOverdueStandbyTasks();
       assignedCount += await sweepIroningMachineQueue();
       assignedCount += await balanceIroningWaitAssignments();
@@ -2006,16 +2760,26 @@ export async function sweepWaitingTasks(): Promise<number> {
       },
       include: {
         photographer: { select: { buildingId: true } },
-        category: { select: { maxDuration: true, estDuration: true } },
+        category: { select: { name: true, maxDuration: true, estDuration: true } },
       },
       orderBy: [{ priority: "asc" }, { createdAt: "asc" }],
     });
     for (const task of stillOrphans) {
       const bid = task.locationBuildingId ?? task.photographer.buildingId;
       if (bid == null) continue;
-      const ok = await interruptWaitingPreempt(bid, task.id, task.priority, taskLeaveUpperMinutes(task.category));
-      if (ok) {
+      const taskLeaveUpperMin = taskLeaveUpperMinutes(task.category);
+      const waitingPreempted = await interruptWaitingPreempt(bid, task.id, task.priority, taskLeaveUpperMin);
+      if (waitingPreempted) {
         console.log(`[sweepWaitingTasks] 待就位插单 任务 ${task.id} (P${task.priority}) → 楼座 ${bid}`);
+        assignedCount++;
+        continue;
+      }
+
+      if (isIroningCategoryName(task.category.name)) continue;
+
+      const executingPreempted = await interruptExecutingPreempt(bid, task.id, task.priority, taskLeaveUpperMin);
+      if (executingPreempted) {
+        console.log(`[sweepWaitingTasks] 执行中插单 任务 ${task.id} (P${task.priority}) → 楼座 ${bid}`);
         assignedCount++;
       }
     }
@@ -2057,6 +2821,8 @@ export async function canInterrupt(
 
   if (await isIroningInterruptProtected(currentTask)) return false;
 
+  if (isExternalModelFollowTask(currentTask)) return false;
+
   if (!taskCategoryCanBeInterrupted(currentTask.category)) return false;
 
   // 执行中 P1 不可被插断
@@ -2087,6 +2853,7 @@ export async function interruptAssistant(
 ): Promise<boolean> {
   const currentTask = await prisma.bookingTask.findFirst({
     where: { assistantId, status: TaskStatus.executing },
+    include: { category: { select: { name: true } } },
   });
 
   if (!currentTask) return false;
@@ -2094,6 +2861,8 @@ export async function interruptAssistant(
   if (currentTask.parentTaskId) return false;
 
   if (await assistantHasPendingInterruptTask(assistantId)) return false;
+
+  if (isExternalModelFollowTask(currentTask)) return false;
 
   // 只分配新任务 + 记录父任务，不改变旧任务状态，不改变助理状态
   await prisma.$transaction(async (tx) => {
@@ -2109,6 +2878,88 @@ export async function interruptAssistant(
   });
 
   return true;
+}
+
+/**
+ * 对同楼座执行中任务尝试插单。供新建任务即时派发与公共队列 sweep 共用，避免两条路径规则分叉。
+ */
+export async function interruptExecutingPreempt(
+  buildingId: number,
+  newTaskId: string,
+  newPriority: number,
+  newTaskLeaveUpperMin: number
+): Promise<boolean> {
+  const busyAssistants = await prisma.profile.findMany({
+    where: {
+      role: { in: ["assistant", "assistant_leader"] },
+      status: { in: [ProfileStatus.executing, ProfileStatus.busy] },
+      onlineStatus: OnlineStatus.online,
+      OR: [
+        { activeBuildingId: buildingId },
+        { activeBuildingId: null, buildingId },
+      ],
+    },
+    select: { id: true },
+  });
+
+  const busyAssistantIds = busyAssistants.map((assistant) => assistant.id);
+  if (busyAssistantIds.length === 0) return false;
+
+  const runtimeCfg = await getSchedulerRuntimeConfig();
+  const globalInterruptCap = runtimeCfg.INTERRUPT_MAX_MINUTES;
+
+  const pendingInterrupts = await prisma.bookingTask.findMany({
+    where: {
+      assistantId: { in: busyAssistantIds },
+      status: { in: [TaskStatus.waiting, TaskStatus.executing, TaskStatus.paused] },
+      parentTaskId: { not: null },
+    },
+    select: { assistantId: true },
+    distinct: ["assistantId"],
+  });
+  const pendingInterruptAssistantIds = new Set(pendingInterrupts.map((task) => task.assistantId).filter(Boolean));
+
+  const assistantCurrentTasks = await prisma.bookingTask.findMany({
+    where: {
+      assistantId: { in: busyAssistantIds },
+      status: TaskStatus.executing,
+    },
+    include: {
+      category: { select: { name: true, canBeInterrupted: true, maxDuration: true, maxInterruptMinutes: true } },
+      photographer: { select: { buildingId: true } },
+      collaborators: {
+        where: { role: "helper", status: { in: ["waiting", "executing", "paused"] } },
+        select: { id: true },
+      },
+    },
+  });
+
+  const filteredCandidates: typeof assistantCurrentTasks = [];
+  for (const task of assistantCurrentTasks) {
+    if (!task.assistantId || pendingInterruptAssistantIds.has(task.assistantId) || task.parentTaskId) continue;
+    if (task.collaborators.length > 0) continue;
+    if (await isIroningInterruptProtected(task)) continue;
+    if (isExternalModelFollowTask(task)) continue;
+    if (task.isLocked || !taskCategoryCanBeInterrupted(task.category)) continue;
+    // 当前执行单须比新单更低优先（数值更大），同级或更高优先不被插。
+    if (task.priority <= newPriority) continue;
+    const cap = effectiveInterruptLeaveCapMinutes(globalInterruptCap, task.category.maxInterruptMinutes);
+    if (newTaskLeaveUpperMin > cap) continue;
+    filteredCandidates.push(task);
+  }
+
+  const interruptOrder = await buildP1InterruptCandidateOrderFromFiltered(buildingId, filteredCandidates);
+
+  for (const candidate of interruptOrder) {
+    if (!candidate.assistantId) continue;
+    const ok = await canInterrupt(candidate.assistantId, newPriority, newTaskLeaveUpperMin);
+    if (!ok) continue;
+    await interruptAssistant(candidate.assistantId, newTaskId);
+    await recordP1InterruptRoundRobin(buildingId, candidate.assistantId);
+    return true;
+  }
+
+  return false;
 }
 
 /**
@@ -2155,6 +3006,11 @@ export async function interruptWaitingPreempt(
             maxInterruptMinutes: true,
           },
         },
+        priorityUpgradeRequests: {
+          where: { status: PriorityUpgradeRequestStatus.approved },
+          select: { id: true },
+          take: 1,
+        },
       },
       orderBy: [{ priority: "desc" }, { createdAt: "asc" }],
     });
@@ -2167,6 +3023,7 @@ export async function interruptWaitingPreempt(
       !task.isLocked
     );
     if (!waitingTask) continue;
+    if (waitingTask.escalatedFromPriority != null || waitingTask.priorityUpgradeRequests.length > 0) continue;
     if (await taskHasActiveHelperParticipants(waitingTask.id)) continue;
     const cap = effectiveInterruptLeaveCapMinutes(globalInterruptCap, waitingTask.category.maxInterruptMinutes);
     if (newTaskLeaveUpperMin > cap) continue;
@@ -2402,6 +3259,7 @@ export async function runTaskMaintenance(options: { force?: boolean } = {}): Pro
   _maintenanceRunning = (async () => {
     try {
       const cleaned = await cleanupStaleTasks();
+      await reconcileCompletedParticipantTasks();
       await syncProfileStatus();
       const escalated = await escalatePriorities();
       const assigned = await sweepWaitingTasks();
@@ -2665,4 +3523,24 @@ export async function syncProfileStatus(): Promise<void> {
   } finally {
     _syncRunning = false;
   }
+}
+
+async function reconcileCompletedParticipantTasks(): Promise<number> {
+  const tasks = await prisma.bookingTask.findMany({
+    where: {
+      status: { not: TaskStatus.completed },
+      collaborators: {
+        some: { status: "completed" },
+        none: { status: { in: ACTIVE_PARTICIPANT_STATUSES } },
+      },
+    },
+    select: { id: true },
+    take: 100,
+  });
+
+  for (const task of tasks) {
+    await syncTaskAggregateFromParticipants(task.id);
+  }
+
+  return tasks.length;
 }

@@ -165,6 +165,17 @@ export default function MobileQuickBookingPanel({
               <span className={`rounded-lg px-2 py-1 text-[11px] ${duration.cls}`}>{duration.priority}</span>
             </button>
           ))}
+          {selectedCategory.specialActions?.map((action) => (
+            <button
+              type="button"
+              key={`${selectedCategory.name}-special-${action.title}`}
+              onClick={() => onCreateTask(action.title, action)}
+              className="flex min-h-[44px] items-center justify-between rounded-2xl bg-purple-500 px-4 text-[13px] font-extrabold text-white shadow-sm shadow-purple-500/20 active:scale-[0.99]"
+            >
+              <span>{action.title}</span>
+              <span className="rounded-lg bg-white/18 px-2 py-1 text-[11px]">{action.priority}</span>
+            </button>
+          ))}
         </div>
       )}
     </div>

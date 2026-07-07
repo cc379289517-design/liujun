@@ -116,7 +116,9 @@ model Profile {
   status        ProfileStatus @default(idle)
   subStatus     String?       @map("sub_status") // 微标签：上厕所、请假、身体不适
   eatingStartedAt DateTime?   @map("eating_started_at")
+  eatingPausedAt  DateTime?   @map("eating_paused_at")
   eatingEndedAt   DateTime?   @map("eating_ended_at")
+  eatingAccumulatedSeconds Int @default(0) @map("eating_accumulated_seconds")
   onlineStatus  OnlineStatus  @default(online) @map("online_status")
   isOnline      Boolean       @default(true) @map("is_online")
   building      Building      @relation(fields: [buildingId], references: [id])
@@ -130,6 +132,8 @@ model Profile {
   priorityUpgradeRequests TaskPriorityUpgradeRequest[] @relation("PriorityUpgradeRequester")
   reviewedPriorityUpgradeRequests TaskPriorityUpgradeRequest[] @relation("PriorityUpgradeReviewer")
   taskCompletionRegistrations TaskCompletionRegistration[] @relation("TaskCompletionRegistrar")
+  transferRequestsFrom TaskAssistantTransferRequest[] @relation("TransferFromAssistant")
+  transferRequestsTarget TaskAssistantTransferRequest[] @relation("TransferTargetAssistant")
 
   @@map("profiles")
 }
@@ -232,6 +236,7 @@ model BookingTask {
   interruptTasks  BookingTask[] @relation("TaskInterrupt")
   collaborators   TaskCollaborator[]
   standbyReassignmentNotices StandbyReassignmentNotice[]
+  assistantTransferRequests TaskAssistantTransferRequest[]
   priorityUpgradeRequests TaskPriorityUpgradeRequest[]
   completionRegistration TaskCompletionRegistration?
 
@@ -328,6 +333,33 @@ model StandbyReassignmentNotice {
   @@index([oldAssistantId, oldAssistantAcknowledgedAt])
   @@index([taskId])
   @@map("standby_reassignment_notices")
+}
+
+model TaskAssistantTransferRequest {
+  id                String   @id @default(uuid())
+  taskId            String   @map("task_id")
+  fromAssistantId   String   @map("from_assistant_id")
+  targetAssistantId String   @map("target_assistant_id")
+  counterpartTaskId String?  @map("counterpart_task_id")
+  kind              String   @default("handoff")
+  responseMode      String?  @map("response_mode")
+  status            String   @default("pending")
+  reason            String?
+  requestedAt       DateTime @default(now()) @map("requested_at")
+  targetConfirmedAt DateTime? @map("target_confirmed_at")
+  completedAt       DateTime? @map("completed_at")
+  canceledAt        DateTime? @map("canceled_at")
+
+  task            BookingTask @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  fromAssistant   Profile     @relation("TransferFromAssistant", fields: [fromAssistantId], references: [id])
+  targetAssistant Profile     @relation("TransferTargetAssistant", fields: [targetAssistantId], references: [id])
+
+  @@index([status, requestedAt])
+  @@index([taskId, status])
+  @@index([counterpartTaskId, status])
+  @@index([fromAssistantId, status])
+  @@index([targetAssistantId, status])
+  @@map("task_assistant_transfer_requests")
 }
 
 // ============================================

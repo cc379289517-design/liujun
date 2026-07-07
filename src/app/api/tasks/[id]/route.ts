@@ -1,52 +1,21 @@
 import { NextRequest } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { completeTask, assignTask, prepareWaitingTaskForAssistantStart, runTaskMaintenance, syncProfileStatus, updateTaskParticipantStatus } from "@/lib/scheduler";
+import {
+  completeTask,
+  assignTask,
+  ironingMachineAvailabilityForTask,
+  prepareWaitingTaskForAssistantStart,
+  respondPrimaryAssistantTransfer,
+  runTaskMaintenance,
+  requestPrimaryAssistantTransfer,
+  syncProfileStatus,
+  updateTaskParticipantStatus,
+} from "@/lib/scheduler";
 import { TaskStatus, ProfileStatus } from "@/generated/prisma/client";
 import { Prisma } from "@/generated/prisma/client";
 import { flushExecutingSegment } from "@/lib/taskEffectiveTime";
 
 type RouteContext = { params: Promise<{ id: string }> };
-
-function taskTypeGroupName(name: string | null | undefined): string {
-  if (!name) return "其他";
-  if (name === "短时熨烫" || name === "长时熨烫" || name === "熨烫" || name.includes("熨")) return "熨烫";
-  return "其他";
-}
-
-async function ironingMachineAvailabilityForStart(taskId: string): Promise<{ ok: boolean; available: number; executing: number }> {
-  const task = await prisma.bookingTask.findUnique({
-    where: { id: taskId },
-    select: {
-      id: true,
-      locationBuildingId: true,
-      photographer: { select: { buildingId: true } },
-      category: { select: { name: true } },
-    },
-  });
-  if (!task || taskTypeGroupName(task.category?.name) !== "熨烫") {
-    return { ok: true, available: 0, executing: 0 };
-  }
-
-  const buildingId = task.locationBuildingId ?? task.photographer.buildingId;
-  const [available, executing] = await Promise.all([
-    prisma.ironingMachine.count({ where: { buildingId, status: "normal" } }),
-    prisma.bookingTask.count({
-      where: {
-        id: { not: task.id },
-        status: TaskStatus.executing,
-        OR: [
-          { locationBuildingId: buildingId },
-          { locationBuildingId: null, photographer: { buildingId } },
-        ],
-        category: {
-          name: { contains: "熨" },
-        },
-      },
-    }),
-  ]);
-
-  return { ok: executing < available, available, executing };
-}
 
 /**
  * GET /api/tasks/[id] - 获取单个任务详情
@@ -74,6 +43,11 @@ export async function GET(_request: NextRequest, { params }: RouteContext) {
             assistant: { select: { id: true, name: true } },
           },
         },
+        assistantTransferRequests: {
+          where: { status: { in: ["confirming", "pending", "pending_after_complete", "ready_to_takeover"] } },
+          orderBy: { requestedAt: "desc" },
+          take: 3,
+        },
       },
     });
 
@@ -91,9 +65,12 @@ export async function GET(_request: NextRequest, { params }: RouteContext) {
 /**
  * DELETE /api/tasks/[id] - 删除单个任务
  */
-export async function DELETE(_request: NextRequest, { params }: RouteContext) {
+export async function DELETE(request: NextRequest, { params }: RouteContext) {
   try {
     const { id } = await params;
+    const actorProfileId =
+      request.nextUrl.searchParams.get("actorProfileId") ||
+      request.headers.get("x-profile-id");
 
     const task = await prisma.bookingTask.findUnique({
       where: { id },
@@ -104,6 +81,12 @@ export async function DELETE(_request: NextRequest, { params }: RouteContext) {
     });
     if (!task) {
       return Response.json({ error: "Task not found" }, { status: 404 });
+    }
+    if (!actorProfileId || actorProfileId !== task.photographerId) {
+      return Response.json(
+        { error: "只有任务发布摄影师可以取消未开始任务", code: "ONLY_PHOTOGRAPHER_CAN_CANCEL_TASK" },
+        { status: 403 }
+      );
     }
     if (task.status !== TaskStatus.waiting || task.startedAt != null) {
       return Response.json(
@@ -167,18 +150,23 @@ export async function PATCH(request: NextRequest, { params }: RouteContext) {
           return Response.json({ error: "actorAssistantId required for start" }, { status: 400 });
         }
         await prepareWaitingTaskForAssistantStart(id, actorId);
-        const ironingAvailability = await ironingMachineAvailabilityForStart(id);
+        const ironingAvailability = await ironingMachineAvailabilityForTask(id);
         const refreshedTask = await prisma.bookingTask.findUnique({
           where: { id },
           select: { ironingStage: true },
         });
-        if (!ironingAvailability.ok && refreshedTask?.ironingStage !== "notified") {
+        if (
+          !ironingAvailability.ok &&
+          refreshedTask?.ironingStage !== "notified" &&
+          refreshedTask?.ironingStage !== "using"
+        ) {
           return Response.json(
             {
               code: "ironing_machine_busy",
               error: "当前区域熨烫机正在使用，请等待上一位助理完成后再开始",
               available: ironingAvailability.available,
-              executing: ironingAvailability.executing,
+              executing: ironingAvailability.occupied,
+              required: ironingAvailability.required,
             },
             { status: 409 },
           );
@@ -359,9 +347,188 @@ export async function PATCH(request: NextRequest, { params }: RouteContext) {
         return Response.json(updated);
       }
 
+      case "cancelSpecifiedAssistant": {
+        const specifiedTask = await prisma.bookingTask.findUnique({
+          where: { id },
+          include: {
+            photographer: true,
+            assistant: true,
+            category: true,
+            parentTask: true,
+            interruptTasks: true,
+            collaborators: {
+              where: { status: { not: "left" } },
+              include: {
+                assistant: { select: { id: true, name: true, currentRoom: true, avatar: true, buildingId: true } },
+              },
+            },
+            completionRegistration: {
+              include: {
+                assistant: { select: { id: true, name: true } },
+              },
+            },
+          },
+        });
+        if (!specifiedTask) {
+          return Response.json({ error: "Task not found" }, { status: 404 });
+        }
+        if (!specifiedTask.isSpecified || !specifiedTask.assistantId) {
+          return Response.json({ error: "该任务不是指定助理任务", code: "TASK_NOT_SPECIFIED" }, { status: 409 });
+        }
+        const specifiedParticipant = specifiedTask.collaborators.find(
+          (participant) => participant.assistantId === specifiedTask.assistantId
+        );
+        if (
+          specifiedTask.status !== TaskStatus.waiting ||
+          specifiedTask.startedAt != null ||
+          specifiedParticipant?.startedAt != null ||
+          specifiedParticipant?.status === "executing" ||
+          specifiedParticipant?.status === "paused" ||
+          specifiedParticipant?.status === "completed"
+        ) {
+          return Response.json(
+            { error: "指定助理已开始过该任务，不能取消指定", code: "SPECIFIED_TASK_ALREADY_STARTED" },
+            { status: 409 }
+          );
+        }
+
+        const now = new Date();
+        await prisma.$transaction(async (tx) => {
+          await tx.taskCollaborator.updateMany({
+            where: {
+              taskId: id,
+              assistantId: specifiedTask.assistantId!,
+              role: "primary",
+              status: { not: "left" },
+            },
+            data: { status: "left", leftAt: now },
+          });
+          await tx.bookingTask.update({
+            where: { id },
+            data: {
+              isSpecified: false,
+              assistantId: null,
+              ironingStage: "none",
+              ironingNotifiedAt: null,
+              ironingStartedAt: null,
+            },
+          });
+        });
+        await syncProfileStatus();
+        await runTaskMaintenance();
+        const latest = await prisma.bookingTask.findUnique({
+          where: { id },
+          include: {
+            photographer: true,
+            assistant: true,
+            category: true,
+            parentTask: true,
+            interruptTasks: true,
+            collaborators: {
+              where: { status: { not: "left" } },
+              include: {
+                assistant: { select: { id: true, name: true, currentRoom: true, avatar: true, buildingId: true } },
+              },
+            },
+            completionRegistration: {
+              include: {
+                assistant: { select: { id: true, name: true } },
+              },
+            },
+          },
+        });
+        return Response.json(latest);
+      }
+
+      case "transferPrimaryAssistant": {
+        const { targetAssistantId } = body as { targetAssistantId?: string };
+        const actorId = typeof actorAssistantId === "string" ? actorAssistantId : task.assistantId;
+        if (!actorId) {
+          return Response.json({ error: "actorAssistantId required for transfer", code: "TRANSFER_ACTOR_REQUIRED" }, { status: 400 });
+        }
+        if (!targetAssistantId || typeof targetAssistantId !== "string") {
+          return Response.json({ error: "targetAssistantId required for transfer", code: "TRANSFER_TARGET_REQUIRED" }, { status: 400 });
+        }
+        const result = await requestPrimaryAssistantTransfer(id, actorId, targetAssistantId);
+        await runTaskMaintenance({ force: true });
+        const latest = await prisma.bookingTask.findUnique({
+          where: { id },
+          include: {
+            photographer: true,
+            assistant: true,
+            category: true,
+            parentTask: true,
+            interruptTasks: true,
+            collaborators: {
+              where: { status: { not: "left" } },
+              include: {
+                assistant: { select: { id: true, name: true, currentRoom: true, avatar: true, buildingId: true } },
+              },
+            },
+            completionRegistration: {
+              include: {
+                assistant: { select: { id: true, name: true } },
+              },
+            },
+            assistantTransferRequests: {
+              where: { status: { in: ["confirming", "pending", "pending_after_complete", "ready_to_takeover"] } },
+              orderBy: { requestedAt: "desc" },
+              take: 3,
+            },
+          },
+        });
+        if (!latest) {
+          return Response.json({ error: "Task not found after transfer" }, { status: 404 });
+        }
+        return Response.json({ ...latest, transferResult: result });
+      }
+
+      case "respondPrimaryAssistantTransfer": {
+        const { accepted, responseMode } = body as { accepted?: boolean; responseMode?: "pause_and_go" | "after_complete" };
+        const actorId = typeof actorAssistantId === "string" ? actorAssistantId : null;
+        if (!actorId) {
+          return Response.json({ error: "actorAssistantId required for transfer response", code: "TRANSFER_ACTOR_REQUIRED" }, { status: 400 });
+        }
+        if (typeof accepted !== "boolean") {
+          return Response.json({ error: "accepted boolean required for transfer response", code: "TRANSFER_RESPONSE_REQUIRED" }, { status: 400 });
+        }
+        const result = await respondPrimaryAssistantTransfer(id, actorId, accepted, responseMode);
+        await runTaskMaintenance({ force: true });
+        const latest = await prisma.bookingTask.findUnique({
+          where: { id },
+          include: {
+            photographer: true,
+            assistant: true,
+            category: true,
+            parentTask: true,
+            interruptTasks: true,
+            collaborators: {
+              where: { status: { not: "left" } },
+              include: {
+                assistant: { select: { id: true, name: true, currentRoom: true, avatar: true, buildingId: true } },
+              },
+            },
+            completionRegistration: {
+              include: {
+                assistant: { select: { id: true, name: true } },
+              },
+            },
+            assistantTransferRequests: {
+              where: { status: { in: ["confirming", "pending", "pending_after_complete", "ready_to_takeover"] } },
+              orderBy: { requestedAt: "desc" },
+              take: 3,
+            },
+          },
+        });
+        if (!latest) {
+          return Response.json({ error: "Task not found after transfer response" }, { status: 404 });
+        }
+        return Response.json({ ...latest, transferResult: result });
+      }
+
       default:
         return Response.json(
-          { error: "Invalid action. Use: start, pause, complete, extend, setStatus, updateNote, updatePublisherFeedback" },
+          { error: "Invalid action. Use: start, pause, complete, extend, setStatus, updateNote, updatePublisherFeedback, cancelSpecifiedAssistant, transferPrimaryAssistant, respondPrimaryAssistantTransfer" },
           { status: 400 }
         );
     }
@@ -374,6 +541,10 @@ export async function PATCH(request: NextRequest, { params }: RouteContext) {
       "该任务已",
       "多人协作任务",
       "只有助理",
+      "移交",
+      "目标助理",
+      "不能使用交换",
+      "不能接手",
     ];
     const isBusinessError =
       error instanceof Error &&

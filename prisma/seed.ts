@@ -82,8 +82,8 @@ async function main() {
   // ============================================
   const configs = [
     { key: "ending_alert_min", value: "2", label: "快结束提醒(分钟)" },
-    { key: "eating_overtime_alert_min", value: "30", label: "吃饭中超时提醒(分钟)" },
-    { key: "eating_reentry_cooldown_min", value: "30", label: "吃饭再次切换冷却(分钟)" },
+    { key: "eating_overtime_alert_min", value: "30", label: "吃饭累计时长上限/提醒(分钟)" },
+    { key: "eating_reentry_cooldown_min", value: "30", label: "结束吃饭后再次切换冷却(分钟)" },
     { key: "interruption_max", value: "30", label: "插单最大离场时间(分钟)" },
     { key: "upgrade_threshold", value: "30", label: "自动提权阈值(分钟)" },
     { key: "priority_upgrade_request_enabled", value: "true", label: "人工提权申请开关" },

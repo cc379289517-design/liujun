@@ -77,6 +77,21 @@ export type TaskFromAPI = {
     reason: string;
     createdAt: string;
   }[];
+  assistantTransferRequests?: {
+    id: string;
+    taskId: string;
+    fromAssistantId: string;
+    targetAssistantId: string;
+    counterpartTaskId?: string | null;
+    kind?: "handoff" | "swap" | string;
+    responseMode?: "pause_and_go" | "after_complete" | string | null;
+    status: string;
+    reason: string | null;
+    requestedAt: string;
+    targetConfirmedAt?: string | null;
+    completedAt: string | null;
+    canceledAt: string | null;
+  }[];
   completionRegistration?: TaskCompletionRegistration | null;
   createdAt: string;
   startedAt: string | null;
@@ -188,9 +203,8 @@ export type AssistantRankingDetail = {
   taskId: string;
   taskTitle: string;
   serviceSeconds: number;
+  scoreFactor: number;
   serviceScore: number;
-  taskBonus: number;
-  crossBuildingBonus: number;
   totalScore: number;
 };
 
@@ -201,7 +215,6 @@ export type AssistantRankingRow = {
   score: number;
   completedCount: number;
   workSeconds: number;
-  crossBuildingCount: number;
   lastCompletedAtMs: number;
   details: AssistantRankingDetail[];
 };
@@ -245,6 +258,7 @@ export type IroningWorkItem = {
   assistantId: string;
   assistantName: string;
   assistantAvatar: string | null;
+  slotKey?: string;
   elapsedMin: number;
   overtimeMin: number | null;
   remainingMin: number | null;
@@ -263,6 +277,21 @@ export type DbCategory = {
   maxDuration: number;
 };
 
+export type BuiltCategoryDuration = {
+  label: string;
+  priority: string;
+  cls: string;
+  categoryId: number;
+  sourceName?: string;
+  priorityOverride?: number;
+  quickBookSpecialType?: "external_model_follow";
+};
+
+export type BuiltCategorySpecialAction = BuiltCategoryDuration & {
+  title: string;
+  tone: "purple";
+};
+
 export type BuiltCategory = {
   name: string;
   bg: string;
@@ -271,7 +300,8 @@ export type BuiltCategory = {
   darkActive: string;
   text: string;
   darkText: string;
-  durations: { label: string; priority: string; cls: string; categoryId: number }[];
+  durations: BuiltCategoryDuration[];
+  specialActions?: BuiltCategorySpecialAction[];
 };
 
 export type DockEntry = [number, { name: string; profiles: { id: string }[] }];

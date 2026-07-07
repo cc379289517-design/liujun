@@ -5,7 +5,6 @@ import { getCollaborationAvailabilityForBuilding, syncProfileStatus, syncTaskAgg
 import {
   collaborationMaxParticipantsConfigKey,
   parseCollaborationMaxParticipants,
-  taskCategoryAllowsCollaboration,
 } from "@/lib/collaborationRules";
 
 type RouteContext = { params: Promise<{ id: string }> };
@@ -74,9 +73,6 @@ export async function POST(request: NextRequest, { params }: RouteContext) {
     const addedIds = assistantIds.filter((assistantId) => !currentIds.includes(assistantId));
     const primaryParticipantCount = task.assistantId ? 1 : 0;
     if (addedIds.length > 0) {
-      if (!taskCategoryAllowsCollaboration(task.category)) {
-        return Response.json({ error: "Only tasks over 30 minutes can add collaborators" }, { status: 400 });
-      }
       const availability = await getCollaborationAvailabilityForBuilding(taskBuildingId);
       if (!availability.enabled) {
         return Response.json(

@@ -135,8 +135,8 @@ function durationLabel(min: number, max: number): string {
 
 const PARAM_DEFS = [
   { key: "ending_alert_min", min: 1, max: 10, step: 1, defaultValue: 2, label: "快结束提醒(分钟)" },
-  { key: EATING_OVERTIME_ALERT_CONFIG_KEY, min: 5, max: 120, step: 5, defaultValue: DEFAULT_EATING_OVERTIME_ALERT_MIN, label: "吃饭中超时提醒(分钟)" },
-  { key: EATING_REENTRY_COOLDOWN_CONFIG_KEY, min: 5, max: 180, step: 5, defaultValue: DEFAULT_EATING_REENTRY_COOLDOWN_MIN, label: "吃饭再次切换冷却(分钟)" },
+  { key: EATING_OVERTIME_ALERT_CONFIG_KEY, min: 5, max: 120, step: 5, defaultValue: DEFAULT_EATING_OVERTIME_ALERT_MIN, label: "吃饭累计时长上限/提醒(分钟)" },
+  { key: EATING_REENTRY_COOLDOWN_CONFIG_KEY, min: 5, max: 180, step: 5, defaultValue: DEFAULT_EATING_REENTRY_COOLDOWN_MIN, label: "结束吃饭后再次切换冷却(分钟)" },
   {
     key: STANDBY_REASSIGN_TIMEOUT_MIN_CONFIG_KEY,
     min: 1,
@@ -856,7 +856,7 @@ export default function TaskLogicTab({ categories: initCategories, buildings, co
 	          <div className="card p-4 space-y-3">
 	            <h4 className="text-xs font-semibold text-[--text-primary]">多人协作规则</h4>
 	            <p className="text-[10px] leading-4 text-[--text-muted]">
-	              按大区控制 30 分钟以上任务协作；队列达阈值后自动关闭新增协作，已有协作仍可展示和移除。
+	              按大区控制任务协作；队列达阈值后自动关闭新增协作，已有协作仍可展示和移除。
 	            </p>
             <div className="space-y-1.5">
               {buildings.length === 0 ? (

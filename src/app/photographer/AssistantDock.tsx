@@ -18,7 +18,9 @@ export interface DockAssistant {
   subStatus?: string | null;
   updatedAt?: string;
   eatingStartedAt?: string | null;
+  eatingPausedAt?: string | null;
   eatingEndedAt?: string | null;
+  eatingAccumulatedSeconds?: number | null;
   currentRoom: string | null;   // 当前活跃任务的房间（主标记位置）
   avatar: string | null;
   group: string | null;

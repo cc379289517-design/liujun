@@ -28,3 +28,38 @@ export function eatingReentryRemainingMs(
   const cooldownMs = parseEatingReentryCooldownMin(cooldownMinutes) * 60 * 1000;
   return Math.max(0, endedAtMs + cooldownMs - now.getTime());
 }
+
+export function normalizeEatingAccumulatedSeconds(value: unknown): number {
+  const n = Math.floor(Number(value));
+  if (!Number.isFinite(n) || n < 0) return 0;
+  return n;
+}
+
+export function eatingCurrentSegmentSeconds(
+  eatingStartedAt: Date | string | number | null | undefined,
+  now: Date | number = new Date()
+): number {
+  if (!eatingStartedAt) return 0;
+  const startedAtMs = typeof eatingStartedAt === "number" ? eatingStartedAt : new Date(eatingStartedAt).getTime();
+  const nowMs = typeof now === "number" ? now : now.getTime();
+  if (!Number.isFinite(startedAtMs) || !Number.isFinite(nowMs) || nowMs <= startedAtMs) return 0;
+  return Math.floor((nowMs - startedAtMs) / 1000);
+}
+
+export function eatingTotalElapsedSeconds(
+  eatingStartedAt: Date | string | number | null | undefined,
+  accumulatedSeconds: unknown,
+  now: Date | number = new Date()
+): number {
+  return normalizeEatingAccumulatedSeconds(accumulatedSeconds) + eatingCurrentSegmentSeconds(eatingStartedAt, now);
+}
+
+export function eatingRemainingSeconds(
+  eatingStartedAt: Date | string | number | null | undefined,
+  accumulatedSeconds: unknown,
+  now: Date | number,
+  limitMinutes: unknown
+): number {
+  const limitSeconds = parseEatingOvertimeAlertMin(limitMinutes) * 60;
+  return Math.max(0, limitSeconds - eatingTotalElapsedSeconds(eatingStartedAt, accumulatedSeconds, now));
+}

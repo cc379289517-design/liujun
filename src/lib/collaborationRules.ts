@@ -34,7 +34,5 @@ export function taskCategoryAllowsCollaboration(category: {
   minDuration?: number | null;
   maxDuration?: number | null;
 } | null | undefined): boolean {
-  const min = category?.minDuration;
-  const max = category?.maxDuration;
-  return (typeof max === "number" && max > 30) || (typeof min === "number" && min >= 30);
+  return category != null;
 }

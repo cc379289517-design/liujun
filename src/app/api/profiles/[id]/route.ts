@@ -1,11 +1,14 @@
 import { NextRequest } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { OnlineStatus, ProfileStatus, TaskStatus } from "@/generated/prisma/client";
+import { IroningTaskStage, OnlineStatus, ProfileStatus, TaskStatus } from "@/generated/prisma/client";
 import { runTaskMaintenance } from "@/lib/scheduler";
 import {
   ASSISTANT_EATING_SUB_STATUS,
+  EATING_OVERTIME_ALERT_CONFIG_KEY,
   EATING_REENTRY_COOLDOWN_CONFIG_KEY,
+  eatingTotalElapsedSeconds,
   eatingReentryRemainingMs,
+  parseEatingOvertimeAlertMin,
   parseEatingReentryCooldownMin,
 } from "@/lib/eatingPresence";
 
@@ -54,7 +57,7 @@ export async function PATCH(request: NextRequest, { params }: RouteContext) {
     const { id } = await params;
     const body = await request.json();
 
-    const { status, subStatus, currentRoom, buildingId, activeBuildingId, activeRoom, isOnline, name, role, avatar, employeeId, onlineStatus, department, group } = body;
+    const { status, subStatus, currentRoom, buildingId, activeBuildingId, activeRoom, isOnline, name, role, avatar, employeeId, onlineStatus, department, group, eatingExitMode } = body;
 
     const data: Record<string, unknown> = {};
     if (status && Object.values(ProfileStatus).includes(status)) {
@@ -87,7 +90,9 @@ export async function PATCH(request: NextRequest, { params }: RouteContext) {
         onlineStatus: true,
         subStatus: true,
         eatingStartedAt: true,
+        eatingPausedAt: true,
         eatingEndedAt: true,
+        eatingAccumulatedSeconds: true,
         role: true,
         buildingId: true,
         activeBuildingId: true,
@@ -98,7 +103,23 @@ export async function PATCH(request: NextRequest, { params }: RouteContext) {
       return Response.json({ error: "Profile not found" }, { status: 404 });
     }
 
-    const pausedTaskCount = before && ["assistant", "assistant_leader"].includes(before.role)
+    const isAssistant = ["assistant", "assistant_leader"].includes(before.role);
+    const requestedSubStatus =
+      subStatus !== undefined
+        ? subStatus || null
+        : onlineStatus !== undefined && onlineStatus !== OnlineStatus.online
+          ? null
+          : undefined;
+    const requestedOnlineStatus = onlineStatus as OnlineStatus | undefined;
+    const isPresenceChange = onlineStatus !== undefined || subStatus !== undefined;
+    const isSwitchingUnavailable =
+      isPresenceChange &&
+      (
+        (requestedSubStatus !== undefined && requestedSubStatus !== null) ||
+        (requestedOnlineStatus !== undefined && requestedOnlineStatus !== OnlineStatus.online)
+      );
+
+    const pausedTaskCount = before && isAssistant
       ? await prisma.bookingTask.count({
         where: {
           status: TaskStatus.paused,
@@ -109,13 +130,51 @@ export async function PATCH(request: NextRequest, { params }: RouteContext) {
         },
       })
       : 0;
+    const assignedWaitingTasks = isAssistant && before.status === ProfileStatus.assigned && isSwitchingUnavailable
+      ? await prisma.bookingTask.findMany({
+        where: {
+          assistantId: id,
+          status: TaskStatus.waiting,
+        },
+        select: {
+          id: true,
+          startedAt: true,
+          collaborators: {
+            where: {
+              assistantId: id,
+              role: "primary",
+              status: { not: "left" },
+            },
+            select: {
+              status: true,
+              startedAt: true,
+            },
+          },
+        },
+      })
+      : [];
+    const hasStartedAssignedTask = assignedWaitingTasks.some((task) =>
+      task.startedAt != null ||
+      task.collaborators.some((participant) =>
+        participant.startedAt != null ||
+        participant.status === "executing" ||
+        participant.status === "paused" ||
+        participant.status === "completed"
+      )
+    );
+    const canReleaseAssignedTasks =
+      before.status === ProfileStatus.assigned &&
+      isSwitchingUnavailable &&
+      !hasStartedAssignedTask;
+    const shouldReleaseAssignedTasks = canReleaseAssignedTasks && assignedWaitingTasks.length > 0;
 
-    // 助理/助理组长在任务中时，不允许切换在线状态；暂停中允许切换吃饭/休假
+    // 助理/助理组长在真实工作中时，不允许切换在线状态；未开始待就位可释放，暂停中允许切换吃饭/休假
     if (
-      (onlineStatus !== undefined || subStatus !== undefined) &&
-      ["assistant", "assistant_leader"].includes(before.role) &&
+      isPresenceChange &&
+      isAssistant &&
       before.status !== ProfileStatus.idle &&
-      !(before.status === ProfileStatus.busy && pausedTaskCount > 0)
+      !(before.status === ProfileStatus.busy && pausedTaskCount > 0) &&
+      !canReleaseAssignedTasks
     ) {
       const statusLabel: Record<string, string> = {
         assigned: "待就位",
@@ -129,14 +188,6 @@ export async function PATCH(request: NextRequest, { params }: RouteContext) {
       );
     }
 
-    const isAssistant = ["assistant", "assistant_leader"].includes(before.role);
-    const requestedSubStatus =
-      subStatus !== undefined
-        ? subStatus || null
-        : onlineStatus !== undefined && onlineStatus !== OnlineStatus.online
-          ? null
-          : undefined;
-    const requestedOnlineStatus = onlineStatus as OnlineStatus | undefined;
     const enteringEating =
       isAssistant &&
       requestedSubStatus === ASSISTANT_EATING_SUB_STATUS &&
@@ -150,11 +201,18 @@ export async function PATCH(request: NextRequest, { params }: RouteContext) {
       );
 
     if (enteringEating) {
-      const cfg = await prisma.systemConfig.findUnique({
-        where: { key: EATING_REENTRY_COOLDOWN_CONFIG_KEY },
-        select: { value: true },
-      });
-      const cooldownMinutes = parseEatingReentryCooldownMin(cfg?.value);
+      const [cooldownCfg, limitCfg] = await Promise.all([
+        prisma.systemConfig.findUnique({
+          where: { key: EATING_REENTRY_COOLDOWN_CONFIG_KEY },
+          select: { value: true },
+        }),
+        prisma.systemConfig.findUnique({
+          where: { key: EATING_OVERTIME_ALERT_CONFIG_KEY },
+          select: { value: true },
+        }),
+      ]);
+      const cooldownMinutes = parseEatingReentryCooldownMin(cooldownCfg?.value);
+      const limitMinutes = parseEatingOvertimeAlertMin(limitCfg?.value);
       const now = new Date();
       const remainingMs = eatingReentryRemainingMs(before.eatingEndedAt, now, cooldownMinutes);
       if (remainingMs > 0) {
@@ -170,20 +228,55 @@ export async function PATCH(request: NextRequest, { params }: RouteContext) {
           { status: 400 }
         );
       }
+      const startsNewMeal = !!before.eatingEndedAt;
+      const accumulatedSeconds = startsNewMeal ? 0 : before.eatingAccumulatedSeconds;
+      if (accumulatedSeconds >= limitMinutes * 60) {
+        return Response.json(
+          {
+            code: "EATING_TIME_LIMIT_REACHED",
+            error: `本次吃饭累计已达到${limitMinutes}分钟，请保持在线`,
+            limitMinutes,
+          },
+          { status: 400 }
+        );
+      }
       data.subStatus = ASSISTANT_EATING_SUB_STATUS;
       data.onlineStatus = OnlineStatus.online;
       data.isOnline = true;
       data.eatingStartedAt = now;
+      data.eatingPausedAt = null;
       data.eatingEndedAt = null;
+      data.eatingAccumulatedSeconds = accumulatedSeconds;
     } else if (leavingEating) {
+      const now = new Date();
+      const exitMode =
+        eatingExitMode === "end"
+          ? "end"
+          : eatingExitMode === "pause"
+            ? "pause"
+            : requestedOnlineStatus !== OnlineStatus.online
+              ? "end"
+              : "pause";
       data.subStatus = requestedSubStatus ?? null;
-      data.eatingEndedAt = new Date();
+      data.eatingStartedAt = null;
+      data.eatingAccumulatedSeconds = eatingTotalElapsedSeconds(
+        before.eatingStartedAt,
+        before.eatingAccumulatedSeconds,
+        now
+      );
+      if (exitMode === "end") {
+        data.eatingEndedAt = now;
+        data.eatingPausedAt = null;
+      } else {
+        data.eatingPausedAt = now;
+      }
     } else if (
       isAssistant &&
       requestedSubStatus === ASSISTANT_EATING_SUB_STATUS &&
       before.subStatus === ASSISTANT_EATING_SUB_STATUS
     ) {
       data.eatingStartedAt = before.eatingStartedAt ?? new Date();
+      data.eatingPausedAt = null;
       data.eatingEndedAt = null;
     }
 
@@ -198,6 +291,7 @@ export async function PATCH(request: NextRequest, { params }: RouteContext) {
       Number.isFinite(nextBuildingId) &&
       nextBuildingId !== beforeServiceBuildingId;
     let shouldSweep = false;
+    let releasedAssignedTaskCount = 0;
 
     if (
       isBuildingChange &&
@@ -210,6 +304,35 @@ export async function PATCH(request: NextRequest, { params }: RouteContext) {
     }
 
     let updated = await prisma.$transaction(async (tx) => {
+      if (canReleaseAssignedTasks) {
+        data.status = ProfileStatus.idle;
+      }
+
+      if (shouldReleaseAssignedTasks) {
+        const releasedTaskIds = assignedWaitingTasks.map((task) => task.id);
+        await tx.taskCollaborator.updateMany({
+          where: {
+            taskId: { in: releasedTaskIds },
+            assistantId: id,
+            role: "primary",
+            status: { not: "left" },
+          },
+          data: { status: "left", leftAt: new Date() },
+        });
+        await tx.bookingTask.updateMany({
+          where: { id: { in: releasedTaskIds } },
+          data: {
+            assistantId: null,
+            parentTaskId: null,
+            ironingStage: IroningTaskStage.none,
+            ironingNotifiedAt: null,
+            ironingStartedAt: null,
+          },
+        });
+        releasedAssignedTaskCount = releasedTaskIds.length;
+        shouldSweep = true;
+      }
+
       if (isBuildingChange && before.status === ProfileStatus.assigned) {
         await tx.bookingTask.updateMany({
           where: { assistantId: id, status: TaskStatus.waiting },
@@ -249,7 +372,7 @@ export async function PATCH(request: NextRequest, { params }: RouteContext) {
       if (fresh) updated = fresh;
     }
 
-    return Response.json(updated);
+    return Response.json({ ...updated, releasedAssignedTaskCount });
   } catch (error) {
     console.error("[PATCH /api/profiles/[id]]", error);
     return Response.json({ error: "Failed to update profile" }, { status: 500 });

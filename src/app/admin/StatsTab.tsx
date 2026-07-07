@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { assistantTaskScoreFromSeconds, displayTaskCategoryName, EXTERNAL_MODEL_ASSIST_DISPLAY_NAME, isExternalModelAssistTaskName } from "@/lib/assistantScore";
 import { effectiveWorkMinutesFromApi, totalEffectiveWorkSecondsFromApi } from "@/lib/taskEffectiveTime";
 
 type TaskStatus = "waiting" | "executing" | "paused" | "completed";
@@ -105,9 +106,7 @@ const DATE_PRESETS: { key: DatePreset; label: string }[] = [
   { key: "thisMonth", label: "本月" },
   { key: "lastMonth", label: "上月" },
 ];
-const TASK_TYPE_ORDER = ["手持", "穿戴", "手工", "熨烫", "其他"];
-const ASSISTANT_TASK_BONUS = 0.2;
-const ASSISTANT_CROSS_BUILDING_BONUS = 0.2;
+const TASK_TYPE_ORDER = ["手持", "穿戴", "手工", "熨烫", EXTERNAL_MODEL_ASSIST_DISPLAY_NAME, "其他"];
 
 const STATUS_STYLE: Record<TaskStatus, { label: string; cls: string }> = {
   waiting: { label: "等待中", cls: "bg-slate-100 text-slate-500" },
@@ -129,6 +128,7 @@ const TYPE_META: Record<string, { dot: string; bar: string; text: string }> = {
   "穿戴": { dot: "#f97316", bar: "bg-orange-400", text: "text-orange-600" },
   "手工": { dot: "#f59e0b", bar: "bg-amber-400", text: "text-amber-600" },
   "熨烫": { dot: "#10b981", bar: "bg-emerald-400", text: "text-emerald-600" },
+  [EXTERNAL_MODEL_ASSIST_DISPLAY_NAME]: { dot: "#a855f7", bar: "bg-purple-400", text: "text-purple-600" },
   "其他": { dot: "#3b82f6", bar: "bg-blue-400", text: "text-blue-600" },
 };
 
@@ -220,8 +220,9 @@ function fmtScore(score: number) {
   return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1);
 }
 
-function taskTypeGroup(name: string | undefined) {
+function taskTypeGroup(name: string | undefined, priority?: number | null) {
   const value = name || "";
+  if (isExternalModelAssistTaskName(value, priority)) return EXTERNAL_MODEL_ASSIST_DISPLAY_NAME;
   if (value.includes("手持")) return "手持";
   if (value.includes("穿戴") || value.includes("服装")) return "穿戴";
   if (value.includes("手工") || value.includes("DIY")) return "手工";
@@ -390,7 +391,7 @@ export default function StatsTab() {
         if (![assistantProfile, ...collaboratorProfiles].some((p) => (p?.department || "") === detailDepartment)) return false;
       }
       if (detailBuildingId && String(taskBuildingId(task) ?? "") !== detailBuildingId) return false;
-      if (detailTaskType && taskTypeGroup(task.category?.name) !== detailTaskType) return false;
+      if (detailTaskType && taskTypeGroup(task.category?.name, task.priority) !== detailTaskType) return false;
       if (detailPriority && task.priority !== Number(detailPriority)) return false;
       if (detailRegistration === "registered" && !task.completionRegistration) return false;
       if (detailRegistration === "unregistered" && (task.status !== "completed" || task.completionRegistration)) return false;
@@ -421,7 +422,7 @@ export default function StatsTab() {
 
     const typeCounts = new Map<string, number>();
     for (const task of baseTasks) {
-      const type = taskTypeGroup(task.category?.name);
+      const type = taskTypeGroup(task.category?.name, task.priority);
       typeCounts.set(type, (typeCounts.get(type) ?? 0) + 1);
     }
     const typeBreakdown = TASK_TYPE_ORDER.map((name) => ({
@@ -435,7 +436,7 @@ export default function StatsTab() {
       assistantId: string;
       assistantName: string;
       department: string;
-      entries: { taskId: string; buildingId: number | null; completedAtMs: number; workSeconds: number; feedback: Feedback | null }[];
+      entries: { taskId: string; taskName: string; buildingId: number | null; completedAtMs: number; workSeconds: number; feedback: Feedback | null }[];
     }>();
 
     const addAssistantEntry = (task: TaskFromAPI, assistantId: string, assistantName: string, source: TaskFromAPI | TaskParticipant, completedAtMs: number) => {
@@ -448,6 +449,7 @@ export default function StatsTab() {
       };
       row.entries.push({
         taskId: task.id,
+        taskName: displayTaskCategoryName(task.category?.name, task.priority),
         buildingId: taskBuildingId(task),
         completedAtMs,
         workSeconds: totalEffectiveWorkSecondsFromApi({ ...source, status: "completed" }, nowMs),
@@ -479,6 +481,10 @@ export default function StatsTab() {
         }
       }
       const workSeconds = entries.reduce((sum, entry) => sum + entry.workSeconds, 0);
+      const score = entries.reduce(
+        (sum, entry) => sum + assistantTaskScoreFromSeconds(entry.workSeconds, entry.taskName),
+        0,
+      );
       const completedCount = entries.length;
       return {
         assistantId: row.assistantId,
@@ -487,7 +493,7 @@ export default function StatsTab() {
         completedCount,
         workSeconds,
         crossBuildingCount,
-        score: workSeconds / 3600 + completedCount * ASSISTANT_TASK_BONUS + crossBuildingCount * ASSISTANT_CROSS_BUILDING_BONUS,
+        score,
         likes: entries.filter((entry) => entry.feedback === "like").length,
         dislikes: entries.filter((entry) => entry.feedback === "dislike").length,
       };
@@ -506,7 +512,7 @@ export default function StatsTab() {
     const photographerRows: PhotographerRow[] = Array.from(photographerMap.entries()).map(([photographerId, row]) => {
       const localTypeCounts = new Map<string, number>();
       for (const task of row.tasks) {
-        const type = taskTypeGroup(task.category?.name);
+        const type = taskTypeGroup(task.category?.name, task.priority);
         localTypeCounts.set(type, (localTypeCounts.get(type) ?? 0) + 1);
       }
       const mainType = [...localTypeCounts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? "—";
@@ -648,7 +654,7 @@ export default function StatsTab() {
           <div className="mb-4 flex items-center justify-between gap-3">
             <div>
               <h3 className="text-[15px] font-extrabold text-[--text-primary]">助理运转排行</h3>
-              <p className="mt-1 text-[10px] font-semibold text-[--text-muted]">综合分 = 实际服务时长(1小时=1分) + 完成任务数 x 0.2 + 跨区次数 x 0.2</p>
+              <p className="mt-1 text-[10px] font-semibold text-[--text-muted]">综合分 = 实际服务时长(1小时=1分)，外模跟拍协助按 x0.8</p>
             </div>
             <span className="rounded-full bg-blue-50 px-3 py-1 text-[11px] font-extrabold text-blue-600">TOP {Math.min(10, analytics.assistantRanking.length)}</span>
           </div>
@@ -780,7 +786,7 @@ export default function StatsTab() {
                 const buildingName = buildingNameById.get(taskBuildingId(task) ?? -1) ?? "—";
                 const pr = PRIORITY_LABEL[task.priority] || PRIORITY_LABEL[4];
                 const st = STATUS_STYLE[task.status];
-                const type = taskTypeGroup(task.category?.name);
+                const type = taskTypeGroup(task.category?.name, task.priority);
                 const registration = task.completionRegistration;
                 const imageUrls = registrationImageUrls(task);
                 const imageCount = imageUrls.length;

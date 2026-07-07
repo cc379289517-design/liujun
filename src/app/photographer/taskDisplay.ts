@@ -4,6 +4,7 @@ import {
   taskSlotCapMinutes,
   totalEffectiveWorkSecondsFromApi,
 } from "@/lib/taskEffectiveTime";
+import { displayTaskCategoryName, isExternalModelAssistTaskName } from "@/lib/assistantScore";
 import { isPhotographerLimitQueuedTask } from "@/lib/photographerTaskLimit";
 import { taskLocationBuildingId } from "./locationDisplay";
 import type {
@@ -68,18 +69,62 @@ export function activeTaskParticipants(task: TaskFromAPI | undefined | null): Ta
   return taskParticipants(task).filter((c) => ACTIVE_PARTICIPANT_STATUSES.includes(c.status));
 }
 
+export function ironingMachineSlotsForTask(task: TaskFromAPI | undefined | null): number {
+  if (!task) return 1;
+  const activeAssistantIds = new Set<string>();
+  for (const participant of taskParticipants(task)) {
+    if (participant.status !== "completed") {
+      activeAssistantIds.add(participant.assistantId);
+    }
+  }
+  if (task.assistantId) {
+    const primaryParticipant = taskParticipants(task).find((participant) => participant.assistantId === task.assistantId);
+    if (!primaryParticipant || primaryParticipant.status !== "completed") {
+      activeAssistantIds.add(task.assistantId);
+    }
+  }
+  return Math.max(1, activeAssistantIds.size);
+}
+
 export function taskParticipantForProfile(
   task: TaskFromAPI | undefined | null,
   profileId: string | null | undefined
 ): TaskParticipant | null {
   if (!task || !profileId) return null;
-  return taskParticipants(task).find((c) => c.assistantId === profileId) ?? null;
+  return taskParticipants(task).find((participant) => {
+    if (participant.assistantId !== profileId) return false;
+    if (participant.role === "primary") return task.assistantId === profileId;
+    return true;
+  }) ?? null;
+}
+
+export function taskBelongsToProfile(
+  task: TaskFromAPI | undefined | null,
+  profileId: string | null | undefined
+): boolean {
+  if (!task) return false;
+  if (!profileId) return true;
+  const readyTransfer = task.assistantTransferRequests?.some((request) =>
+    request.targetAssistantId === profileId &&
+    request.status === "ready_to_takeover"
+  );
+  if (readyTransfer) return true;
+  return task.assistantId === profileId || taskParticipantForProfile(task, profileId) != null;
 }
 
 export function taskStatusForProfile(
   task: TaskFromAPI | undefined | null,
   profileId: string | null | undefined
 ): string | null {
+  if (
+    profileId &&
+    task?.assistantTransferRequests?.some((request) =>
+      request.targetAssistantId === profileId &&
+      request.status === "ready_to_takeover"
+    )
+  ) {
+    return "waiting";
+  }
   return taskParticipantForProfile(task, profileId)?.status ?? task?.status ?? null;
 }
 
@@ -141,7 +186,7 @@ function completedContributionForRanking(
     assistantId,
     assistantName,
     taskId: task.id,
-    taskName: task.category?.name ?? "任务",
+    taskName: displayTaskCategoryName(task.category?.name, task.priority),
     roomNumber: task.roomNumber,
     buildingId: taskLocationBuildingId(task),
     completedAtMs,
@@ -193,7 +238,7 @@ export function resolveAssistantTasks(taskData: TaskFromAPI[], profileId?: strin
   deferredWaiting: TaskFromAPI | null;
 } {
   const statusOf = (task: TaskFromAPI) => taskStatusForProfile(task, profileId) ?? task.status;
-  const belongsToProfile = (task: TaskFromAPI) => !profileId || task.assistantId === profileId || !!taskParticipantForProfile(task, profileId);
+  const belongsToProfile = (task: TaskFromAPI) => taskBelongsToProfile(task, profileId);
   const executing = taskData.find((t) => belongsToProfile(t) && statusOf(t) === "executing") || null;
   const paused = taskData.find((t) => belongsToProfile(t) && statusOf(t) === "paused") || null;
   // waiting + parentTaskId = 插单待处理（pending）；waiting + no parentTaskId = 普通待就位
@@ -253,7 +298,7 @@ export function resolveAssistantTasks(taskData: TaskFromAPI[], profileId?: strin
 
 export function actionableWaitingTasksForProfile(taskData: TaskFromAPI[], profileId?: string): TaskFromAPI[] {
   const statusOf = (task: TaskFromAPI) => taskStatusForProfile(task, profileId) ?? task.status;
-  const belongsToProfile = (task: TaskFromAPI) => !profileId || task.assistantId === profileId || !!taskParticipantForProfile(task, profileId);
+  const belongsToProfile = (task: TaskFromAPI) => taskBelongsToProfile(task, profileId);
   const waitingTasks = taskData.filter((task) =>
     belongsToProfile(task) &&
     statusOf(task) === "waiting" &&
@@ -323,7 +368,7 @@ export function canStartWaitingTaskWithIroningCapacity(
 ): boolean {
   if (!isIroningTask(task)) return true;
   if (task.ironingStage === "notified") return true;
-  return freeIroningMachineCount > 0;
+  return freeIroningMachineCount >= ironingMachineSlotsForTask(task);
 }
 
 export function assistantStartCandidateTasksForProfile(
@@ -527,25 +572,39 @@ export function publicQueueRankCls(index: number): string {
 
 export function publicQueueRankLabel(index: number, priority: number): string {
   if (index < 3) return String(index + 1);
-  const level = Math.min(5, Math.max(1, Math.round(Number(priority) || 5)));
+  const level = Math.min(6, Math.max(1, Math.round(Number(priority) || 6)));
   return `P${level}`;
 }
 
 export function publicQueuePriorityLevelCls(priority: number): string {
-  const level = Math.min(5, Math.max(1, Math.round(Number(priority) || 5)));
+  const level = Math.min(6, Math.max(1, Math.round(Number(priority) || 6)));
   const priorityCls: Record<number, string> = {
     1: "bg-red-50 text-red-600 shadow-red-100/70",
     2: "bg-orange-50 text-orange-600 shadow-orange-100/70",
     3: "bg-yellow-50 text-yellow-600 shadow-yellow-100/70",
     4: "bg-blue-50 text-blue-600 shadow-blue-100/70",
     5: "bg-gray-100/80 text-gray-500 shadow-gray-200/70",
+    6: "bg-purple-50 text-purple-600 shadow-purple-100/70",
+  };
+  return priorityCls[level];
+}
+
+export function priorityTextColorCls(priority: number): string {
+  const level = Math.min(6, Math.max(1, Math.round(Number(priority) || 6)));
+  const priorityCls: Record<number, string> = {
+    1: "text-red-600",
+    2: "text-orange-600",
+    3: "text-yellow-600",
+    4: "text-blue-600",
+    5: "text-gray-500",
+    6: "text-purple-600",
   };
   return priorityCls[level];
 }
 
 export function publicQueueRankShapeCls(index: number, priority: number): string {
   if (index < 3) return `h-5 w-5 rounded-full ${publicQueueRankCls(index)}`;
-  const level = Math.min(5, Math.max(1, Math.round(Number(priority) || 5)));
+  const level = Math.min(6, Math.max(1, Math.round(Number(priority) || 6)));
   return `h-5 w-8 rounded-lg ${publicQueuePriorityLevelCls(level)}`;
 }
 
@@ -673,5 +732,13 @@ const TASK_CATEGORY_GROUP: Record<string, string> = {
   "服装穿戴": "服装穿戴", "穿戴对角度": "服装穿戴",
   "手工DIY协助": "手工DIY", "手工DIY制作": "手工DIY", "手工DIY": "手工DIY",
   "短时熨烫": "熨烫", "长时熨烫": "熨烫", "熨烫": "熨烫",
-  "其他长时任务": "其他", "其他": "其他",
+  "外模跟拍协助": "其他", "协助外模拍摄": "其他", "协助外模跟拍": "其他", "其他长时任务": "其他", "其他": "其他",
 };
+
+export function isExternalModelFollowTask(task: TaskFromAPI | undefined | null): boolean {
+  const name = task?.category?.name ?? "";
+  if (isExternalModelAssistTaskName(name, task?.priority)) {
+    return true;
+  }
+  return task?.priority === 6 && taskTypeGroupName(name) === "其他";
+}

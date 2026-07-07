@@ -33,7 +33,15 @@ const PRIORITY_CLS: Record<number, string> = {
   3: "bg-amber-500 text-white",
   4: "bg-blue-500 text-white",
   5: "bg-gray-500 text-white",
+  6: "bg-purple-500 text-white",
 };
+
+const QUICK_EXTERNAL_MODEL_FOLLOW_TITLE = "外模跟拍协助";
+const QUICK_EXTERNAL_MODEL_FOLLOW_PRIORITY = 6;
+
+function isExternalModelFollowCategory(name: string): boolean {
+  return name === QUICK_EXTERNAL_MODEL_FOLLOW_TITLE || (name.includes("外模") && (name.includes("跟拍") || name.includes("拍摄") || name.includes("协助")));
+}
 
 export function queueTaskTypeShortLabel(name: string | null | undefined): string {
   const groupName = taskTypeGroupName(name);
@@ -56,18 +64,36 @@ export function buildCategories(dbCats: DbCategory[]): BuiltCategory[] {
     const style = CAT_STYLES[catName];
     if (!style) continue;
     const items = dbCats
-      .filter((c) => c.name === catName)
-      .sort((a, b) => a.priorityLevel - b.priorityLevel);
+      .filter((c) => taskTypeGroupName(c.name) === catName)
+      .sort((a, b) => a.priorityLevel - b.priorityLevel || a.minDuration - b.minDuration || a.id - b.id);
     if (items.length === 0) continue;
+    const externalModelFollow = catName === "其他"
+      ? items.find((c) => isExternalModelFollowCategory(c.name)) ?? items.find((c) => c.priorityLevel === 3) ?? items[0]
+      : null;
+    const durationItems = items.filter((c) => !isExternalModelFollowCategory(c.name));
     result.push({
       name: catName,
       ...style,
-      durations: items.map((c) => ({
+      durations: (durationItems.length > 0 ? durationItems : items).map((c) => ({
         label: buildDurationLabel(c.minDuration, c.maxDuration),
         priority: `P${c.priorityLevel}`,
         cls: PRIORITY_CLS[c.priorityLevel] || PRIORITY_CLS[5],
         categoryId: c.id,
+        sourceName: c.name,
       })),
+      specialActions: externalModelFollow
+        ? [{
+          title: QUICK_EXTERNAL_MODEL_FOLLOW_TITLE,
+          label: buildDurationLabel(externalModelFollow.minDuration, externalModelFollow.maxDuration),
+          priority: `P${QUICK_EXTERNAL_MODEL_FOLLOW_PRIORITY}`,
+          cls: "bg-purple-500 text-white",
+          categoryId: externalModelFollow.id,
+          sourceName: externalModelFollow.name,
+          priorityOverride: QUICK_EXTERNAL_MODEL_FOLLOW_PRIORITY,
+          quickBookSpecialType: "external_model_follow",
+          tone: "purple",
+        }]
+        : undefined,
     });
   }
   return result;

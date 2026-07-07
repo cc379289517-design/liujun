@@ -332,10 +332,14 @@ export default function ApprovalTab({ config, profiles = [], buildings = [], onR
         next.add(id);
         return next;
       });
-      await new Promise((resolve) => window.setTimeout(resolve, 320));
+      await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+      await new Promise((resolve) => window.setTimeout(resolve, 240));
       setRequests((current) => current.filter((request) => request.id !== id));
       setAllPendingRequests((current) => current.filter((request) => request.id !== id));
-      await Promise.all([fetchAllPendingRequests(), fetchApprovedRequests()]);
+      window.setTimeout(() => {
+        void fetchAllPendingRequests();
+        void fetchApprovedRequests();
+      }, 80);
     } catch (error) {
       console.error("Failed to review priority upgrade request", error);
       window.alert(error instanceof Error ? error.message : "审批失败");
@@ -379,74 +383,78 @@ export default function ApprovalTab({ config, profiles = [], buildings = [], onR
       return (
         <div
           key={request.id}
-          className={`approval-request-card admin-table-row rounded-2xl border border-white/70 bg-white/50 px-3 py-2 shadow-sm ${
+          className={`approval-request-card ${
             exiting ? "approval-request-card-exiting" : ""
           }`}
         >
-          <div className="grid items-center gap-3 xl:grid-cols-[minmax(0,1fr)_180px]">
-            <div className="min-w-0">
-              <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1.5">
-                <span className="shrink-0 rounded-lg bg-red-100 px-2 py-1 text-[11px] font-extrabold leading-none text-red-600">
-                  P{request.fromPriority} 申请 P{request.targetPriority}
-                </span>
-                <span className="max-w-[92px] truncate rounded-lg bg-white/70 px-2 py-1 text-[10px] font-extrabold leading-none text-[--text-secondary]">
-                  {requestSku(request)}
-                </span>
-                <span className="min-w-0 truncate text-[13px] font-extrabold text-[--text-primary]">
-                  {request.task.roomNumber}室 · {request.task.category.name}
-                </span>
-                <span className="shrink-0 text-[12px] font-extrabold text-[--text-secondary]">
-                  {durationLabel(request.task.category)}
-                </span>
-              </div>
-              <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] font-semibold text-[--text-secondary]">
-                <span>楼座：{buildingName}</span>
-                <span>所属：{department}</span>
-                <span>申请人：{request.requestedBy.name}</span>
-                <span>申请时间：{formatTime(request.createdAt)}</span>
-              </div>
-              <p className="mt-1.5 truncate rounded-xl bg-white/48 px-2.5 py-1 text-[11px] font-semibold text-[--text-secondary]">
-                理由：{request.reason || "未填写"}
-              </p>
-            </div>
+          <div className="approval-request-card-inner min-h-0 overflow-hidden">
+            <div className="admin-table-row rounded-2xl border border-white/70 bg-white/50 px-3 py-2 shadow-sm">
+              <div className="grid items-center gap-3 xl:grid-cols-[minmax(0,1fr)_180px]">
+                <div className="min-w-0">
+                  <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1.5">
+                    <span className="shrink-0 rounded-lg bg-red-100 px-2 py-1 text-[11px] font-extrabold leading-none text-red-600">
+                      P{request.fromPriority} 申请 P{request.targetPriority}
+                    </span>
+                    <span className="max-w-[92px] truncate rounded-lg bg-white/70 px-2 py-1 text-[10px] font-extrabold leading-none text-[--text-secondary]">
+                      {requestSku(request)}
+                    </span>
+                    <span className="min-w-0 truncate text-[13px] font-extrabold text-[--text-primary]">
+                      {request.task.roomNumber}室 · {request.task.category.name}
+                    </span>
+                    <span className="shrink-0 text-[12px] font-extrabold text-[--text-secondary]">
+                      {durationLabel(request.task.category)}
+                    </span>
+                  </div>
+                  <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] font-semibold text-[--text-secondary]">
+                    <span>楼座：{buildingName}</span>
+                    <span>所属：{department}</span>
+                    <span>申请人：{request.requestedBy.name}</span>
+                    <span>申请时间：{formatTime(request.createdAt)}</span>
+                  </div>
+                  <p className="mt-1.5 truncate rounded-xl bg-white/48 px-2.5 py-1 text-[11px] font-semibold text-[--text-secondary]">
+                    理由：{request.reason || "未填写"}
+                  </p>
+                </div>
 
-            <div className="grid shrink-0 grid-cols-[1fr_auto] items-end gap-2">
-              <label className="min-w-0 text-[10px] font-extrabold text-[--text-muted]">
-                批准优先级
-                <select
-                  value={selectedPriority}
-                  onChange={(event) => setApprovedPriorityById((current) => ({ ...current, [request.id]: Number(event.target.value) }))}
-                  className="mt-1 h-8 w-full rounded-xl border border-white/70 bg-white/72 px-2 text-xs font-extrabold text-slate-700 outline-none"
-                  disabled={saving}
-                >
-                  {options.map((priority) => (
-                    <option key={priority} value={priority}>P{priority}</option>
-                  ))}
-                </select>
-              </label>
-              <div className="flex gap-1.5">
-                <button
-                  type="button"
-                  disabled={saving}
-                  className="h-8 rounded-xl bg-emerald-500 px-3 text-xs font-extrabold text-white transition-colors hover:bg-emerald-600 disabled:opacity-60"
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    void reviewRequest(request.id, "approve");
-                  }}
-                >
-                  批准
-                </button>
-                <button
-                  type="button"
-                  disabled={saving}
-                  className="h-8 rounded-xl bg-red-50 px-3 text-xs font-extrabold text-red-600 transition-colors hover:bg-red-100 disabled:opacity-60"
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    void reviewRequest(request.id, "reject");
-                  }}
-                >
-                  驳回
-                </button>
+                <div className="grid shrink-0 grid-cols-[1fr_auto] items-end gap-2">
+                  <label className="min-w-0 text-[10px] font-extrabold text-[--text-muted]">
+                    批准优先级
+                    <select
+                      value={selectedPriority}
+                      onChange={(event) => setApprovedPriorityById((current) => ({ ...current, [request.id]: Number(event.target.value) }))}
+                      className="mt-1 h-8 w-full rounded-xl border border-white/70 bg-white/72 px-2 text-xs font-extrabold text-slate-700 outline-none"
+                      disabled={saving}
+                    >
+                      {options.map((priority) => (
+                        <option key={priority} value={priority}>P{priority}</option>
+                      ))}
+                    </select>
+                  </label>
+                  <div className="flex gap-1.5">
+                    <button
+                      type="button"
+                      disabled={saving}
+                      className="h-8 rounded-xl bg-emerald-500 px-3 text-xs font-extrabold text-white transition-colors hover:bg-emerald-600 disabled:opacity-60"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        void reviewRequest(request.id, "approve");
+                      }}
+                    >
+                      批准
+                    </button>
+                    <button
+                      type="button"
+                      disabled={saving}
+                      className="h-8 rounded-xl bg-red-50 px-3 text-xs font-extrabold text-red-600 transition-colors hover:bg-red-100 disabled:opacity-60"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        void reviewRequest(request.id, "reject");
+                      }}
+                    >
+                      驳回
+                    </button>
+                  </div>
+                </div>
               </div>
             </div>
           </div>
