@@ -50,6 +50,12 @@ next-env.d.ts
 # (SQLite dev.db is now tracked by git)
 prisma/dev.db-shm
 prisma/dev.db-wal
+prisma/loadtest.db
+prisma/loadtest.db-shm
+prisma/loadtest.db-wal
+
+# load test outputs
+/loadtest/results/
 
 # runtime uploads
 /public/uploads/task-completions/*

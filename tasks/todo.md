@@ -6264,3 +6264,84 @@
 - 残余风险：熨烫任务派发、熨烫开始槽位占用、执行中插单、待就位插单、指定助理创建仍有事务外筛选/事务内无条件写的历史路径，下一阶段应继续收口为 DB 条件命令并补并发测试。
 - 残余风险：`/api/workbench/sync` 当前仍是有界快照，不是真正 `since` delta；115 会话压力下仍需继续拆出服务端计算的 `assistantStatus`、公共队列摘要和按需详情。
 - 本轮新增验证：`npx prisma validate`、`npx tsc --noEmit --pretty false`、`npm run build`、`git diff --check` 已通过。
+
+## 老王：第二阶段正式压测与极限流畅优化
+
+### 目标
+
+- 进入下一阶段前先建立可复现压测基线，避免凭感觉优化。
+- 正式压测画像按用户确认口径执行：80 位摄影师、30 名助理、5 名管理，共 115 在线会话。
+- 第一批默认不迁 PostgreSQL、不改业务规则、不重做 UI；先测出现有 SQLite + Next 单进程在高强度工作台下的真实瓶颈。
+- 所有状态写入继续以后端为唯一真实状态源；前端只做即时反馈、pending 锁和后端权威快照校准。
+- 压测与优化必须保护 `prisma/dev.db` 和 Mac mini 生产库：混合写压测只能在明确的本地测试库/备份库上执行。
+
+### 分派
+
+- 老王：主控计划、压测验收、风险排序、最终合并和 commit；所有跨角色改动由老王复核。
+- 小张：压测 harness、指标采集、SQLite/服务端承载分析、同步响应体体积与 CPU/内存观察。
+- 小刘：后端状态命令原子性、并发边界测试、API 权限与业务文档同步。
+- 小李：前端工作台局部 store、pending UI、局部计时、地图/Dock 高频交互流畅度；不改核心派单规则。
+
+### 阶段 A：正式压测基线
+
+- [x] 新增不引入重依赖的 Node/tsx 压测工具，支持 `BASE_URL`、持续时间、并发角色数、只读/混合模式、输出目录配置。
+- [x] 只读压测：115 会话持续同步 `/api/workbench/sync` 10 分钟，记录 p50/p95/p99、错误率、响应体大小、建议轮询间隔、Node CPU/内存。
+- [x] 混合压测：20 分钟模拟创建、开始、暂停、继续、完成、少量移交；记录写操作 p50/p95/p99、4xx/5xx、SQLite busy/locked、重复派单/任务丢失。
+- [x] 输出机器可读 JSON 与人工可读 Markdown 报告，保存到压测结果目录；报告必须写明测试库、服务地址、提交号和运行时间。
+- [x] 压测前检查：禁止对 Mac mini 生产地址和真实生产库直接跑混合写压测；如需写压测，先复制或 seed 独立测试库。
+
+### 阶段 B：后端原子性第二批
+
+- [ ] 熨烫派发：`attachIroningTaskToAssistant()` 改成事务内条件化认领，重新确认任务仍可派、助理仍可接、机器槽位仍满足。
+- [ ] 熨烫开始：开始任务时把槽位检查和进入 `using/executing` 放在同一事务或同一条件命令中，避免多人同时抢空闲机器。
+- [ ] 插单路径：`interruptAssistant()` 与 `interruptWaitingPreempt()` 的候选筛选和写入条件收口，事务内再次确认被插助理/任务仍处于可插状态。
+- [ ] 指定助理创建：指定任务创建和助理状态更新改为完整事务内 claim；`profile.updateMany count=0` 不能继续当作成功。
+- [ ] 并发回归：补最小脚本/测试场景覆盖重复派单、高优先级压制、熨烫槽位、移交贡献、取消边界和伪造 actor。
+
+### 阶段 C：同步接口降载与数据结构
+
+- [ ] `/api/workbench/sync` 从有界全量快照推进到 `since` 增量/摘要同步：服务端返回任务变更、删除/完成标记、公共队列摘要和当前助理状态。
+- [ ] 公共队列不再每轮 `take: 500` 深 include；首屏返回摘要，任务详情按需补齐。
+- [ ] 服务端计算 `assistantStatus`，减少前端每轮从任务列表反推人员状态。
+- [ ] GET 同步中的维护写入继续评估：单进程 SQLite 保持节流；多进程/生产扩展前改为单维护入口或后台 worker。
+
+### 阶段 D：前端极限流畅
+
+- [ ] 建立工作台本地 reducer/store：`tasksById + profilesById + optimisticPatches + pendingActions`，替代多组互相 setState 的任务源。
+- [ ] 按 action 级 pending UI 锁定：开始、完成、暂停、继续、发单、移交、提权 100ms 内给反馈，失败后回滚并提示。
+- [ ] 全局 1 秒 `now` 降级为局部计时：只让当前任务秒表/吃饭计时每秒更新，列表、统计、排行按分钟或数据变更更新。
+- [ ] 地图拖拽/缩放、Dock hover 使用 `requestAnimationFrame + ref/CSS variable` 优化，避免 pointer move 触发整页 React 重渲染。
+- [ ] 继续拆 `CurrentTaskPanel`、`TaskListPanel`、`MapWorkbench`、`AssistantDock` 数据适配层，每次拆分保持等价并单独验证。
+
+### 阶段 E：验收与对抗审查
+
+- [ ] 基线压测完成后，先根据报告排序瓶颈，再决定是否进入 B/C/D 的第一批代码改动。
+- [ ] 每批改动运行：`npx prisma validate`、`npx tsc --noEmit --pretty false`、必要时 `npm run build`、`git diff --check`。
+- [ ] 压测复跑同一画像，和基线对比 p95/p99、错误率、响应体大小、CPU/内存、SQLite locked/busy。
+- [ ] 进行对抗性审查：伪造 actor、乱序轮询、重复点击、弱网、并发开始/完成/转派、熨烫机槽位抢占、任务取消边界。
+- [ ] 长期文档同步：若本阶段实际调整任何业务逻辑或状态命令口径，必须更新 `摄影助理自动派单系统.md`；若只是压测工具或等价性能优化，则只在 todo 评审和 lessons 中记录。
+
+### 第一批建议执行顺序
+
+1. 先做阶段 A 的压测工具和只读基线，不先修改业务逻辑。
+2. 若只读同步 p95 或响应体明显超标，优先做阶段 C 的同步降载。
+3. 若混合写出现 SQLite locked、重复派单或状态错乱，优先做阶段 B 的原子性收口。
+4. 若后端指标稳定但现场操作仍卡顿，优先做阶段 D 的局部 store、pending UI 和高频交互优化。
+5. 每完成一个小批次单独评审、单独 commit，继续排除 `prisma/dev.db`。
+
+### 阶段 A 评审
+
+- 已完成压测工具：新增 `scripts/loadtest/seed.ts`、`run.ts`、`report.ts`、`common.ts`，不引入 k6/artillery 等新依赖；使用 Node 内置 `fetch`、现有 `tsx` 和 Prisma/SQLite。
+- 已完成 npm 入口：`loadtest:seed`、`loadtest:smoke`、`loadtest:readonly`、`loadtest:mixed`、`loadtest:sweep`、`loadtest:report`。
+- 已保护数据：默认使用 `DATABASE_URL=file:./prisma/loadtest.db`；`.gitignore` 已排除 `prisma/loadtest.db*` 和 `loadtest/results/`；混合写和 sweep 模式必须显式 `--allow-writes`，非 localhost 写压测还要 `--allow-remote`。
+- Smoke 验证通过：5 摄影师、3 助理、1 管理、30 秒，127 个请求，0 错误；报告链路生成 `summary.md / summary.json / raw.jsonl / config.json`。
+- 正式只读基线：80 摄影师、30 助理、5 管理、10 分钟，22,230 个请求，0 错误；`/api/workbench/sync` p50 8.8ms、p95 19ms、p99 151.9ms、max 364ms。
+- 只读瓶颈：`/api/workbench/sync` 平均响应体约 101.1KB，10 分钟同步响应体约 2.17GB；服务端 RSS 峰值约 406.5MB，CPU 峰值约 81.1%。
+- 正式混合压测：80 摄影师、30 助理、5 管理、20 分钟，48,304 个请求，678 个错误全部为业务 409，无 500、无脚本级崩溃、未观察到 SQLite locked/busy 暴露到 HTTP。
+- 混合延迟：`/api/workbench/sync` p50 13.6ms、p95 66.6ms、p99 180.8ms、max 1711.5ms；`complete` p95 185.2ms、`create` p95 164.2ms、`start` p95 46.2ms。
+- 混合响应体放大：`/api/workbench/sync` 平均响应体约 235KB，20 分钟同步响应体约 10.1GB；公共队列均值从只读 72 上升到 140.1，说明有界全量快照是下一批体验/网络/前端解析成本的主要瓶颈。
+- 业务 409 分类：摄影师发布上限队列满 463 次，高优先级兜底拒绝低优先开始 186 次，熨烫机忙 29 次；这些属于预期业务拦截，不按系统错误计。
+- 不变量审查：压测后无重复 active primary；但发现 3 名助理存在多个活跃根任务，且 1 号楼/5 号楼熨烫 `using` 数量达到 4、超过每栋 3 台机器容量。
+- 优先级调整：下一批应先推进阶段 B 中“熨烫派发条件化认领 + 熨烫开始槽位原子化”，同时阶段 C 需要把 `/api/workbench/sync` 拆成摘要/增量，降低每轮 100KB-300KB 级响应体。
+- 验证通过：`npx tsc --noEmit --pretty false --incremental false`、`DATABASE_URL=file:./prisma/loadtest.db npm run build`、正式 smoke/readonly/mixed 压测。
+- 注意：`prisma/dev.db` 仍是本地运行态改动，继续排除提交；`prisma/loadtest.db*` 和 `loadtest/results/` 为本地压测产物，不提交。
