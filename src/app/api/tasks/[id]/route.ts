@@ -12,11 +12,98 @@ import {
   syncProfileStatus,
   updateTaskParticipantStatus,
 } from "@/lib/scheduler";
-import { TaskStatus, ProfileStatus } from "@/generated/prisma/client";
+import { TaskStatus, ProfileStatus, Role } from "@/generated/prisma/client";
 import { Prisma } from "@/generated/prisma/client";
 import { flushExecutingSegment } from "@/lib/taskEffectiveTime";
 
 type RouteContext = { params: Promise<{ id: string }> };
+type TaskActionActor = { id: string; role: Role };
+
+const ACTIVE_PARTICIPANT_STATUSES = ["waiting", "executing", "paused"] as const;
+const VISIBLE_ASSISTANT_TRANSFER_REQUEST_STATUSES = ["confirming", "pending", "pending_after_complete", "ready_to_takeover"];
+
+function actorIdFrom(value: unknown): string | null {
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+}
+
+async function loadActorProfile(actorId: string | null): Promise<TaskActionActor | null> {
+  if (!actorId) return null;
+  return prisma.profile.findUnique({
+    where: { id: actorId },
+    select: { id: true, role: true },
+  });
+}
+
+function isAssistantActor(actor: TaskActionActor | null): boolean {
+  return actor?.role === Role.assistant || actor?.role === Role.assistant_leader;
+}
+
+function isTaskManager(actor: TaskActionActor | null): boolean {
+  return actor?.role === Role.admin || actor?.role === Role.assistant_leader;
+}
+
+function forbidden(error: string, code = "TASK_ACTION_FORBIDDEN") {
+  return Response.json({ error, code }, { status: 403 });
+}
+
+async function actorIsActiveTaskParticipant(
+  taskId: string,
+  actorId: string,
+  taskAssistantId: string | null
+): Promise<boolean> {
+  if (taskAssistantId === actorId) return true;
+  const participant = await prisma.taskCollaborator.findUnique({
+    where: { taskId_assistantId: { taskId, assistantId: actorId } },
+    select: { status: true },
+  });
+  return !!participant &&
+    ACTIVE_PARTICIPANT_STATUSES.includes(participant.status as typeof ACTIVE_PARTICIPANT_STATUSES[number]);
+}
+
+async function canActorWriteTask(
+  taskId: string,
+  task: { photographerId: string; assistantId: string | null },
+  actor: TaskActionActor | null
+): Promise<boolean> {
+  if (!actor) return false;
+  if (actor.id === task.photographerId) return true;
+  if (isTaskManager(actor)) return true;
+  if (!isAssistantActor(actor)) return false;
+  return actorIsActiveTaskParticipant(taskId, actor.id, task.assistantId);
+}
+
+function taskDetailInclude() {
+  return {
+    photographer: true,
+    assistant: true,
+    category: true,
+    parentTask: true,
+    interruptTasks: true,
+    collaborators: {
+      where: { status: { not: "left" } },
+      include: {
+        assistant: { select: { id: true, name: true, currentRoom: true, avatar: true, buildingId: true } },
+      },
+    },
+    completionRegistration: {
+      include: {
+        assistant: { select: { id: true, name: true } },
+      },
+    },
+    assistantTransferRequests: {
+      where: { status: { in: VISIBLE_ASSISTANT_TRANSFER_REQUEST_STATUSES } },
+      orderBy: { requestedAt: "desc" },
+      take: 3,
+    },
+  } as const;
+}
+
+async function loadTaskDetail(taskId: string) {
+  return prisma.bookingTask.findUnique({
+    where: { id: taskId },
+    include: taskDetailInclude(),
+  });
+}
 
 /**
  * GET /api/tasks/[id] - 获取单个任务详情
@@ -25,32 +112,7 @@ export async function GET(_request: NextRequest, { params }: RouteContext) {
   try {
     const { id } = await params;
 
-    const task = await prisma.bookingTask.findUnique({
-      where: { id },
-      include: {
-        photographer: true,
-        assistant: true,
-        category: true,
-        parentTask: true,
-        interruptTasks: true,
-        collaborators: {
-          where: { status: { not: "left" } },
-          include: {
-            assistant: { select: { id: true, name: true, currentRoom: true, avatar: true, buildingId: true } },
-          },
-        },
-        completionRegistration: {
-          include: {
-            assistant: { select: { id: true, name: true } },
-          },
-        },
-        assistantTransferRequests: {
-          where: { status: { in: ["confirming", "pending", "pending_after_complete", "ready_to_takeover"] } },
-          orderBy: { requestedAt: "desc" },
-          take: 3,
-        },
-      },
-    });
+    const task = await loadTaskDetail(id);
 
     if (!task) {
       return Response.json({ error: "Task not found" }, { status: 404 });
@@ -137,7 +199,7 @@ export async function PATCH(request: NextRequest, { params }: RouteContext) {
   try {
     const { id } = await params;
     const body = await request.json();
-    const { action, estMinutes, actorAssistantId } = body;
+    const { action, estMinutes, actorAssistantId, actorProfileId } = body;
 
     const task = await prisma.bookingTask.findUnique({ where: { id } });
     if (!task) {
@@ -146,17 +208,25 @@ export async function PATCH(request: NextRequest, { params }: RouteContext) {
 
     switch (action) {
       case "start": {
-        const actorId = actorAssistantId ?? task.assistantId;
+        const actorId = actorIdFrom(actorAssistantId);
         if (!actorId) {
           return Response.json({ error: "actorAssistantId required for start" }, { status: 400 });
         }
+        const actor = await loadActorProfile(actorId);
+        if (!isAssistantActor(actor)) {
+          return forbidden("只有助理可以开始任务", "ONLY_ASSISTANT_CAN_START_TASK");
+        }
         await assertAssistantCanStartTaskByPriority(id, actorId);
         await prepareWaitingTaskForAssistantStart(id, actorId);
-        const ironingAvailability = await ironingMachineAvailabilityForTask(id);
         const refreshedTask = await prisma.bookingTask.findUnique({
           where: { id },
-          select: { ironingStage: true },
+          select: { assistantId: true, ironingStage: true },
         });
+        const canOperate = await actorIsActiveTaskParticipant(id, actorId, refreshedTask?.assistantId ?? task.assistantId);
+        if (!canOperate) {
+          return forbidden("只有当前任务参与助理可以开始任务", "ONLY_TASK_PARTICIPANT_CAN_START_TASK");
+        }
+        const ironingAvailability = await ironingMachineAvailabilityForTask(id);
         if (
           !ironingAvailability.ok &&
           refreshedTask?.ironingStage !== "notified" &&
@@ -174,37 +244,56 @@ export async function PATCH(request: NextRequest, { params }: RouteContext) {
           );
         }
         await updateTaskParticipantStatus(id, actorId, "executing", estMinutes);
-        const updated = await prisma.bookingTask.findUnique({ where: { id } });
+        const updated = await loadTaskDetail(id);
         await runTaskMaintenance();
 
         return Response.json(updated);
       }
 
       case "pause": {
-        const actorId = actorAssistantId ?? task.assistantId;
+        const actorId = actorIdFrom(actorAssistantId);
         if (!actorId) {
           return Response.json({ error: "actorAssistantId required for pause" }, { status: 400 });
         }
+        const actor = await loadActorProfile(actorId);
+        if (!isAssistantActor(actor)) {
+          return forbidden("只有任务助理可以暂停任务", "ONLY_ASSISTANT_CAN_PAUSE_TASK");
+        }
+        const canOperate = await actorIsActiveTaskParticipant(id, actorId, task.assistantId);
+        if (!canOperate) {
+          return forbidden("只有当前任务参与助理可以暂停任务", "ONLY_TASK_PARTICIPANT_CAN_PAUSE_TASK");
+        }
         await updateTaskParticipantStatus(id, actorId, "paused");
-        const updated = await prisma.bookingTask.findUnique({ where: { id } });
+        const updated = await loadTaskDetail(id);
         await runTaskMaintenance();
 
         return Response.json(updated);
       }
 
       case "complete": {
-        const actorId = actorAssistantId ?? task.assistantId;
-        if (actorId) {
-          await updateTaskParticipantStatus(id, actorId, "completed");
-        } else {
-          await completeTask(id);
+        const actorId = actorIdFrom(actorAssistantId);
+        if (!actorId) {
+          return Response.json({ error: "actorAssistantId required for complete" }, { status: 400 });
         }
-        const updated = await prisma.bookingTask.findUnique({ where: { id } });
+        const actor = await loadActorProfile(actorId);
+        if (!isAssistantActor(actor)) {
+          return forbidden("只有任务助理可以完成任务", "ONLY_ASSISTANT_CAN_COMPLETE_TASK");
+        }
+        const canOperate = await actorIsActiveTaskParticipant(id, actorId, task.assistantId);
+        if (!canOperate) {
+          return forbidden("只有当前任务参与助理可以完成任务", "ONLY_TASK_PARTICIPANT_CAN_COMPLETE_TASK");
+        }
+        await updateTaskParticipantStatus(id, actorId, "completed");
+        const updated = await loadTaskDetail(id);
         await runTaskMaintenance({ force: true });
         return Response.json(updated);
       }
 
       case "setStatus": {
+        const actor = await loadActorProfile(actorIdFrom(actorProfileId) ?? actorIdFrom(actorAssistantId));
+        if (!isTaskManager(actor)) {
+          return forbidden("只有管理或助理组长可以直接改任务状态", "ONLY_MANAGER_CAN_SET_TASK_STATUS");
+        }
         const { newStatus } = body as { newStatus: string };
         const validStatuses = ["waiting", "executing", "paused", "completed"];
         if (!newStatus || !validStatuses.includes(newStatus)) {
@@ -213,11 +302,23 @@ export async function PATCH(request: NextRequest, { params }: RouteContext) {
             { status: 400 }
           );
         }
+        if (newStatus === "executing" || newStatus === "paused") {
+          return Response.json(
+            { error: "请使用 start/pause 命令切换任务执行状态", code: "USE_ATOMIC_TASK_ACTION" },
+            { status: 409 }
+          );
+        }
+        if (newStatus === "waiting" && (task.status !== TaskStatus.waiting || task.startedAt != null)) {
+          return Response.json(
+            { error: "已开始任务不能通过 setStatus 回退为 waiting", code: "TASK_ALREADY_STARTED_CANNOT_SET_WAITING" },
+            { status: 409 }
+          );
+        }
 
         // completed 走 completeTask 复用父任务恢复逻辑
         if (newStatus === "completed") {
           await completeTask(id);
-          const updated = await prisma.bookingTask.findUnique({ where: { id } });
+          const updated = await loadTaskDetail(id);
           await runTaskMaintenance({ force: true });
           return Response.json(updated);
         }
@@ -315,6 +416,11 @@ export async function PATCH(request: NextRequest, { params }: RouteContext) {
       }
 
       case "extend": {
+        const actor = await loadActorProfile(actorIdFrom(actorProfileId) ?? actorIdFrom(actorAssistantId));
+        const canOperate = actor ? await canActorWriteTask(id, task, actor) : false;
+        if (!canOperate) {
+          return forbidden("只有任务相关人员可以延长任务", "ONLY_TASK_ACTOR_CAN_EXTEND_TASK");
+        }
         if (!estMinutes) {
           return Response.json(
             { error: "estMinutes required for extend" },
@@ -330,6 +436,11 @@ export async function PATCH(request: NextRequest, { params }: RouteContext) {
       }
 
       case "updateNote": {
+        const actor = await loadActorProfile(actorIdFrom(actorProfileId) ?? actorIdFrom(actorAssistantId));
+        const canOperate = actor ? await canActorWriteTask(id, task, actor) : false;
+        if (!canOperate) {
+          return forbidden("只有任务相关人员可以修改备注", "ONLY_TASK_ACTOR_CAN_UPDATE_NOTE");
+        }
         const { note } = body as { note: string };
         const updated = await prisma.bookingTask.update({
           where: { id },
@@ -339,6 +450,10 @@ export async function PATCH(request: NextRequest, { params }: RouteContext) {
       }
 
       case "updatePublisherFeedback": {
+        const actor = await loadActorProfile(actorIdFrom(actorProfileId));
+        if (!actor || actor.id !== task.photographerId) {
+          return forbidden("只有任务发布摄影师可以反馈任务发布明细", "ONLY_PHOTOGRAPHER_CAN_UPDATE_FEEDBACK");
+        }
         const { feedback } = body as { feedback?: string | null };
         const normalizedFeedback =
           feedback === "like" || feedback === "dislike" ? feedback : null;
@@ -350,6 +465,10 @@ export async function PATCH(request: NextRequest, { params }: RouteContext) {
       }
 
       case "cancelSpecifiedAssistant": {
+        const actor = await loadActorProfile(actorIdFrom(actorProfileId));
+        if (!actor || (actor.id !== task.photographerId && actor.role !== Role.admin)) {
+          return forbidden("只有任务发布摄影师或管理员可以取消指定助理", "ONLY_OWNER_OR_ADMIN_CAN_CANCEL_SPECIFIED");
+        }
         const specifiedTask = await prisma.bookingTask.findUnique({
           where: { id },
           include: {
@@ -444,9 +563,13 @@ export async function PATCH(request: NextRequest, { params }: RouteContext) {
 
       case "transferPrimaryAssistant": {
         const { targetAssistantId } = body as { targetAssistantId?: string };
-        const actorId = typeof actorAssistantId === "string" ? actorAssistantId : task.assistantId;
+        const actorId = actorIdFrom(actorAssistantId);
         if (!actorId) {
           return Response.json({ error: "actorAssistantId required for transfer", code: "TRANSFER_ACTOR_REQUIRED" }, { status: 400 });
+        }
+        const actor = await loadActorProfile(actorId);
+        if (!isAssistantActor(actor)) {
+          return forbidden("只有任务助理可以发起移交", "ONLY_ASSISTANT_CAN_TRANSFER_TASK");
         }
         if (!targetAssistantId || typeof targetAssistantId !== "string") {
           return Response.json({ error: "targetAssistantId required for transfer", code: "TRANSFER_TARGET_REQUIRED" }, { status: 400 });
@@ -487,9 +610,13 @@ export async function PATCH(request: NextRequest, { params }: RouteContext) {
 
       case "respondPrimaryAssistantTransfer": {
         const { accepted, responseMode } = body as { accepted?: boolean; responseMode?: "pause_and_go" | "after_complete" };
-        const actorId = typeof actorAssistantId === "string" ? actorAssistantId : null;
+        const actorId = actorIdFrom(actorAssistantId);
         if (!actorId) {
           return Response.json({ error: "actorAssistantId required for transfer response", code: "TRANSFER_ACTOR_REQUIRED" }, { status: 400 });
+        }
+        const actor = await loadActorProfile(actorId);
+        if (!isAssistantActor(actor)) {
+          return forbidden("只有目标助理可以响应移交", "ONLY_ASSISTANT_CAN_RESPOND_TRANSFER");
         }
         if (typeof accepted !== "boolean") {
           return Response.json({ error: "accepted boolean required for transfer response", code: "TRANSFER_RESPONSE_REQUIRED" }, { status: 400 });

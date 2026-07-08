@@ -592,6 +592,7 @@ export default function PhotographerPage() {
   const publicQueuePromotionRunningRef = useRef(false);
   const pendingRawTaskRef = useRef<TaskFromAPI | null>(null);
   const assistantActionPendingRef = useRef<Set<string>>(new Set());
+  const recentTaskPatchesRef = useRef<Map<string, { task: TaskFromAPI; appliedAt: number }>>(new Map());
   const pollingProfileId = profile?.id ?? null;
   const pollingProfileRole = profile?.role ?? null;
   const pollingProfileBuildingId = profile?.buildingId ?? null;
@@ -1073,7 +1074,29 @@ export default function PhotographerPage() {
     targetProfile: { id: string; role: string; buildingId: number },
     targetBuildingId = targetProfile.buildingId,
   ) => {
-    const raw = visibleTasksForProfile(taskData, targetProfile, targetBuildingId);
+    const nowMs = Date.now();
+    const patchedIds = new Set<string>();
+    const patchedTaskData = taskData.map((task) => {
+      const patch = recentTaskPatchesRef.current.get(task.id);
+      if (!patch) return task;
+      if (nowMs - patch.appliedAt > 5_000) {
+        recentTaskPatchesRef.current.delete(task.id);
+        return task;
+      }
+      patchedIds.add(task.id);
+      return { ...task, ...patch.task };
+    });
+    for (const [taskId, patch] of recentTaskPatchesRef.current) {
+      if (nowMs - patch.appliedAt > 5_000) {
+        recentTaskPatchesRef.current.delete(taskId);
+        continue;
+      }
+      if (!patchedIds.has(taskId) && !patchedTaskData.some((task) => task.id === taskId)) {
+        patchedTaskData.push(patch.task);
+      }
+    }
+
+    const raw = visibleTasksForProfile(patchedTaskData, targetProfile, targetBuildingId);
     const assistantView = isAssistantRole(targetProfile.role);
     setTaskListRaw(raw);
     setTasks(sortTasksByStatus(raw.map((t) => apiTaskToDisplay(t, assistantView ? targetProfile.id : undefined))));
@@ -1092,6 +1115,21 @@ export default function PhotographerPage() {
       setPendingRawTask(null);
     }
   }, []);
+
+  const mergeAuthoritativeTaskForProfile = useCallback((
+    updatedTask: TaskFromAPI,
+    targetProfile = profile,
+  ) => {
+    if (!targetProfile) return;
+    recentTaskPatchesRef.current.set(updatedTask.id, { task: updatedTask, appliedAt: Date.now() });
+    const byId = new Map<string, TaskFromAPI>();
+    for (const task of [...taskListRaw, ...assistantRawTasks]) {
+      byId.set(task.id, task);
+    }
+    const existing = byId.get(updatedTask.id);
+    byId.set(updatedTask.id, existing ? { ...existing, ...updatedTask } : updatedTask);
+    applyTaskDataForProfile([...byId.values()], targetProfile, activeBuildingId ?? targetProfile.buildingId);
+  }, [activeBuildingId, applyTaskDataForProfile, assistantRawTasks, profile, taskListRaw]);
 
   const applyOptimisticAssistantTaskStatus = useCallback((task: TaskFromAPI, action: "start" | "complete") => {
     if (!profile || !isAssistantRole(profile.role)) return;
@@ -1903,8 +1941,11 @@ export default function PhotographerPage() {
     let cancelled = false;
     let inFlight = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
+    const activeDelay = 3000;
+    const hiddenDelay = 12000;
     const scheduleNext = (delayMs: number) => {
       if (cancelled) return;
+      if (timer) clearTimeout(timer);
       timer = setTimeout(poll, delayMs);
     };
     const poll = async () => {
@@ -1946,16 +1987,26 @@ export default function PhotographerPage() {
         console.error(error);
       } finally {
         inFlight = false;
-        const activeDelay = 3000;
-        const hiddenDelay = 12000;
         scheduleNext(document.visibilityState === "visible" ? activeDelay : hiddenDelay);
       }
     };
+    const onVisibilityChange = () => {
+      if (cancelled) return;
+      if (document.visibilityState === "visible") {
+        if (timer) clearTimeout(timer);
+        timer = null;
+        void poll();
+      } else {
+        scheduleNext(hiddenDelay);
+      }
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
     // 首次立即执行一次，确保初始数据同步
     poll();
     return () => {
       cancelled = true;
       if (timer) clearTimeout(timer);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
     };
   }, [activeBuildingId, applyTaskDataForProfile, pollingProfile, refreshAssistants]);
 
@@ -2465,14 +2516,15 @@ export default function PhotographerPage() {
 
   const canCancelSpecifiedAssistant = useCallback((task: TaskFromAPI | null | undefined) => {
     if (!task || !task.isSpecified || !task.assistantId) return false;
-    if (isAssistantRole(profile?.role)) return false;
+    if (!profile || (profile.role !== "admin" && profile.role !== "photographer")) return false;
+    if (profile.role === "photographer" && task.photographerId !== profile.id) return false;
     if (task.status !== "waiting" || task.startedAt != null) return false;
     const specifiedParticipant = taskParticipants(task).find((participant) => participant.assistantId === task.assistantId);
     return !specifiedParticipant?.startedAt &&
       specifiedParticipant?.status !== "executing" &&
       specifiedParticipant?.status !== "paused" &&
       specifiedParticipant?.status !== "completed";
-  }, [profile?.role]);
+  }, [profile]);
 
   const handleCancelSpecifiedAssistant = useCallback(async (task: TaskFromAPI) => {
     if (cancelingSpecifiedTaskId || !canCancelSpecifiedAssistant(task)) return;
@@ -2481,7 +2533,7 @@ export default function PhotographerPage() {
       const response = await fetch(`/api/tasks/${task.id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "cancelSpecifiedAssistant" }),
+        body: JSON.stringify({ action: "cancelSpecifiedAssistant", actorProfileId: profile?.id }),
       });
       if (!response.ok) {
         const data = await response.json().catch(() => null) as { error?: string } | null;
@@ -2888,13 +2940,24 @@ export default function PhotographerPage() {
 
   const handleSaveNote = useCallback(async (taskId: string, note: string) => {
     if (noteTaskIsExecuting(taskId)) return;
+    if (!profile) return;
     setNoteSaving(true);
     try {
-      await fetch(`/api/tasks/${taskId}`, {
+      const response = await fetch(`/api/tasks/${taskId}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "updateNote", note }),
+        body: JSON.stringify({
+          action: "updateNote",
+          note,
+          actorProfileId: profile.id,
+          actorAssistantId: isAssistantRole(profile.role) ? profile.id : undefined,
+        }),
       });
+      if (!response.ok) {
+        const data = await response.json().catch(() => null) as { error?: string } | null;
+        showTaskCreateError(data?.error || "备注保存失败，请稍后重试");
+        return;
+      }
       // 更新本地 taskListRaw 和 assistantRawTasks 中的 note
       setTaskListRaw((prev) => prev.map((t) => t.id === taskId ? { ...t, note: note.trim() || null } : t));
       setAssistantRawTasks((prev) => prev.map((t) => t.id === taskId ? { ...t, note: note.trim() || null } : t));
@@ -2904,20 +2967,21 @@ export default function PhotographerPage() {
     } finally {
       setNoteSaving(false);
     }
-  }, [noteTaskIsExecuting]);
+  }, [noteTaskIsExecuting, profile, showTaskCreateError]);
 
   const handlePublisherFeedback = useCallback(async (
     task: DisplayTask,
     feedback: TaskPublisherFeedback
   ) => {
     if (publisherFeedbackSavingId) return;
+    if (!profile) return;
     const nextFeedback = task.publisherFeedback === feedback ? null : feedback;
     setPublisherFeedbackSavingId(task.id);
     try {
       const response = await fetch(`/api/tasks/${task.id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "updatePublisherFeedback", feedback: nextFeedback }),
+        body: JSON.stringify({ action: "updatePublisherFeedback", feedback: nextFeedback, actorProfileId: profile.id }),
       });
       if (!response.ok) return;
 
@@ -2938,7 +3002,7 @@ export default function PhotographerPage() {
     } finally {
       setPublisherFeedbackSavingId(null);
     }
-  }, [publisherFeedbackSavingId]);
+  }, [profile, publisherFeedbackSavingId]);
 
   const pendingPriorityUpgradeForTask = useCallback((task: TaskFromAPI | null | undefined) => (
     task?.priorityUpgradeRequests?.find((request) => request.status === "pending") ?? null
@@ -3346,15 +3410,15 @@ export default function PhotographerPage() {
   // 助理：切换任务状态（targetTask 优先，避免界面展示任务与 currentRawTask 短暂不一致时点击无效）
   const handleAssistantStatusChange = useCallback(async (action: "start" | "complete", targetTask?: TaskFromAPI | null) => {
     const task = targetTask ?? currentRawTask;
-    if (!task) return;
-    const actionKey = `${action}:${task.id}:${profile?.id ?? ""}`;
+    if (!task || !profile) return;
+    const actionKey = `${action}:${task.id}:${profile.id}`;
     if (assistantActionPendingRef.current.has(actionKey)) return;
     assistantActionPendingRef.current.add(actionKey);
     try {
       const res = await fetch(`/api/tasks/${task.id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action, actorAssistantId: profile?.id }),
+        body: JSON.stringify({ action, actorAssistantId: profile.id }),
       });
       if (!res.ok) {
         const data = await res.clone().json().catch(() => null) as { code?: string; error?: string } | null;
@@ -3370,9 +3434,12 @@ export default function PhotographerPage() {
         }
         return;
       }
+      const updatedTask = await res.json().catch(() => null) as TaskFromAPI | null;
       if (profile) {
-        let appliedFreshTasks = false;
-        if (action !== "complete") {
+        let appliedFreshTasks = updatedTask?.id === task.id;
+        if (updatedTask?.id === task.id) {
+          mergeAuthoritativeTaskForProfile(updatedTask, profile);
+        } else if (action !== "complete") {
           applyOptimisticAssistantTaskStatus(task, action);
         }
         try {
@@ -3385,7 +3452,7 @@ export default function PhotographerPage() {
         } catch (refreshError) {
           console.error("Failed to refresh assistant tasks", refreshError);
         }
-        if (action === "complete" && !appliedFreshTasks) {
+        if (action === "complete" && !appliedFreshTasks && updatedTask?.id !== task.id) {
           applyOptimisticAssistantTaskStatus(task, action);
         }
         refreshAssistants();
@@ -3395,7 +3462,7 @@ export default function PhotographerPage() {
     } finally {
       assistantActionPendingRef.current.delete(actionKey);
     }
-  }, [activeBuildingId, applyOptimisticAssistantTaskStatus, applyTaskDataForProfile, currentRawTask, profile, refreshAssistants, showTaskCreateError]);
+  }, [activeBuildingId, applyOptimisticAssistantTaskStatus, applyTaskDataForProfile, currentRawTask, mergeAuthoritativeTaskForProfile, profile, refreshAssistants, showTaskCreateError]);
 
   const handleResumePausedTask = useCallback(async (task: TaskFromAPI) => {
     if (manualPauseSlide) return;

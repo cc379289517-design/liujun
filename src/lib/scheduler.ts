@@ -2100,11 +2100,14 @@ export async function autoClaimWaitingTask(assistantId: string): Promise<string 
   });
   if (existingTask) return null;
 
-  // 查找同楼座、未分配助理的等待任务（按优先级升序、创建时间升序）
-  const waitingTask = await prisma.bookingTask.findFirst({
+  // 查找同楼座、未分配助理的等待任务（按优先级升序、创建时间升序）。
+  // 实际落库仍走条件认领，避免多个入口同时把同一助理/任务抢到手。
+  const waitingTasks = await prisma.bookingTask.findMany({
     where: {
       status: TaskStatus.waiting,
       assistantId: null,
+      parentTaskId: null,
+      ironingStage: IroningTaskStage.none,
       AND: [NOT_PHOTOGRAPHER_LIMIT_QUEUE_WHERE],
       OR: [
         { locationBuildingId: assistantBuildingId },
@@ -2112,29 +2115,18 @@ export async function autoClaimWaitingTask(assistantId: string): Promise<string 
       ],
     },
     orderBy: [{ priority: "asc" }, { createdAt: "asc" }],
+    take: 20,
   });
 
-  if (!waitingTask) return null;
+  for (const waitingTask of waitingTasks) {
+    const claimed = await claimWaitingTaskForAssistant(waitingTask.id, assistantId, assistantBuildingId);
+    if (!claimed) continue;
+    await recordIdleDispatchRoundRobin(assistantBuildingId, assistantId);
+    console.log(`[autoClaimWaitingTask] 助理 ${assistantId} 自动认领任务 ${waitingTask.id} (P${waitingTask.priority})`);
+    return waitingTask.id;
+  }
 
-  await prisma.$transaction([
-    prisma.bookingTask.update({
-      where: { id: waitingTask.id },
-      data: { assistantId },
-    }),
-    prisma.taskCollaborator.upsert({
-      where: { taskId_assistantId: { taskId: waitingTask.id, assistantId } },
-      create: { taskId: waitingTask.id, assistantId, role: "primary", status: "waiting" },
-      update: { role: "primary", status: "waiting", leftAt: null },
-    }),
-    prisma.profile.update({
-      where: { id: assistantId },
-      data: { status: ProfileStatus.assigned },
-    }),
-  ]);
-  await recordIdleDispatchRoundRobin(assistantBuildingId, assistantId);
-
-  console.log(`[autoClaimWaitingTask] 助理 ${assistantId} 自动认领任务 ${waitingTask.id} (P${waitingTask.priority})`);
-  return waitingTask.id;
+  return null;
 }
 
 function standbyReassignmentScore(priority: number, waitedMinutes: number, thresholdMinutes: number): number {

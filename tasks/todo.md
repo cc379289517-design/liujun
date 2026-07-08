@@ -6252,3 +6252,15 @@
 - 对抗性审查补丁：PRAGMA 初始化避开 `phase-production-build` 构建阶段，减少构建时触碰生产 SQLite 的风险。
 - 验证通过：`npx prisma validate`、`npx prisma db push`、`npx tsc --noEmit --pretty false`、`npm run build`、`git diff --check`。
 - 注意：`prisma/dev.db` 因索引同步和运行态 WAL 有本地改动，继续按项目规则排除提交。
+
+### 对抗性审查追加验收
+
+- [x] 后端 actor 硬化：`start/pause/complete/transfer/respond transfer` 不再用任务当前助理兜底，必须显式传 `actorAssistantId`；暂停/完成/开始前校验当前有效参与者。
+- [x] 管理直改收口：`setStatus` 仅管理员/助理组长可用，且不能直写 `executing/paused`；已开始任务不能回退 `waiting`，完成仍走 `completeTask()`。
+- [x] 写接口权限兜底：`updateNote/extend/updatePublisherFeedback/cancelSpecifiedAssistant` 增加服务端 actor/归属校验，前端同步传 actor 并在备注保存失败时不做本地成功更新。
+- [x] 自动认领补洞：`autoClaimWaitingTask()` 改为候选循环 + `claimWaitingTaskForAssistant()` 条件认领，避免未来接入后复活旧式覆盖派单风险。
+- [x] 前端同步抗闪回：`start/complete` 成功后立即合并后端返回的完整任务详情；最近 5 秒权威任务片段优先于旧轮询快照；页面从后台切回前台时立即同步。
+- [x] 文档同步：长期文档更新 `/api/tasks/[id]` actor 权限、`setStatus` 收口、工作台前台即时同步和权威任务片段合并规则。
+- 残余风险：熨烫任务派发、熨烫开始槽位占用、执行中插单、待就位插单、指定助理创建仍有事务外筛选/事务内无条件写的历史路径，下一阶段应继续收口为 DB 条件命令并补并发测试。
+- 残余风险：`/api/workbench/sync` 当前仍是有界快照，不是真正 `since` delta；115 会话压力下仍需继续拆出服务端计算的 `assistantStatus`、公共队列摘要和按需详情。
+- 本轮新增验证：`npx prisma validate`、`npx tsc --noEmit --pretty false`、`npm run build`、`git diff --check` 已通过。
