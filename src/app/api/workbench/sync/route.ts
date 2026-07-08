@@ -2,6 +2,13 @@ import { NextRequest } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { runWorkbenchSyncMaintenance } from "@/lib/scheduler";
 import { Prisma, PriorityUpgradeRequestStatus } from "@/generated/prisma/client";
+import {
+  ASSISTANT_EATING_SUB_STATUS,
+  EATING_OVERTIME_ALERT_CONFIG_KEY,
+  eatingTotalElapsedSeconds,
+  parseEatingOvertimeAlertMin,
+} from "@/lib/eatingPresence";
+import { effectiveWorkMinutesFromApi, overtimeMinutesBeyondSlot, taskSlotCapMinutes } from "@/lib/taskEffectiveTime";
 
 const VISIBLE_PRIORITY_UPGRADE_REQUEST_STATUSES: PriorityUpgradeRequestStatus[] = [
   PriorityUpgradeRequestStatus.pending,
@@ -268,6 +275,396 @@ async function relatedChangedTaskIdsSince(
   };
 }
 
+type AssistantProfileRow = Prisma.ProfileGetPayload<{
+  include: { building: { select: { id: true; name: true; extraVenues: true } } };
+}>;
+type QueueTask = Prisma.BookingTaskGetPayload<{ include: typeof QUEUE_TASK_INCLUDE }>;
+type QueueParticipant = QueueTask["collaborators"][number];
+
+const ACTIVE_PARTICIPANT_STATUSES = ["waiting", "executing", "paused"];
+
+function fmtMin(min: number): string {
+  const m = Math.max(0, Math.round(Number(min) || 0));
+  if (m <= 60) return `${m}分钟`;
+  const h = m / 60;
+  const rounded = Math.round(h * 10) / 10;
+  return Number.isInteger(rounded) ? `${rounded}小时` : `${rounded.toFixed(1)}小时`;
+}
+
+function buildDurationLabel(min: number, max: number): string {
+  if (min > 0 && max > 0) return `${min}-${max}分钟`;
+  if (max > 0) return `${max}分钟以内`;
+  if (min > 0) return `${min}分钟以上`;
+  return "未设置";
+}
+
+function taskCategoryDurationCaption(
+  category: QueueTask["category"] | undefined,
+  priority: number,
+): string {
+  const min = category?.minDuration;
+  const max = category?.maxDuration;
+  if (typeof min === "number" && typeof max === "number" && (min > 0 || max > 0)) {
+    return buildDurationLabel(min, max);
+  }
+  const est = category?.estDuration;
+  if (typeof est === "number" && est > 0) return fmtMin(est);
+  return ({ 1: "1-5分钟", 2: "5-20分钟", 3: "30分钟以内", 4: "30-60分钟", 5: "1小时以上" } as Record<number, string>)[priority] || "";
+}
+
+function taskParticipants(task: QueueTask | undefined | null): QueueParticipant[] {
+  return (task?.collaborators ?? []).filter((participant) => participant.status !== "left");
+}
+
+function activeTaskParticipants(task: QueueTask | undefined | null): QueueParticipant[] {
+  return taskParticipants(task).filter((participant) => ACTIVE_PARTICIPANT_STATUSES.includes(participant.status));
+}
+
+function taskParticipantForProfile(task: QueueTask | undefined | null, profileId: string | null | undefined): QueueParticipant | null {
+  if (!task || !profileId) return null;
+  return taskParticipants(task).find((participant) => {
+    if (participant.assistantId !== profileId) return false;
+    if (participant.role === "primary") return task.assistantId === profileId || participant.status === "completed";
+    return true;
+  }) ?? null;
+}
+
+function taskStatusForProfile(task: QueueTask | undefined | null, profileId: string | null | undefined): string | null {
+  if (
+    profileId &&
+    task?.assistantTransferRequests?.some((request) =>
+      request.targetAssistantId === profileId && request.status === "ready_to_takeover"
+    )
+  ) {
+    return "waiting";
+  }
+  return taskParticipantForProfile(task, profileId)?.status ?? task?.status ?? null;
+}
+
+function taskTimingForProfile(task: QueueTask, profileId: string | null | undefined): QueueTask | QueueParticipant {
+  return taskParticipantForProfile(task, profileId) ?? task;
+}
+
+function isIroningTask(task: QueueTask | null | undefined): boolean {
+  const name = task?.category?.name ?? "";
+  return name.includes("熨");
+}
+
+function isMapDeferredIroningWaitingTask(task: QueueTask | null | undefined): boolean {
+  return !!task &&
+    isIroningTask(task) &&
+    task.status === "waiting" &&
+    task.ironingStage === "waiting_machine";
+}
+
+function formatMapTaskElapsedLine(task: QueueTask, nowMs: number): string | null {
+  if (task.status !== "executing" && task.status !== "paused") return null;
+  const elapsed = effectiveWorkMinutesFromApi(task, nowMs);
+  const cap = taskSlotCapMinutes(task.category);
+  if (cap != null && elapsed > cap) return `已超时${fmtMin(elapsed - cap)}`;
+  if (elapsed > 0) return `已进行${fmtMin(elapsed)}`;
+  return null;
+}
+
+type AssistantTaskInfo = {
+  executingTask: QueueTask | null;
+  pausedTask: QueueTask | null;
+  waitingInterruptTask: QueueTask | null;
+  resumingTask: QueueTask | null;
+  preemptedWaitingTask: QueueTask | null;
+  collaboratingTask: QueueTask | null;
+  collaboratingStatus: string | null;
+};
+
+function buildAssistantStatus(
+  profiles: AssistantProfileRow[],
+  tasks: QueueTask[],
+  eatingOvertimeAlertMin: number,
+) {
+  const nowMs = Date.now();
+  const infoMap = new Map<string, AssistantTaskInfo>();
+  const ensureInfo = (assistantId: string) => {
+    const existing = infoMap.get(assistantId);
+    if (existing) return existing;
+    const created: AssistantTaskInfo = {
+      executingTask: null,
+      pausedTask: null,
+      waitingInterruptTask: null,
+      resumingTask: null,
+      preemptedWaitingTask: null,
+      collaboratingTask: null,
+      collaboratingStatus: null,
+    };
+    infoMap.set(assistantId, created);
+    return created;
+  };
+
+  for (const task of tasks) {
+    if (!task.category) continue;
+    if (task.assistantId) {
+      const primaryStatus = taskStatusForProfile(task, task.assistantId) ?? task.status;
+      if (ACTIVE_PARTICIPANT_STATUSES.includes(primaryStatus)) {
+        const info = ensureInfo(task.assistantId);
+        if (primaryStatus === "executing") info.executingTask = task;
+        else if (primaryStatus === "paused") info.pausedTask = task;
+        else if (primaryStatus === "waiting" && task.parentTaskId) {
+          if (!info.executingTask) info.resumingTask = task;
+          else info.waitingInterruptTask = task;
+        }
+      }
+    }
+    for (const collaborator of activeTaskParticipants(task)) {
+      if (!collaborator.assistantId || collaborator.assistantId === task.assistantId) continue;
+      const info = ensureInfo(collaborator.assistantId);
+      if (!info.executingTask && !info.pausedTask && !info.waitingInterruptTask && !info.resumingTask) {
+        info.collaboratingTask = task;
+        info.collaboratingStatus = collaborator.status;
+      }
+    }
+  }
+
+  for (const [, info] of infoMap) {
+    if (info.executingTask && info.resumingTask) {
+      info.waitingInterruptTask = info.resumingTask;
+      info.resumingTask = null;
+    }
+    if (info.pausedTask && info.resumingTask && !info.waitingInterruptTask) {
+      info.waitingInterruptTask = info.resumingTask;
+      info.resumingTask = null;
+    }
+  }
+
+  for (const [, info] of infoMap) {
+    const candidate = info.resumingTask;
+    if (!candidate || info.executingTask) continue;
+    const parent = tasks.find((task) => task.id === candidate.parentTaskId);
+    if (
+      parent &&
+      taskStatusForProfile(parent, parent.assistantId) === "waiting" &&
+      parent.assistantId === candidate.assistantId
+    ) {
+      info.preemptedWaitingTask = parent;
+      info.waitingInterruptTask = candidate;
+      info.resumingTask = null;
+    }
+  }
+
+  for (const [, info] of infoMap) {
+    const executingTask = info.executingTask;
+    if (!executingTask?.parentTaskId) continue;
+    const parent = tasks.find((task) => task.id === executingTask.parentTaskId);
+    if (
+      parent &&
+      taskStatusForProfile(parent, parent.assistantId) === "waiting" &&
+      parent.assistantId === executingTask.assistantId
+    ) {
+      info.preemptedWaitingTask = parent;
+    }
+  }
+
+  return profiles.map((profile) => {
+    const info = infoMap.get(profile.id);
+    const idleRoom = profile.activeRoom ?? profile.currentRoom;
+    const eatingElapsedMin = profile.subStatus === ASSISTANT_EATING_SUB_STATUS
+      ? Math.max(0, Math.floor(eatingTotalElapsedSeconds(profile.eatingStartedAt, profile.eatingAccumulatedSeconds, nowMs) / 60))
+      : null;
+    const eatingOvertimeMin =
+      eatingElapsedMin != null && eatingElapsedMin >= eatingOvertimeAlertMin
+        ? eatingElapsedMin - eatingOvertimeAlertMin
+        : null;
+    const idleStatus = {
+      id: profile.id,
+      status: "idle",
+      currentTask: null,
+      currentRoom: idleRoom,
+      pausedRoom: null,
+      pausedElapsedMin: 0,
+      pausedTaskDesc: null,
+      pausedTaskDetail: null,
+      newTaskDesc: null,
+      resumingFromPause: false,
+      pendingRoom: null,
+      currentTaskNote: null,
+      currentTaskId: null,
+      executingOvertimeMin: null,
+      pausedOvertimeMin: null,
+      eatingElapsedMin,
+      eatingOvertimeMin,
+      preemptedWaitingRoom: null,
+      preemptedWaitingTaskDesc: null,
+      preemptedWaitingTaskDetail: null,
+      preemptedOvertimeMin: null,
+    };
+    if (!info) return idleStatus;
+
+    const { executingTask, pausedTask, waitingInterruptTask, resumingTask, preemptedWaitingTask, collaboratingTask, collaboratingStatus } = info;
+    let finalStatus = "idle";
+    let currentRoom = idleRoom;
+    let pendingRoom: string | null = null;
+    let pausedRoom: string | null = null;
+    let pausedTaskDesc: string | null = null;
+    let pausedTaskDetail: string | null = null;
+    let pausedElapsedMin = 0;
+    let preemptedWaitingRoom: string | null = null;
+    let preemptedWaitingTaskDesc: string | null = null;
+    let preemptedWaitingTaskDetail: string | null = null;
+    let newTaskDesc: string | null = null;
+    let resumingFromPause = false;
+
+    const buildDesc = (task: QueueTask) =>
+      task.category
+        ? `${task.roomNumber}室 · ${task.category.name} · ${taskCategoryDurationCaption(task.category, task.priority)}`
+        : `${task.roomNumber}室`;
+    const plainWaitingTask = tasks.find((task) =>
+      task.assistantId === profile.id &&
+      taskStatusForProfile(task, profile.id) === "waiting" &&
+      !isMapDeferredIroningWaitingTask(task)
+    ) ?? null;
+    const pausedElapsedFor = (task: QueueTask) =>
+      effectiveWorkMinutesFromApi({ ...taskTimingForProfile(task, profile.id), status: "paused" }, nowMs);
+    const pausedOvertimeFor = (task: QueueTask) =>
+      overtimeMinutesBeyondSlot({ ...taskTimingForProfile(task, profile.id), status: "paused", category: task.category }, nowMs);
+    const setPausedMarker = (task: QueueTask, detailPrefix?: string) => {
+      pausedRoom = task.roomNumber;
+      const elapsed = pausedElapsedFor(task);
+      pausedElapsedMin = elapsed;
+      const overtime = pausedOvertimeFor(task);
+      pausedTaskDesc =
+        overtime != null
+          ? `${task.category.name} · 已超时${fmtMin(overtime)}`
+          : `${task.category.name} · 已进行${fmtMin(elapsed)}`;
+      pausedTaskDetail = detailPrefix ? `${detailPrefix} · ${buildDesc(task)}` : buildDesc(task);
+    };
+
+    if (preemptedWaitingTask && executingTask && executingTask.parentTaskId === preemptedWaitingTask.id) {
+      finalStatus = "executing";
+      preemptedWaitingRoom = preemptedWaitingTask.roomNumber;
+      currentRoom = executingTask.roomNumber;
+      newTaskDesc = buildDesc(executingTask);
+      const overtime = overtimeMinutesBeyondSlot(preemptedWaitingTask, nowMs);
+      preemptedWaitingTaskDesc = overtime != null ? `已超时${fmtMin(overtime)}` : "已让行紧急单";
+      preemptedWaitingTaskDetail = buildDesc(preemptedWaitingTask);
+    } else if (executingTask && waitingInterruptTask) {
+      finalStatus = "executing";
+      currentRoom = executingTask.roomNumber;
+      pendingRoom = waitingInterruptTask.roomNumber;
+      newTaskDesc = buildDesc(waitingInterruptTask);
+    } else if (preemptedWaitingTask && waitingInterruptTask) {
+      finalStatus = "assigned";
+      preemptedWaitingRoom = preemptedWaitingTask.roomNumber;
+      currentRoom = waitingInterruptTask.roomNumber;
+      newTaskDesc = buildDesc(waitingInterruptTask);
+      const overtime = overtimeMinutesBeyondSlot(preemptedWaitingTask, nowMs);
+      preemptedWaitingTaskDesc = overtime != null ? `已超时${fmtMin(overtime)}` : "已让行紧急单";
+      preemptedWaitingTaskDetail = buildDesc(preemptedWaitingTask);
+    } else if (pausedTask && waitingInterruptTask) {
+      finalStatus = "assigned";
+      currentRoom = waitingInterruptTask.roomNumber;
+      setPausedMarker(pausedTask);
+      pendingRoom = null;
+      newTaskDesc = buildDesc(waitingInterruptTask);
+    } else if (pausedTask && executingTask) {
+      finalStatus = "executing";
+      currentRoom = executingTask.roomNumber;
+      setPausedMarker(pausedTask);
+      newTaskDesc = buildDesc(executingTask);
+    } else if (resumingTask) {
+      finalStatus = "assigned";
+      currentRoom = resumingTask.roomNumber;
+      resumingFromPause = true;
+    } else if (collaboratingTask) {
+      if (collaboratingStatus === "paused") {
+        finalStatus = "busy";
+        currentRoom = null;
+        setPausedMarker(collaboratingTask, "协作中");
+      } else {
+        finalStatus = collaboratingStatus === "executing"
+          ? "executing"
+          : collaboratingStatus === "waiting"
+            ? "assigned"
+            : "busy";
+        currentRoom = collaboratingTask.roomNumber;
+        newTaskDesc = `协作中 · ${buildDesc(collaboratingTask)}`;
+      }
+    } else if (executingTask) {
+      finalStatus = "executing";
+      currentRoom = executingTask.roomNumber;
+    } else if (pausedTask) {
+      finalStatus = "busy";
+      currentRoom = null;
+      setPausedMarker(pausedTask);
+    } else if (plainWaitingTask) {
+      finalStatus = "assigned";
+      currentRoom = plainWaitingTask.roomNumber;
+      if (plainWaitingTask.startedAt) resumingFromPause = true;
+    }
+
+    const descTask =
+      (!executingTask && pausedTask && waitingInterruptTask)
+        ? waitingInterruptTask
+        : (!executingTask && preemptedWaitingTask && waitingInterruptTask)
+          ? waitingInterruptTask
+          : preemptedWaitingTask && executingTask && executingTask.parentTaskId === preemptedWaitingTask.id
+            ? executingTask
+            : (executingTask || pausedTask || collaboratingTask || plainWaitingTask || null);
+    const currentTask = descTask
+      ? (() => {
+          const line = formatMapTaskElapsedLine(descTask, nowMs);
+          const desc = collaboratingTask?.id === descTask.id && !executingTask && !pausedTask
+            ? `协作中 · ${buildDesc(descTask)}`
+            : buildDesc(descTask);
+          return line ? `${line}\n${desc}` : desc;
+        })()
+      : null;
+
+    return {
+      id: profile.id,
+      status: finalStatus,
+      currentTask,
+      currentRoom,
+      currentTaskNote: descTask?.note ?? null,
+      currentTaskId: descTask?.id ?? null,
+      pausedRoom,
+      pausedElapsedMin,
+      pausedTaskDesc,
+      pausedTaskDetail,
+      newTaskDesc,
+      resumingFromPause,
+      pendingRoom,
+      preemptedWaitingRoom,
+      preemptedWaitingTaskDesc,
+      preemptedWaitingTaskDetail,
+      executingOvertimeMin: executingTask ? overtimeMinutesBeyondSlot(executingTask, nowMs) : null,
+      pausedOvertimeMin: pausedRoom
+        ? pausedTask
+          ? pausedOvertimeFor(pausedTask)
+          : collaboratingTask && collaboratingStatus === "paused"
+            ? pausedOvertimeFor(collaboratingTask)
+            : null
+        : null,
+      preemptedOvertimeMin: preemptedWaitingTask ? overtimeMinutesBeyondSlot(preemptedWaitingTask, nowMs) : null,
+      eatingElapsedMin,
+      eatingOvertimeMin,
+    };
+  });
+}
+
+function compactAssistantStatus(
+  rows: ReturnType<typeof buildAssistantStatus>,
+): Array<{ id: string; [key: string]: unknown }> {
+  return rows.map((row) => {
+    const compact: { id: string; [key: string]: unknown } = { id: row.id };
+    for (const [key, value] of Object.entries(row)) {
+      if (key === "id") continue;
+      if (value == null && key !== "currentRoom") continue;
+      if (value === false) continue;
+      if (key === "pausedElapsedMin" && value === 0) continue;
+      compact[key] = value;
+    }
+    return compact;
+  });
+}
+
 export async function GET(request: NextRequest) {
   try {
     const { searchParams } = request.nextUrl;
@@ -325,6 +722,19 @@ export async function GET(request: NextRequest) {
       createdAt,
       AND: taskFilters,
     };
+    const assistantStatusTaskWhere: Prisma.BookingTaskWhereInput = {
+      AND: [
+        areaWhere,
+        { status: { not: "completed" } },
+        {
+          OR: [
+            { assistantId: { not: null } },
+            { collaborators: { some: { status: { in: ACTIVE_PARTICIPANT_STATUSES } } } },
+            { assistantTransferRequests: { some: { status: "ready_to_takeover" } } },
+          ],
+        },
+      ],
+    };
     const [areaRelatedChanges, scopedRelatedChanges] = await Promise.all([
       relatedChangedTaskIdsSince(since, areaTaskWhere),
       relatedChangedTaskIdsSince(since, scopedTaskWhere),
@@ -336,7 +746,7 @@ export async function GET(request: NextRequest) {
       ? [{ updatedAt: "asc" as const }, { id: "asc" as const }]
       : taskOrderBy;
 
-    const [profiles, areaTaskIds, areaTasks, taskIds, tasks, notices] = await Promise.all([
+    const [profiles, areaTaskIds, areaTasks, taskIds, tasks, notices, assistantStatusTasks, eatingOvertimeConfig] = await Promise.all([
       prisma.profile.findMany({
         where: {
           role: { in: ["assistant", "assistant_leader"] },
@@ -396,6 +806,16 @@ export async function GET(request: NextRequest) {
             take: 5,
           })
         : Promise.resolve([]),
+      prisma.bookingTask.findMany({
+        where: assistantStatusTaskWhere,
+        include: QUEUE_TASK_INCLUDE,
+        orderBy: taskOrderBy,
+        take: AREA_TASK_LIMIT + 1,
+      }),
+      prisma.systemConfig.findUnique({
+        where: { key: EATING_OVERTIME_ALERT_CONFIG_KEY },
+        select: { value: true },
+      }),
     ]);
     const areaTaskIdsTruncated = areaTaskIds.length > AREA_TASK_LIMIT;
     const areaTasksTruncated = areaTasks.length > AREA_TASK_LIMIT;
@@ -405,6 +825,34 @@ export async function GET(request: NextRequest) {
     const visibleAreaTasks = areaTasks.slice(0, AREA_TASK_LIMIT);
     const visibleTaskIds = taskIds.slice(0, SCOPED_TASK_LIMIT);
     const visibleTasks = tasks.slice(0, SCOPED_TASK_LIMIT);
+    const assistantStatusTruncated = assistantStatusTasks.length > AREA_TASK_LIMIT;
+    let assistantStatus: ReturnType<typeof compactAssistantStatus> | null = null;
+    if (!assistantStatusTruncated) {
+      const assistantStatusTaskById = new Map(
+        assistantStatusTasks.map((task) => [task.id, task]),
+      );
+      const missingParentIds = uniqueIds(
+        assistantStatusTasks
+          .map((task) => task.parentTaskId)
+          .filter((id) => id && !assistantStatusTaskById.has(id)),
+      );
+      if (missingParentIds.length > 0) {
+        const parentTasks = await prisma.bookingTask.findMany({
+          where: { id: { in: missingParentIds } },
+          include: QUEUE_TASK_INCLUDE,
+        });
+        for (const parentTask of parentTasks) {
+          assistantStatusTaskById.set(parentTask.id, parentTask);
+        }
+      }
+      assistantStatus = compactAssistantStatus(
+        buildAssistantStatus(
+          profiles,
+          [...assistantStatusTaskById.values()],
+          parseEatingOvertimeAlertMin(eatingOvertimeConfig?.value),
+        ),
+      );
+    }
     const syncTruncated = Boolean(since) && (
       areaTasksTruncated ||
       scopedTasksTruncated ||
@@ -420,6 +868,7 @@ export async function GET(request: NextRequest) {
       nextPollMs: 3000,
       maintenance,
       profiles,
+      assistantStatus,
       tasks: visibleTasks,
       taskIds: visibleTaskIds.map((task) => task.id),
       publicQueue: visibleAreaTasks,
@@ -431,6 +880,7 @@ export async function GET(request: NextRequest) {
         taskListTruncated: areaTasksTruncated,
         scopedIdListTruncated: scopedTaskIdsTruncated,
         scopedTaskListTruncated: scopedTasksTruncated,
+        assistantStatusTruncated,
       },
       notices,
     });

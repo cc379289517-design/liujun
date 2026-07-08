@@ -23,6 +23,7 @@ export type RequestLogEvent = {
     profiles?: number;
     tasks?: number;
     publicQueue?: number;
+    assistantStatus?: number;
     notices?: number;
   };
   syncMode?: "full" | "delta";
@@ -222,6 +223,9 @@ export function buildReport(events: RawLogEvent[], config: LoadtestReportConfig)
     avgPublicQueue: round(
       average(workbenchRequests.map((request) => request.counts?.publicQueue).filter(isNumber)),
     ),
+    avgAssistantStatus: round(
+      average(workbenchRequests.map((request) => request.counts?.assistantStatus).filter(isNumber)),
+    ),
     avgNotices: round(
       average(workbenchRequests.map((request) => request.counts?.notices).filter(isNumber)),
     ),
@@ -322,6 +326,7 @@ function renderMarkdownReport(summary: ReturnType<typeof buildReport>["summary"]
   lines.push(`- Avg profiles per sync: ${summary.workbench.avgProfiles}`);
   lines.push(`- Avg personal tasks per sync: ${summary.workbench.avgTasks}`);
   lines.push(`- Avg public queue per sync: ${summary.workbench.avgPublicQueue}`);
+  lines.push(`- Avg assistant status patches per sync: ${summary.workbench.avgAssistantStatus}`);
   lines.push(`- Avg notices per sync: ${summary.workbench.avgNotices}`);
   lines.push(`- Full syncs: ${summary.workbench.fullSyncs.count}, total ${summary.workbench.fullSyncs.totalMb} MB, avg bytes ${summary.workbench.fullSyncs.avgBytes}, p95 bytes ${summary.workbench.fullSyncs.p95Bytes}`);
   lines.push(`- Delta syncs: ${summary.workbench.deltaSyncs.count}, total ${summary.workbench.deltaSyncs.totalMb} MB, avg bytes ${summary.workbench.deltaSyncs.avgBytes}, p95 bytes ${summary.workbench.deltaSyncs.p95Bytes}`);

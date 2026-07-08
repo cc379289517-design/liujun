@@ -1588,7 +1588,7 @@ export default function PhotographerPage() {
   }, [showAreaCompletedStatsModal, areaCompletedStatsWeekOffset]);
 
   // Fetch assistants + their active tasks for the active building
-  const refreshAssistants = useCallback((snapshot?: { profiles?: unknown; tasks?: unknown }) => {
+  const refreshAssistants = useCallback((snapshot?: { profiles?: unknown; tasks?: unknown; assistantStatus?: unknown }) => {
     if (!activeBuildingId) return;
     const source = snapshot
       ? Promise.resolve([snapshot.profiles, snapshot.tasks])
@@ -1600,6 +1600,9 @@ export default function PhotographerPage() {
       const nowMs = Date.now();
       const profiles = Array.isArray(profilesData) ? profilesData : [];
       const allTasks: TaskFromAPI[] = Array.isArray(tasksData) ? tasksData : [];
+      const assistantStatus = Array.isArray(snapshot?.assistantStatus)
+        ? snapshot.assistantStatus as ({ id: string } & Partial<DockAssistant>)[]
+        : null;
       if (profiles.length > 0) {
         const freshProfilesById = new Map(profiles.map((p) => [p.id, p]));
         setAllProfiles((prev) =>
@@ -1613,6 +1616,19 @@ export default function PhotographerPage() {
           const fresh = freshProfilesById.get(prev.id);
           return fresh ? { ...prev, ...fresh } : prev;
         });
+      }
+      if (assistantStatus) {
+        const statusById = new Map(
+          assistantStatus
+            .filter((row) => row && typeof row.id === "string")
+            .map((row) => [row.id, row]),
+        );
+        type AssistantProfileForDock = DockAssistant & { activeRoom?: string | null };
+        setAssistants((profiles as AssistantProfileForDock[]).map((p) => ({
+          ...profileToQuickBookAssistant(p),
+          ...statusById.get(p.id),
+        })));
+        return allTasks;
       }
 
       // todayOnly 列表常不含「父任务」行，导致无法解析 preemptedWaitingRoom。按需补拉 parentTaskId 指向的任务。
@@ -2034,6 +2050,7 @@ export default function PhotographerPage() {
         const response = await fetch(`/api/workbench/sync?${params.toString()}`, { cache: "no-store" });
         const syncData = await response.json().catch(() => null) as {
           profiles?: unknown;
+          assistantStatus?: unknown;
           publicQueue?: unknown;
           tasks?: unknown;
           notices?: unknown;
@@ -2080,7 +2097,11 @@ export default function PhotographerPage() {
         );
         const mergedTaskData = mergeIncrementalTasks(personalBase, taskData, taskIds, serverSyncMode);
 
-        await refreshAssistants({ profiles: syncData.profiles, tasks: mergedPublicQueue });
+        await refreshAssistants({
+          profiles: syncData.profiles,
+          assistantStatus: syncData.assistantStatus,
+          tasks: mergedPublicQueue,
+        });
         if (cancelled) return;
         const syncToken = typeof syncData.syncToken === "string" ? syncData.syncToken : null;
         if (syncToken) {

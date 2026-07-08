@@ -222,6 +222,7 @@ async function request(
       profiles: Array.isArray(record.profiles) ? record.profiles.length : undefined,
       tasks: Array.isArray(record.tasks) ? record.tasks.length : undefined,
       publicQueue: Array.isArray(record.publicQueue) ? record.publicQueue.length : undefined,
+      assistantStatus: Array.isArray(record.assistantStatus) ? record.assistantStatus.length : undefined,
       notices: Array.isArray(record.notices) ? record.notices.length : undefined,
     };
     const maintenance = record.maintenance;

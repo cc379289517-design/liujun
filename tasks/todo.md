@@ -6303,8 +6303,26 @@
 - [x] `/api/workbench/sync` 从有界全量快照推进到兼容型 `since` 增量同步：服务端返回 `syncMode/syncToken`、变更任务片段、当前可见 `taskIds/publicQueueIds` 和 `publicQueueSummary`，前端首轮全量、后续增量、约 60 秒全量校准。
 - [ ] 继续把同步接口推进到摘要化：返回 `removedIds/completedIds`、首屏公共队列摘要和当前助理状态，减少 profiles/公共队列重复传输。
 - [ ] 公共队列不再每轮 `take: 500` 深 include；首屏返回摘要，任务详情按需补齐。
-- [ ] 服务端计算 `assistantStatus`，减少前端每轮从任务列表反推人员状态。
+- [x] 服务端计算 `assistantStatus`，减少前端每轮从任务列表反推人员状态。
 - [ ] GET 同步中的维护写入继续评估：单进程 SQLite 保持节流；多进程/生产扩展前改为单维护入口或后台 worker。
+
+#### 阶段 C 第三批计划：服务端助理状态摘要
+
+- [x] 新增服务端助理状态摘要函数：复用当前前端 Dock 字段口径，按楼座 profiles + 今日任务计算 `assistantStatus`，包含当前/暂停/让行/插单/协作/吃饭/超时等展示字段。
+- [x] `/api/workbench/sync` 返回 `assistantStatus`，保留 `profiles/publicQueue` 兼容旧前端；不改变派单、优先级、熨烫、移交等业务规则。
+- [x] 前端 `refreshAssistants()` 优先使用 `assistantStatus` 直接 set Dock/地图状态，缺失时回退旧的任务扫描推导，降低每轮 React/JS 计算量。
+- [x] 压测报告补充同步形态变化；验证 `tsc/build/diff`，并跑 115 会话短测，对比 sync p95、平均体积、错误率和不变量。
+
+#### 阶段 C 第三批评审：服务端助理状态摘要
+
+- 已完成：`/api/workbench/sync` 新增 `assistantStatus` 轻量补丁；前端 `refreshAssistants()` 优先消费服务端摘要，缺失时回退旧任务扫描推导。
+- 完整性保护：服务端摘要不复用公共队列窗口，单独查询未完成且与助理相关的区域任务；补齐 `parentTaskId` 父任务闭包；若摘要源触及保护上限，则返回 `null`，避免半截状态误导前端。
+- 体积控制：摘要响应只返回覆盖 profile 基础字段所需的非默认字段，避免每轮广播大量 `null/false/0`。
+- 验证通过：`npx prisma validate`、`npx tsc --noEmit --pretty false --incremental false`、`git diff --check`、`DATABASE_URL=file:./prisma/loadtest.db npm run build`。
+- 只读短压测：80 摄影师、30 助理、5 管理、3 分钟，6,676 请求、0 错误；`/api/workbench/sync` p95 17.5ms，平均约 4.8KB，delta 平均约 4.7KB，平均每次 6 个 `assistantStatus` 补丁。
+- 混合短压测：80 摄影师、30 助理、5 管理、3 分钟，7,197 请求；`/api/workbench/sync` 0 错误、p95 18.2ms，平均约 9.4KB，delta 平均约 8.3KB。174 个非 2xx 均为预期业务 409：高优先级兜底、摄影师发布上限、熨烫机无槽位或助理已有真实工作。
+- 不变量：只读与混合后均未发现重复 active primary、同一助理多个活跃根任务、熨烫 `using` 超机器容量；raw 日志未发现 5xx、SQLite locked/busy。
+- 残余风险：服务端和前端仍存在一份展示推导逻辑复制，后续应抽成共享纯函数或至少增加状态样本回归测试，避免 Dock/地图口径漂移。
 
 ### 阶段 D：前端极限流畅
 
