@@ -159,6 +159,8 @@ import {
 
 const COMPLETION_REGISTRATION_REASON_OPTIONS = ["超时过长", "耗时异常", "其他反馈"] as const;
 type CompletionRegistrationReasonType = typeof COMPLETION_REGISTRATION_REASON_OPTIONS[number];
+const PAGE_NOW_REFRESH_MS = 60_000;
+const LIVE_TIMER_REFRESH_MS = 1_000;
 const DISPLAY_TASK_TYPE_ORDER = ["手持", "服装穿戴", "手工DIY", "熨烫", EXTERNAL_MODEL_ASSIST_DISPLAY_NAME, "其他"];
 const DISPLAY_TASK_TYPE_SOLID_BG: Record<string, string> = {
   ...CAT_SOLID_BG,
@@ -293,6 +295,163 @@ function nextAnimationFrame() {
   return new Promise<void>((resolve) => {
     requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
   });
+}
+
+function useLiveNowMs(enabled = true): number {
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    if (!enabled) return;
+    const tick = () => setNowMs(Date.now());
+    tick();
+    const timer = window.setInterval(tick, LIVE_TIMER_REFRESH_MS);
+    return () => window.clearInterval(timer);
+  }, [enabled]);
+  return nowMs;
+}
+
+function LiveClockText({ className }: { className?: string }) {
+  const nowMs = useLiveNowMs();
+  return (
+    <span className={className} suppressHydrationWarning>
+      {new Date(nowMs).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false })}
+    </span>
+  );
+}
+
+type LiveTimingSource = Parameters<typeof totalEffectiveWorkSecondsFromApi>[0];
+
+function LiveHMSBlock({
+  source,
+  mode,
+  colorClassName,
+}: {
+  source: LiveTimingSource;
+  mode: "effective" | "paused";
+  colorClassName: string;
+}) {
+  const live = source.status === "executing" || source.status === "paused";
+  const nowMs = useLiveNowMs(live);
+  const seconds = mode === "effective"
+    ? totalEffectiveWorkSecondsFromApi(source, nowMs)
+    : totalPausedSecondsFromApi(source, nowMs);
+  return (
+    <div className={`flex justify-center items-center min-h-0 py-0 mt-1 w-full ${colorClassName}`}>
+      <span className="font-mono font-semibold tabular-nums leading-none tracking-tight text-[clamp(0.95rem,2.9vmin,1.28rem)]">
+        {formatSecondsAsHMS(seconds)}
+      </span>
+    </div>
+  );
+}
+
+function LiveElapsedHMSBlock({
+  startedAt,
+  colorClassName,
+}: {
+  startedAt: string | Date | null | undefined;
+  colorClassName: string;
+}) {
+  const nowMs = useLiveNowMs(Boolean(startedAt));
+  const startMs = startedAt ? new Date(startedAt).getTime() : nowMs;
+  const seconds = Number.isFinite(startMs) ? Math.max(0, Math.floor((nowMs - startMs) / 1000)) : 0;
+  return (
+    <div className={`flex justify-center items-center min-h-0 py-0 mt-1 w-full ${colorClassName}`}>
+      <span className="font-mono font-semibold tabular-nums leading-none tracking-tight text-[clamp(0.95rem,2.9vmin,1.28rem)]">
+        {formatSecondsAsHMS(seconds)}
+      </span>
+    </div>
+  );
+}
+
+function LiveEatingHMS({
+  startedAt,
+  accumulatedSeconds,
+  mode,
+  thresholdSeconds = 0,
+}: {
+  startedAt?: number | string | Date | null;
+  accumulatedSeconds?: number | null;
+  mode: "elapsed" | "paused" | "overtime";
+  thresholdSeconds?: number;
+}) {
+  const nowMs = useLiveNowMs(Boolean(startedAt));
+  const elapsedSeconds =
+    mode === "paused"
+      ? eatingCurrentSegmentSeconds(startedAt ?? null, nowMs)
+      : eatingTotalElapsedSeconds(startedAt ?? null, accumulatedSeconds, nowMs);
+  const seconds = mode === "overtime"
+    ? Math.max(0, elapsedSeconds - thresholdSeconds)
+    : elapsedSeconds;
+  return <>{formatSecondsAsHMS(seconds)}</>;
+}
+
+type LiveEatingTimerSnapshot = {
+  elapsedText: string;
+  overtimeText: string;
+  isOvertime: boolean;
+};
+
+function LiveEatingTimerState({
+  startedAt,
+  accumulatedSeconds,
+  thresholdSeconds,
+  children,
+}: {
+  startedAt?: number | string | Date | null;
+  accumulatedSeconds?: number | null;
+  thresholdSeconds: number;
+  children: (snapshot: LiveEatingTimerSnapshot) => ReactNode;
+}) {
+  const nowMs = useLiveNowMs(Boolean(startedAt));
+  const elapsedSeconds = eatingTotalElapsedSeconds(startedAt ?? null, accumulatedSeconds, nowMs);
+  const overtimeSeconds = Math.max(0, elapsedSeconds - thresholdSeconds);
+  return (
+    <>
+      {children({
+        elapsedText: formatSecondsAsHMS(elapsedSeconds),
+        overtimeText: formatSecondsAsHMS(overtimeSeconds),
+        isOvertime: overtimeSeconds > 0,
+      })}
+    </>
+  );
+}
+
+function LiveMobileTaskTimeLine({
+  task,
+  isAssistantProfile,
+  profileId,
+}: {
+  task: TaskFromAPI;
+  isAssistantProfile: boolean;
+  profileId?: string | null;
+}) {
+  const viewerProfileId = isAssistantProfile ? profileId ?? undefined : undefined;
+  const status = taskStatusForProfile(task, viewerProfileId) ?? task.status;
+  const nowMs = useLiveNowMs(status === "executing" || status === "paused");
+  const display = apiTaskToDisplay(task, viewerProfileId);
+  return <>{taskListActualLine(display, task, nowMs, true, viewerProfileId)}</>;
+}
+
+function LivePresenceDot({
+  className,
+  baseColor,
+  isEating,
+  startedAt,
+  accumulatedSeconds,
+  thresholdSeconds,
+}: {
+  className: string;
+  baseColor: string;
+  isEating: boolean;
+  startedAt?: number | string | Date | null;
+  accumulatedSeconds?: number | null;
+  thresholdSeconds: number;
+}) {
+  const nowMs = useLiveNowMs(isEating && Boolean(startedAt));
+  const overtimeSeconds = isEating
+    ? Math.max(0, eatingTotalElapsedSeconds(startedAt ?? null, accumulatedSeconds, nowMs) - thresholdSeconds)
+    : 0;
+  const color = overtimeSeconds > 0 ? "#dc2626" : baseColor;
+  return <span className={className} style={{ backgroundColor: color }} />;
 }
 
 function notePopupPosition(anchor: NoteEditAnchor | null): { left: number; top: number } {
@@ -2305,7 +2464,7 @@ export default function PhotographerPage() {
       document.documentElement.setAttribute("data-theme", t);
     };
     apply();
-    const timer = setInterval(tick, 1000);
+    const timer = setInterval(tick, PAGE_NOW_REFRESH_MS);
     return () => clearInterval(timer);
   }, [themeMode]);
 
@@ -3819,26 +3978,12 @@ export default function PhotographerPage() {
     const remainingMs = Math.max(savedMs, hintedMs);
     return remainingMs > 0 ? Math.max(1, Math.ceil(remainingMs / 60000)) : 0;
   }, [eatingReentryCooldownMin, eatingReentryHintUntilByProfileId, now]);
-  const eatingElapsedSeconds =
-    assistantPresence === "eating" && eatingStartedAt
-      ? eatingTotalElapsedSeconds(eatingStartedAt, profile?.eatingAccumulatedSeconds, now.getTime())
-      : 0;
   const eatingPausedSeconds = normalizeEatingAccumulatedSeconds(profile?.eatingAccumulatedSeconds);
   const eatingIsPaused =
     isAssistantProfile &&
     assistantPresence !== "eating" &&
     (eatingPausedSeconds > 0 || !!profile?.eatingPausedAt) &&
     !profile?.eatingEndedAt;
-  const eatingPausedDurationSeconds =
-    eatingIsPaused && profile?.eatingPausedAt
-      ? eatingCurrentSegmentSeconds(profile.eatingPausedAt, now.getTime())
-      : 0;
-  const eatingOvertimeSeconds =
-    assistantPresence === "eating"
-      ? Math.max(0, eatingElapsedSeconds - eatingOvertimeAlertMin * 60)
-      : 0;
-  const eatingIsOvertime = assistantPresence === "eating" && eatingOvertimeSeconds > 0;
-  const assistantPresenceDotColor = eatingIsOvertime ? "#dc2626" : assistantPresenceInfo.dot;
   const assistantLocationTask = isAssistantProfile
     ? [currentRawTask, pausedRawTask].find((task) => {
       const status = taskStatusForProfile(task, profile?.id);
@@ -5452,9 +5597,16 @@ export default function PhotographerPage() {
     compact?: boolean;
     primaryAction?: "start" | "complete" | "resume" | null;
     showCancel?: boolean;
+    liveTimeLine?: boolean;
   }) => {
     const status = mobileTaskStatusForProfile(task);
-    const timeLine = mobileTaskTimeLine(task);
+    const timeLine = options?.liveTimeLine ? (
+      <LiveMobileTaskTimeLine
+        task={task}
+        isAssistantProfile={isAssistantProfile}
+        profileId={profile?.id}
+      />
+    ) : mobileTaskTimeLine(task);
     const specifiedName = task.specifiedAssistant?.name ?? (task.isSpecified ? task.assistant?.name ?? null : null);
     const primaryAction = options?.primaryAction ?? null;
     const isStartableIroning = primaryAction === "start" && isIroningTask(task);
@@ -5507,7 +5659,7 @@ export default function PhotographerPage() {
         onCancel={() => handleCancelTask(task.id)}
       />
     );
-  }, [handleAssistantStatusChange, handleCancelTask, handlePauseCurrentTask, handleResumePausedTask, mobileGlassPanel, mobileRecommendedIroningTaskId, mobileTaskStatusForProfile, mobileTaskStatusMeta, mobileTaskSubtitle, mobileTaskTimeLine, renderCompletionRegistrationControl, renderEscalationBadge, renderPriorityUpgradeControl]);
+  }, [handleAssistantStatusChange, handleCancelTask, handlePauseCurrentTask, handleResumePausedTask, isAssistantProfile, mobileGlassPanel, mobileRecommendedIroningTaskId, mobileTaskStatusForProfile, mobileTaskStatusMeta, mobileTaskSubtitle, mobileTaskTimeLine, profile?.id, renderCompletionRegistrationControl, renderEscalationBadge, renderPriorityUpgradeControl]);
 
   const renderMobileCurrentView = useCallback(() => {
     if (isAssistantProfile) {
@@ -5519,7 +5671,7 @@ export default function PhotographerPage() {
           <div className="min-w-0 flex-1">
             <p className="truncate text-[14px] font-extrabold text-sky-600">吃饭已暂停</p>
             <p className="mt-0.5 truncate font-mono text-[12px] font-semibold tabular-nums text-sky-600/75">
-              暂停中 {formatSecondsAsHMS(eatingPausedDurationSeconds)} · 已吃饭 {formatSecondsAsHMS(eatingPausedSeconds)}
+              暂停中 <LiveEatingHMS startedAt={profile?.eatingPausedAt} mode="paused" /> · 已吃饭 {formatSecondsAsHMS(eatingPausedSeconds)}
             </p>
           </div>
           <button
@@ -5542,35 +5694,43 @@ export default function PhotographerPage() {
 
       if (assistantPresence === "eating") {
         return (
-          <div className={`rounded-[24px] border p-5 text-center backdrop-blur-2xl ${mobileGlassPanel} ${eatingIsOvertime ? "bg-red-400/12" : "bg-blue-400/12"}`}>
-            <div className={`mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-full ${eatingIsOvertime ? "bg-red-500/15" : "bg-blue-500/15"}`}>
-              <span className={`h-8 w-8 rounded-full ${eatingIsOvertime ? "bg-red-500" : "bg-blue-500"} pulse-dot`} />
-            </div>
-            <h2 className={`text-[28px] font-extrabold ${eatingIsOvertime ? "text-red-600" : "text-blue-600"}`}>
-              {eatingIsOvertime ? "吃饭超时" : "吃饭中"}
-            </h2>
-            <p className={`mt-2 font-mono text-[26px] font-semibold tabular-nums ${eatingIsOvertime ? "text-red-600" : "text-blue-600"}`}>
-              {formatSecondsAsHMS(eatingElapsedSeconds)}
-            </p>
-	            <div className="mt-5 grid grid-cols-2 gap-2">
-	              <button
-	                type="button"
-	                disabled={!profile}
-	                onClick={() => profile && void updateAssistantPresenceStatus(profile.id, "online", { eatingExitMode: "pause" })}
-	                className="min-h-[46px] rounded-2xl bg-blue-500 px-3 text-[13px] font-extrabold text-white shadow-lg shadow-blue-500/20 disabled:opacity-50"
-	              >
-	                暂停吃饭并回在线
-	              </button>
-	              <button
-	                type="button"
-	                disabled={!profile}
-	                onClick={() => profile && void updateAssistantPresenceStatus(profile.id, "online", { eatingExitMode: "end" })}
-	                className="min-h-[46px] rounded-2xl bg-emerald-500 px-3 text-[13px] font-extrabold text-white shadow-lg shadow-emerald-500/20 disabled:opacity-50"
-	              >
-	                结束吃饭
-	              </button>
-	            </div>
-          </div>
+          <LiveEatingTimerState
+            startedAt={eatingStartedAt}
+            accumulatedSeconds={profile?.eatingAccumulatedSeconds}
+            thresholdSeconds={eatingOvertimeAlertMin * 60}
+          >
+            {({ elapsedText, isOvertime }) => (
+              <div className={`rounded-[24px] border p-5 text-center backdrop-blur-2xl ${mobileGlassPanel} ${isOvertime ? "bg-red-400/12" : "bg-blue-400/12"}`}>
+                <div className={`mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-full ${isOvertime ? "bg-red-500/15" : "bg-blue-500/15"}`}>
+                  <span className={`h-8 w-8 rounded-full ${isOvertime ? "bg-red-500" : "bg-blue-500"} pulse-dot`} />
+                </div>
+                <h2 className={`text-[28px] font-extrabold ${isOvertime ? "text-red-600" : "text-blue-600"}`}>
+                  {isOvertime ? "吃饭超时" : "吃饭中"}
+                </h2>
+                <p className={`mt-2 font-mono text-[26px] font-semibold tabular-nums ${isOvertime ? "text-red-600" : "text-blue-600"}`}>
+                  {elapsedText}
+                </p>
+                <div className="mt-5 grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    disabled={!profile}
+                    onClick={() => profile && void updateAssistantPresenceStatus(profile.id, "online", { eatingExitMode: "pause" })}
+                    className="min-h-[46px] rounded-2xl bg-blue-500 px-3 text-[13px] font-extrabold text-white shadow-lg shadow-blue-500/20 disabled:opacity-50"
+                  >
+                    暂停吃饭并回在线
+                  </button>
+                  <button
+                    type="button"
+                    disabled={!profile}
+                    onClick={() => profile && void updateAssistantPresenceStatus(profile.id, "online", { eatingExitMode: "end" })}
+                    className="min-h-[46px] rounded-2xl bg-emerald-500 px-3 text-[13px] font-extrabold text-white shadow-lg shadow-emerald-500/20 disabled:opacity-50"
+                  >
+                    结束吃饭
+                  </button>
+                </div>
+              </div>
+            )}
+          </LiveEatingTimerState>
         );
       }
 
@@ -5628,7 +5788,7 @@ export default function PhotographerPage() {
       if (currentRawTask) {
         const status = mobileTaskStatusForProfile(currentRawTask);
         const primaryAction = status === "executing" ? "complete" : status === "waiting" ? "start" : null;
-        const currentCard = renderMobileTaskCard(currentRawTask, { primaryAction, showCancel: canCancelRawTask(currentRawTask) });
+        const currentCard = renderMobileTaskCard(currentRawTask, { primaryAction, showCancel: canCancelRawTask(currentRawTask), liveTimeLine: true });
         if (afterCompleteSwapTask && afterCompleteSwapTask.id !== currentRawTask.id) {
           return withMobilePausedEatingStrip(
             <div className="space-y-2">
@@ -5645,7 +5805,7 @@ export default function PhotographerPage() {
       }
 
       if (pausedRawTask) {
-        return withMobilePausedEatingStrip(renderMobileTaskCard(pausedRawTask, { primaryAction: "resume", showCancel: canCancelRawTask(pausedRawTask) }));
+        return withMobilePausedEatingStrip(renderMobileTaskCard(pausedRawTask, { primaryAction: "resume", showCancel: canCancelRawTask(pausedRawTask), liveTimeLine: true }));
       }
 
       return eatingIsPaused ? renderMobilePausedEatingStrip() : null;
@@ -5734,10 +5894,7 @@ export default function PhotographerPage() {
     canCancelRawTask,
     categories,
     createMobileTask,
-    eatingElapsedSeconds,
-    eatingIsOvertime,
     eatingIsPaused,
-    eatingPausedDurationSeconds,
     eatingPausedSeconds,
     freeIroningMachineCount,
     handleAcknowledgeReassignmentNotice,
@@ -6009,7 +6166,14 @@ export default function PhotographerPage() {
               >
                 {profile?.avatar ? <img src={profile.avatar} alt={profile.name} className="h-full w-full object-cover" /> : profile?.name?.slice(0, 1) || "?"}
                 {isAssistantProfile && (
-                  <span className="absolute bottom-1 right-1 h-3 w-3 rounded-full ring-2 ring-white" style={{ backgroundColor: assistantPresenceDotColor }} />
+                  <LivePresenceDot
+                    className="absolute bottom-1 right-1 h-3 w-3 rounded-full ring-2 ring-white"
+                    baseColor={assistantPresenceInfo.dot}
+                    isEating={assistantPresence === "eating"}
+                    startedAt={eatingStartedAt}
+                    accumulatedSeconds={profile?.eatingAccumulatedSeconds}
+                    thresholdSeconds={eatingOvertimeAlertMin * 60}
+                  />
                 )}
               </button>
               <div className="min-w-0 flex-1">
@@ -6029,7 +6193,14 @@ export default function PhotographerPage() {
                     }}
                     className={`flex min-h-[36px] items-center gap-1.5 rounded-full px-3 text-[12px] font-extrabold ${assistantPresenceInfo.bgCls} ${assistantPresenceInfo.textCls} disabled:opacity-60`}
                   >
-                    <span className="h-2 w-2 rounded-full" style={{ backgroundColor: assistantPresenceDotColor }} />
+                    <LivePresenceDot
+                      className="h-2 w-2 rounded-full"
+                      baseColor={assistantPresenceInfo.dot}
+                      isEating={assistantPresence === "eating"}
+                      startedAt={eatingStartedAt}
+                      accumulatedSeconds={profile?.eatingAccumulatedSeconds}
+                      thresholdSeconds={eatingOvertimeAlertMin * 60}
+                    />
                     {assistantPresenceInfo.shortLabel}
                   </button>
                   {showAssistantPresenceMenu && (
@@ -8297,11 +8468,15 @@ export default function PhotographerPage() {
                         e.stopPropagation();
                         setShowAssistantPresenceMenu((open) => !open);
                       }}
-                      title={assistantPresenceInfo.label}
-                    >
-                      <span
+                    title={assistantPresenceInfo.label}
+                  >
+                      <LivePresenceDot
                         className="block h-[18px] w-[18px] rounded-full"
-                        style={{ backgroundColor: assistantPresenceDotColor }}
+                        baseColor={assistantPresenceInfo.dot}
+                        isEating={assistantPresence === "eating"}
+                        startedAt={eatingStartedAt}
+                        accumulatedSeconds={profile?.eatingAccumulatedSeconds}
+                        thresholdSeconds={eatingOvertimeAlertMin * 60}
                       />
                     </button>
                     {showAssistantPresenceMenu && (
@@ -8564,9 +8739,7 @@ export default function PhotographerPage() {
                 <span className="shrink-0">🌤</span>
                 <span className="truncate">深圳 · 26°C 多云</span>
               </div>
-              <span className="shrink-0 font-mono text-[12px] font-semibold tabular-nums text-[--text-secondary]" suppressHydrationWarning>
-                {now.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false })}
-              </span>
+              <LiveClockText className="shrink-0 font-mono text-[12px] font-semibold tabular-nums text-[--text-secondary]" />
             </div>
           </div>
 
@@ -8590,7 +8763,7 @@ export default function PhotographerPage() {
 	                          吃饭已暂停
 	                        </p>
 	                        <p className={`mt-0.5 truncate font-mono text-[10px] font-semibold leading-tight tabular-nums ${resolvedTheme === "dark" ? "text-sky-100/76" : "text-sky-700/70"}`}>
-	                          暂停中 {formatSecondsAsHMS(eatingPausedDurationSeconds)} · 已吃饭 {formatSecondsAsHMS(eatingPausedSeconds)}
+		                          暂停中 <LiveEatingHMS startedAt={profile?.eatingPausedAt} mode="paused" /> · 已吃饭 {formatSecondsAsHMS(eatingPausedSeconds)}
 	                        </p>
 	                      </div>
 	                      <button
@@ -8610,52 +8783,58 @@ export default function PhotographerPage() {
 	                  </div>
 	                ) : null}
 	                {(() => {
-	                  const renderEatingPresenceBlock = () => (
-	                    <div className={`w-full flex-1 rounded-xl flex flex-col items-center justify-center gap-3 ${eatingIsOvertime ? "bg-red-400/15" : "bg-blue-400/15"}`}>
-	                      <div className={`w-16 h-16 rounded-full flex items-center justify-center ${eatingIsOvertime ? "bg-red-500/15" : "bg-blue-500/15"}`}>
-	                        <div className={`w-8 h-8 rounded-full animate-pulse ${eatingIsOvertime ? "bg-red-500" : "bg-blue-500"}`} />
-	                      </div>
-	                      <span className={`text-[30px] font-extrabold ${eatingIsOvertime ? "text-red-600" : "text-blue-600"}`}>
-	                        {eatingIsOvertime ? "吃饭超时" : "吃饭中"}
-	                      </span>
-	                      <span className={`font-mono text-[24px] font-semibold leading-none tabular-nums ${eatingIsOvertime ? "text-red-600" : "text-blue-600"}`}>
-	                        {formatSecondsAsHMS(eatingElapsedSeconds)}
-	                      </span>
-	                      <span className={`text-[11px] ${eatingIsOvertime ? "text-red-600/70" : "text-blue-600/70"}`}>
-	                        {eatingIsOvertime
-	                          ? `已超过提醒阈值 ${formatSecondsAsHMS(eatingOvertimeSeconds)}`
-	                          : `超过 ${eatingOvertimeAlertMin} 分钟提醒`}
-	                      </span>
-	                      <div className="mt-1 grid w-full max-w-[260px] grid-cols-2 gap-2 px-2">
-	                        <button
-	                          type="button"
-	                          disabled={!profile}
-	                          onClick={(e) => {
-	                            e.preventDefault();
-	                            e.stopPropagation();
-	                            if (!profile) return;
-	                            void updateAssistantPresenceStatus(profile.id, "online", { eatingExitMode: "pause" });
-	                          }}
-	                          className="rounded-full bg-blue-500 px-3 py-2 text-[11px] font-extrabold text-white shadow-lg shadow-blue-500/20 transition-transform hover:scale-[1.03] active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50"
-	                        >
-	                          暂停吃饭
-	                        </button>
-	                        <button
-	                          type="button"
-	                          disabled={!profile}
-	                          onClick={(e) => {
-	                            e.preventDefault();
-	                            e.stopPropagation();
-	                            if (!profile) return;
-	                            void updateAssistantPresenceStatus(profile.id, "online", { eatingExitMode: "end" });
-	                          }}
-	                          className="rounded-full bg-emerald-500 px-3 py-2 text-[11px] font-extrabold text-white shadow-lg shadow-emerald-500/20 transition-transform hover:scale-[1.03] active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50"
-	                        >
-	                          结束吃饭
-	                        </button>
-	                      </div>
-	                    </div>
-	                  );
+                  const renderEatingPresenceBlock = () => (
+                    <LiveEatingTimerState
+                      startedAt={eatingStartedAt}
+                      accumulatedSeconds={profile?.eatingAccumulatedSeconds}
+                      thresholdSeconds={eatingOvertimeAlertMin * 60}
+                    >
+                      {({ elapsedText, overtimeText, isOvertime }) => (
+                        <div className={`w-full flex-1 rounded-xl flex flex-col items-center justify-center gap-3 ${isOvertime ? "bg-red-400/15" : "bg-blue-400/15"}`}>
+                          <div className={`w-16 h-16 rounded-full flex items-center justify-center ${isOvertime ? "bg-red-500/15" : "bg-blue-500/15"}`}>
+                            <div className={`w-8 h-8 rounded-full animate-pulse ${isOvertime ? "bg-red-500" : "bg-blue-500"}`} />
+                          </div>
+                          <span className={`text-[30px] font-extrabold ${isOvertime ? "text-red-600" : "text-blue-600"}`}>
+                            {isOvertime ? "吃饭超时" : "吃饭中"}
+                          </span>
+                          <span className={`font-mono text-[24px] font-semibold leading-none tabular-nums ${isOvertime ? "text-red-600" : "text-blue-600"}`}>
+                            {elapsedText}
+                          </span>
+                          <span className={`text-[11px] ${isOvertime ? "text-red-600/70" : "text-blue-600/70"}`}>
+                            {isOvertime ? <>已超过提醒阈值 {overtimeText}</> : `超过 ${eatingOvertimeAlertMin} 分钟提醒`}
+                          </span>
+                          <div className="mt-1 grid w-full max-w-[260px] grid-cols-2 gap-2 px-2">
+                            <button
+                              type="button"
+                              disabled={!profile}
+                              onClick={(e) => {
+                                e.preventDefault();
+                                e.stopPropagation();
+                                if (!profile) return;
+                                void updateAssistantPresenceStatus(profile.id, "online", { eatingExitMode: "pause" });
+                              }}
+                              className="rounded-full bg-blue-500 px-3 py-2 text-[11px] font-extrabold text-white shadow-lg shadow-blue-500/20 transition-transform hover:scale-[1.03] active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50"
+                            >
+                              暂停吃饭
+                            </button>
+                            <button
+                              type="button"
+                              disabled={!profile}
+                              onClick={(e) => {
+                                e.preventDefault();
+                                e.stopPropagation();
+                                if (!profile) return;
+                                void updateAssistantPresenceStatus(profile.id, "online", { eatingExitMode: "end" });
+                              }}
+                              className="rounded-full bg-emerald-500 px-3 py-2 text-[11px] font-extrabold text-white shadow-lg shadow-emerald-500/20 transition-transform hover:scale-[1.03] active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50"
+                            >
+                              结束吃饭
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                    </LiveEatingTimerState>
+                  );
 
 	                  if (assistantPresence === "eating") {
 	                    return renderEatingPresenceBlock();
@@ -8694,13 +8873,6 @@ export default function PhotographerPage() {
                       {task.roomNumber}室 · {task.photographer?.name ?? "—"} · {assistantCatName(task)}
                     </p>
                   );
-                  const pixelHMSBlock = (totalSeconds: number, colorCls: string) => (
-                    <div className={`flex justify-center items-center min-h-0 py-0 mt-1 w-full ${colorCls}`}>
-                      <span className="font-mono font-semibold tabular-nums leading-none tracking-tight text-[clamp(0.95rem,2.9vmin,1.28rem)]">
-                        {formatSecondsAsHMS(totalSeconds)}
-                      </span>
-                    </div>
-                  );
                   const myTaskStatus = (task: TaskFromAPI) => taskStatusForProfile(task, profile?.id) ?? task.status;
                   const myTaskTiming = (task: TaskFromAPI) => {
                     const status = myTaskStatus(task);
@@ -8716,10 +8888,10 @@ export default function PhotographerPage() {
 	                  const passiveIroningReadyTask = actionableWaitingTasks.find((task) =>
 	                    isAssignedIroningReadyTask(task, profile?.id)
                   ) ?? null;
-		                    const renderPausedBlock = (task: TaskFromAPI, flex: number, withResume = false) => {
-                      const leaveSec = totalPausedSecondsFromApi(myTaskTiming(task), now.getTime());
-                      const pauseSlideActive = manualPauseSlide?.taskId === task.id;
-                      const pauseSlideCollapsed = pauseSlideActive && !manualPauseSlide.expanded;
+			                    const renderPausedBlock = (task: TaskFromAPI, flex: number, withResume = false) => {
+                      const timing = myTaskTiming(task);
+	                      const pauseSlideActive = manualPauseSlide?.taskId === task.id;
+	                      const pauseSlideCollapsed = pauseSlideActive && !manualPauseSlide.expanded;
                       if (withResume) {
                         return (
 	                          <div
@@ -8737,11 +8909,11 @@ export default function PhotographerPage() {
                               <div className="w-14 max-w-full min-w-0 min-h-0 shrink-[2] max-h-[min(3.5rem,24%)] h-[min(3.5rem,24%)] rounded-full bg-gray-400/20 flex items-center justify-center overflow-hidden">
                                 <div className="min-w-0 min-h-0 w-[45%] h-[45%] max-w-[min(72%,1.55rem)] max-h-[min(72%,1.55rem)] rounded-full bg-gray-400" />
                               </div>
-                              <span className="text-[17px] font-extrabold text-gray-600 leading-tight">暂停中/已离开</span>
-                              {renderEscalationBadge(task, { compact: true })}
-                              {lineRoomPhotoCategory(task, "text-gray-500")}
-                              {pixelHMSBlock(leaveSec, "text-gray-600")}
-                            </div>
+	                              <span className="text-[17px] font-extrabold text-gray-600 leading-tight">暂停中/已离开</span>
+	                              {renderEscalationBadge(task, { compact: true })}
+	                              {lineRoomPhotoCategory(task, "text-gray-500")}
+	                              <LiveHMSBlock source={timing} mode="paused" colorClassName="text-gray-600" />
+	                            </div>
                             <button
                               type="button"
                               onClick={() => handleResumePausedTask(task)}
@@ -8764,19 +8936,17 @@ export default function PhotographerPage() {
                         <div className="w-8 max-w-full min-w-0 min-h-0 shrink-[2] max-h-[min(2rem,26%)] h-[min(2rem,26%)] rounded-full bg-gray-400/20 flex items-center justify-center overflow-hidden">
                           <div className="min-w-0 min-h-0 w-[42%] h-[42%] max-w-[min(72%,1.1rem)] max-h-[min(72%,1.1rem)] rounded-full bg-gray-400" />
                         </div>
-                        <span className="text-[13px] font-extrabold text-gray-500 text-center leading-tight">暂停中/已离开</span>
-                        {renderEscalationBadge(task, { compact: true })}
-                        {lineRoomPhotoCategory(task, "text-gray-400")}
-                        {pixelHMSBlock(leaveSec, "text-gray-500")}
-                      </div>
+	                        <span className="text-[13px] font-extrabold text-gray-500 text-center leading-tight">暂停中/已离开</span>
+	                        {renderEscalationBadge(task, { compact: true })}
+	                        {lineRoomPhotoCategory(task, "text-gray-400")}
+	                        <LiveHMSBlock source={timing} mode="paused" colorClassName="text-gray-500" />
+	                      </div>
                     );
                   };
 
-                  /** 待就位被插单：原较低优先任务让行，样式与地图灰 50% 一致 */
-                  const renderDeferredWaitingBlock = (task: TaskFromAPI, flex: number) => {
-                    const waitMs = Math.max(0, now.getTime() - new Date(task.createdAt).getTime());
-                    const waitSec = Math.floor(waitMs / 1000);
-                    return (
+	                  /** 待就位被插单：原较低优先任务让行，样式与地图灰 50% 一致 */
+	                  const renderDeferredWaitingBlock = (task: TaskFromAPI, flex: number) => {
+	                    return (
                       <div
                         key={task.id}
                         className="w-full min-h-0 rounded-xl bg-gray-400/15 flex flex-col items-center justify-center gap-1 pt-1.5 pb-1 px-1 opacity-50"
@@ -8785,18 +8955,18 @@ export default function PhotographerPage() {
                         <div className="w-8 max-w-full min-w-0 min-h-0 shrink-[2] max-h-[min(2rem,26%)] h-[min(2rem,26%)] rounded-full bg-gray-400/20 flex items-center justify-center overflow-hidden">
                           <div className="min-w-0 min-h-0 w-[42%] h-[42%] max-w-[min(72%,1.1rem)] max-h-[min(72%,1.1rem)] rounded-full bg-gray-400" />
                         </div>
-                        <span className="text-[13px] font-extrabold text-gray-500 text-center leading-tight">已让行紧急单</span>
-                        {renderEscalationBadge(task, { compact: true })}
-                        {lineRoomPhotoCategory(task, "text-gray-400")}
-                        {pixelHMSBlock(waitSec, "text-gray-500")}
-                      </div>
+	                        <span className="text-[13px] font-extrabold text-gray-500 text-center leading-tight">已让行紧急单</span>
+	                        {renderEscalationBadge(task, { compact: true })}
+	                        {lineRoomPhotoCategory(task, "text-gray-400")}
+	                        <LiveElapsedHMSBlock startedAt={task.createdAt} colorClassName="text-gray-500" />
+	                      </div>
                     );
                   };
 
-                  // 渲染执行中任务区块（有插单任务时：可完成当前任务，也可短暂离开）
-                  const renderExecutingWithPause = (task: TaskFromAPI, flex: number) => {
-                    const effSec = totalEffectiveWorkSecondsFromApi(myTaskTiming(task), now.getTime());
-                    const isExternalModelFollow = isExternalModelFollowTask(task);
+	                  // 渲染执行中任务区块（有插单任务时：可完成当前任务，也可短暂离开）
+	                  const renderExecutingWithPause = (task: TaskFromAPI, flex: number) => {
+	                    const timing = myTaskTiming(task);
+	                    const isExternalModelFollow = isExternalModelFollowTask(task);
                     const bgCls = isExternalModelFollow ? "bg-purple-400/20" : "bg-orange-400/20";
                     const hoverCls = isExternalModelFollow ? "hover:bg-purple-400/10" : "hover:bg-orange-400/10";
                     const dotBg = isExternalModelFollow ? "bg-purple-500/20" : "bg-orange-500/20";
@@ -8823,11 +8993,11 @@ export default function PhotographerPage() {
                           <div className={`w-8 max-w-full min-w-0 min-h-0 shrink-[2] max-h-[min(2rem,26%)] h-[min(2rem,26%)] rounded-full ${dotBg} flex items-center justify-center overflow-hidden`}>
                             <div className={`min-w-0 min-h-0 w-[42%] h-[42%] max-w-[min(72%,1.1rem)] max-h-[min(72%,1.1rem)] rounded-full ${dotColor} animate-pulse`} />
                           </div>
-                          <span className={`text-[13px] font-extrabold ${textColor}`}>完成当前任务</span>
-                          {renderEscalationBadge(task, { compact: true })}
-                          {lineRoomPhotoCategory(task, subColor)}
-                          {pixelHMSBlock(effSec, textColor)}
-                        </button>
+	                          <span className={`text-[13px] font-extrabold ${textColor}`}>完成当前任务</span>
+	                          {renderEscalationBadge(task, { compact: true })}
+	                          {lineRoomPhotoCategory(task, subColor)}
+	                          <LiveHMSBlock source={timing} mode="effective" colorClassName={textColor} />
+	                        </button>
                         <button
                           type="button"
                           onClick={handlePauseCurrentTask}
@@ -9053,13 +9223,12 @@ export default function PhotographerPage() {
                       const subColor = isLocked ? "text-red-600/70" : isExternalModelFollow ? "text-purple-600/75" : "text-orange-600/70";
                         const barFrom = isLocked ? "from-red-400" : isExternalModelFollow ? "from-purple-400" : "from-orange-400";
                         const barTo = isLocked ? "to-red-500" : isExternalModelFollow ? "to-purple-500" : "to-orange-500";
-                      const pauseButtonCls = isExternalModelFollow
-                        ? "border-purple-500 bg-purple-500 hover:bg-purple-600"
-                        : "border-[#e55f5f] bg-[#ef6b6b] hover:bg-[#e85f5f]";
-                      const pauseButtonLabel = isExternalModelFollow ? "吃饭/短暂离开" : "短暂离开";
-                      const effSec = totalEffectiveWorkSecondsFromApi(myTaskTiming(task), now.getTime());
-                      const pausePreviewSec = totalPausedSecondsFromApi(myTaskTiming(task), now.getTime());
-                      const pauseSlideActive = manualPauseSlide?.taskId === task.id;
+	                      const pauseButtonCls = isExternalModelFollow
+	                        ? "border-purple-500 bg-purple-500 hover:bg-purple-600"
+	                        : "border-[#e55f5f] bg-[#ef6b6b] hover:bg-[#e85f5f]";
+	                      const pauseButtonLabel = isExternalModelFollow ? "吃饭/短暂离开" : "短暂离开";
+	                      const timing = myTaskTiming(task);
+	                      const pauseSlideActive = manualPauseSlide?.taskId === task.id;
                       const pauseSlideExpanded = pauseSlideActive && manualPauseSlide.expanded;
                       return (
                         <div
@@ -9076,11 +9245,11 @@ export default function PhotographerPage() {
                               <div className={`w-10 max-w-full min-w-0 min-h-0 shrink-[2] max-h-[min(2.5rem,28%)] h-[min(2.5rem,28%)] rounded-full ${dotBg} flex items-center justify-center overflow-hidden`}>
                                 <div className={`min-w-0 min-h-0 w-[45%] h-[45%] max-w-[min(72%,1.35rem)] max-h-[min(72%,1.35rem)] rounded-full ${dotColor} animate-pulse`} />
                             </div>
-                            <span className={`text-[16px] font-extrabold ${textColor}`}>点击完成任务</span>
-                            {renderEscalationBadge(task, { compact: true })}
-                            {lineRoomPhotoCategory(task, subColor)}
-                            {pixelHMSBlock(effSec, textColor)}
-                          </button>
+	                            <span className={`text-[16px] font-extrabold ${textColor}`}>点击完成任务</span>
+	                            {renderEscalationBadge(task, { compact: true })}
+	                            {lineRoomPhotoCategory(task, subColor)}
+	                            <LiveHMSBlock source={timing} mode="effective" colorClassName={textColor} />
+	                          </button>
                             <div
                               aria-hidden={!pauseSlideActive}
                               className={`absolute inset-0 z-[2] flex origin-bottom transform-gpu flex-col items-center justify-center gap-2 rounded-xl px-2 pb-[46px] text-center text-gray-600 transition-transform duration-[340ms] ease-[cubic-bezier(0.2,0.9,0.2,1)] will-change-transform ${
@@ -9092,11 +9261,11 @@ export default function PhotographerPage() {
                                 <div className="w-14 max-w-full min-w-0 min-h-0 shrink-[2] max-h-[min(3.5rem,24%)] h-[min(3.5rem,24%)] rounded-full bg-gray-400/15 flex items-center justify-center overflow-hidden">
                                   <div className="min-w-0 min-h-0 w-[45%] h-[45%] max-w-[min(72%,1.55rem)] max-h-[min(72%,1.55rem)] rounded-full bg-gray-400" />
                                 </div>
-                                <span className="text-[17px] font-extrabold leading-tight">暂停中/已离开</span>
-                                {renderEscalationBadge(task, { compact: true })}
-                                {lineRoomPhotoCategory(task, "text-gray-500")}
-                                {pixelHMSBlock(pausePreviewSec, "text-gray-600")}
-                              </div>
+	                                <span className="text-[17px] font-extrabold leading-tight">暂停中/已离开</span>
+	                                {renderEscalationBadge(task, { compact: true })}
+	                                {lineRoomPhotoCategory(task, "text-gray-500")}
+	                                <LiveHMSBlock source={timing} mode="paused" colorClassName="text-gray-600" />
+	                              </div>
                             </div>
                             <button
                               type="button"

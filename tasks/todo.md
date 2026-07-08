@@ -6328,9 +6328,25 @@
 
 - [ ] 建立工作台本地 reducer/store：`tasksById + profilesById + optimisticPatches + pendingActions`，替代多组互相 setState 的任务源。
 - [ ] 按 action 级 pending UI 锁定：开始、完成、暂停、继续、发单、移交、提权 100ms 内给反馈，失败后回滚并提示。
-- [ ] 全局 1 秒 `now` 降级为局部计时：只让当前任务秒表/吃饭计时每秒更新，列表、统计、排行按分钟或数据变更更新。
+- [x] 全局 1 秒 `now` 降级为局部计时：只让当前任务秒表/吃饭计时每秒更新，列表、统计、排行按分钟或数据变更更新。
 - [ ] 地图拖拽/缩放、Dock hover 使用 `requestAnimationFrame + ref/CSS variable` 优化，避免 pointer move 触发整页 React 重渲染。
 - [ ] 继续拆 `CurrentTaskPanel`、`TaskListPanel`、`MapWorkbench`、`AssistantDock` 数据适配层，每次拆分保持等价并单独验证。
+
+#### 阶段 D 第一批计划：局部计时与整页降频
+
+- [x] 将 `page.tsx` 顶层 `now` 从 1 秒刷新降为分钟级刷新；主题 auto 判断按分钟/初始化即可，不再每秒触发整页渲染。
+- [x] 新增局部秒级计时组件/小 hook：当前任务执行、暂停、让行等待、吃饭中/吃饭暂停、顶部时钟各自局部刷新，不牵动整页 React tree。
+- [x] 我的任务、公共队列、统计弹窗等列表类时间展示保持分钟级刷新，状态正确性仍以后端同步与任务变更为准。
+- [x] 验证 `tsc`、`git diff --check`、build；本地隔离服务 `/photographer` 与 `/api/config` HTTP 健康检查通过，浏览器 DOM snapshot 工具兼容问题导致本批未完成截图级视觉检查。
+
+#### 阶段 D 第一批评审：局部计时与整页降频
+
+- 已完成：`page.tsx` 顶层 `now` 从 1 秒刷新改为 60 秒刷新，顶部时钟、当前任务执行秒表、暂停秒表、让行等待、吃饭中/吃饭暂停改为局部秒级刷新组件。
+- 已完成：移动端当前任务卡/暂停任务卡支持局部 live timeline；“我的任务”、公共队列、统计类列表仍按页面分钟级 `now` 或数据同步刷新，避免列表每张卡各自建立秒级计时器。
+- 已完成：吃饭超时面板和头像/状态点使用局部状态点组件，超时颜色和文案不再依赖整页秒级刷新。
+- 业务边界：本批只做前端刷新粒度优化，不改变派单、优先级、熨烫机、移交、吃饭状态切换或 API 规则；长期业务文档无需新增规则记录。
+- 验证通过：`npx tsc --noEmit --pretty false --incremental false`、`git diff --check -- src/app/photographer/page.tsx src/app/photographer/MobileTaskCard.tsx tasks/todo.md`、`DATABASE_URL=file:./prisma/loadtest.db npm run build`、隔离服务 `/photographer` 200 与 `/api/config` 正常响应。
+- 待后续：阶段 D 下一批优先做 action-level pending 锁和本地 reducer/store，解决重复点击、弱网闪回、任务源多组 `setState` 的流畅度瓶颈。
 
 ### 阶段 E：验收与对抗审查
 

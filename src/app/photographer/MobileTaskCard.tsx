@@ -10,7 +10,7 @@ type MobileTaskCardProps = {
   meta: MobileTaskStatusMeta;
   title: string;
   subtitle: string;
-  timeLine: string | null;
+  timeLine: ReactNode | null;
   actionLabel: string;
   glassPanelClassName: string;
   compact?: boolean;
