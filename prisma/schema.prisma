@@ -135,6 +135,8 @@ model Profile {
   transferRequestsFrom TaskAssistantTransferRequest[] @relation("TransferFromAssistant")
   transferRequestsTarget TaskAssistantTransferRequest[] @relation("TransferTargetAssistant")
 
+  @@index([role, activeBuildingId, status, onlineStatus, name])
+  @@index([role, buildingId, status, onlineStatus, name])
   @@map("profiles")
 }
 
@@ -247,12 +249,15 @@ model BookingTask {
 
   @@index([status, priority])
   @@index([status, createdAt])
+  @@index([status, assistantId, ironingStage, priority, createdAt])
+  @@index([status, ironingStage, priority, createdAt])
   @@index([ironingStage, status])
   @@index([assistantId, status])
   @@index([assistantId, createdAt])
   @@index([photographerId])
   @@index([photographerId, createdAt])
   @@index([locationBuildingId])
+  @@index([parentTaskId, status])
   @@index([createdAt])
   @@map("booking_tasks")
 }

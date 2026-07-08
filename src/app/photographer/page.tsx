@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback, useMemo, useRef, type CSSProperties, type ReactNode } from "react";
+import { startTransition, useState, useEffect, useCallback, useMemo, useRef, type CSSProperties, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import {
   assistantTaskScoreFactor,
@@ -591,6 +591,7 @@ export default function PhotographerPage() {
   const publicQueuePromotionSignatureRef = useRef("");
   const publicQueuePromotionRunningRef = useRef(false);
   const pendingRawTaskRef = useRef<TaskFromAPI | null>(null);
+  const assistantActionPendingRef = useRef<Set<string>>(new Set());
   const pollingProfileId = profile?.id ?? null;
   const pollingProfileRole = profile?.role ?? null;
   const pollingProfileBuildingId = profile?.buildingId ?? null;
@@ -604,17 +605,20 @@ export default function PhotographerPage() {
   useEffect(() => {
     pendingRawTaskRef.current = pendingRawTask;
   }, [pendingRawTask]);
+  const assistantDockById = useMemo(
+    () => new Map(assistants.map((assistant) => [assistant.id, assistant])),
+    [assistants],
+  );
 
   const quickBookBuildingId = profile && !isAssistantRole(profile.role)
     ? photographerWorkbenchBuildingId ?? profile.buildingId
     : activeBuildingId;
   const quickBookAreaAssistants = useMemo(
     () => {
-      const dockById = new Map(assistants.map((assistant) => [assistant.id, assistant]));
       const source = quickBookBuildingId != null
         ? allProfiles
           .filter((p) => isAssistantRole(p.role) && (p.activeBuildingId ?? p.buildingId) === quickBookBuildingId)
-          .map((p) => dockById.get(p.id) ?? profileToQuickBookAssistant(p))
+          .map((p) => assistantDockById.get(p.id) ?? profileToQuickBookAssistant(p))
         : assistants;
       return [...source].sort((a, b) => {
       const aSelectable = canSpecifyQuickBookAssistant(a) ? 0 : 1;
@@ -622,7 +626,7 @@ export default function PhotographerPage() {
       return aSelectable - bSelectable || a.name.localeCompare(b.name);
       });
     },
-    [allProfiles, assistants, quickBookBuildingId],
+    [allProfiles, assistantDockById, assistants, quickBookBuildingId],
   );
   const quickBookOnlineAssistants = useMemo(
     () => quickBookAreaAssistants.filter((assistant) => assistant.onlineStatus === "online"),
@@ -1489,12 +1493,15 @@ export default function PhotographerPage() {
   }, [showAreaCompletedStatsModal, areaCompletedStatsWeekOffset]);
 
   // Fetch assistants + their active tasks for the active building
-  const refreshAssistants = useCallback(() => {
+  const refreshAssistants = useCallback((snapshot?: { profiles?: unknown; tasks?: unknown }) => {
     if (!activeBuildingId) return;
-    return Promise.all([
-      fetch(`/api/profiles?role=assistant&buildingId=${activeBuildingId}`, { cache: "no-store" }).then((r) => r.json()),
-      fetch("/api/tasks?todayOnly=true", { cache: "no-store" }).then((r) => r.json()).catch(() => []),
-    ]).then(async ([profilesData, tasksData]) => {
+    const source = snapshot
+      ? Promise.resolve([snapshot.profiles, snapshot.tasks])
+      : Promise.all([
+        fetch(`/api/profiles?role=assistant&buildingId=${activeBuildingId}`, { cache: "no-store" }).then((r) => r.json()),
+        fetch("/api/tasks?todayOnly=true", { cache: "no-store" }).then((r) => r.json()).catch(() => []),
+      ]);
+    return source.then(async ([profilesData, tasksData]) => {
       const nowMs = Date.now();
       const profiles = Array.isArray(profilesData) ? profilesData : [];
       const allTasks: TaskFromAPI[] = Array.isArray(tasksData) ? tasksData : [];
@@ -1890,55 +1897,65 @@ export default function PhotographerPage() {
     refreshAssistants();
   }, [refreshAssistants]);
 
-  // 8秒轮询：用同一份任务数据同步所有视图
+  // 轻量轮询：由服务端集中节流维护，客户端只同步工作台快照
   useEffect(() => {
     if (!pollingProfile) return;
     let cancelled = false;
     let inFlight = false;
-    let lastMaintenanceSweepAt = 0;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const scheduleNext = (delayMs: number) => {
+      if (cancelled) return;
+      timer = setTimeout(poll, delayMs);
+    };
     const poll = async () => {
       if (cancelled || inFlight) return;
       inFlight = true;
-      const nowMs = Date.now();
-      const shouldSweep = nowMs - lastMaintenanceSweepAt >= 30_000;
-      if (shouldSweep) {
-        lastMaintenanceSweepAt = nowMs;
-        await fetch("/api/tasks/sweep", { method: "POST" }).catch(() => null);
+      const buildingId = activeBuildingId ?? pollingProfile.buildingId;
+      const params = new URLSearchParams({
+        profileId: pollingProfile.id,
+        role: pollingProfile.role,
+        buildingId: String(buildingId),
+        view: isAssistantRole(pollingProfile.role)
+          ? "assistant"
+          : pollingProfile.role === "photographer"
+            ? "photographer"
+            : "building",
+      });
+      try {
+        const response = await fetch(`/api/workbench/sync?${params.toString()}`, { cache: "no-store" });
+        const syncData = await response.json().catch(() => null) as {
+          profiles?: unknown;
+          publicQueue?: unknown;
+          tasks?: unknown;
+          notices?: unknown;
+          nextPollMs?: number;
+        } | null;
+        if (cancelled || !response.ok || !syncData) return;
+
+        const publicQueueData = Array.isArray(syncData.publicQueue) ? syncData.publicQueue as TaskFromAPI[] : [];
+        const taskData = Array.isArray(syncData.tasks) ? syncData.tasks as TaskFromAPI[] : [];
+        const noticeData = Array.isArray(syncData.notices) ? syncData.notices as StandbyReassignmentNoticeFromAPI[] : [];
+        await refreshAssistants({ profiles: syncData.profiles, tasks: publicQueueData });
+        if (cancelled) return;
+        startTransition(() => {
+          setPublicQueueRaw(publicQueueData);
+          setReassignmentNotices(isAssistantRole(pollingProfile.role) ? noticeData : []);
+          applyTaskDataForProfile(taskData, pollingProfile, buildingId);
+        });
+      } catch (error) {
+        console.error(error);
+      } finally {
+        inFlight = false;
+        const activeDelay = 3000;
+        const hiddenDelay = 12000;
+        scheduleNext(document.visibilityState === "visible" ? activeDelay : hiddenDelay);
       }
-      // 刷新助理数据（状态栏 + 地图标记）
-      const assistantTasksData = await refreshAssistants();
-      Promise.all([
-        fetch(taskListUrlForProfile(pollingProfile), { cache: "no-store" }).then((r) => r.json()),
-        assistantTasksData
-          ? Promise.resolve(assistantTasksData)
-          : fetch("/api/tasks?todayOnly=true", { cache: "no-store" }).then((r) => r.json()).catch(() => []),
-        isAssistantRole(pollingProfile.role)
-          ? fetch(`/api/reassignment-notices?assistantId=${pollingProfile.id}`, { cache: "no-store" }).then((r) => r.json()).catch(() => [])
-          : Promise.resolve([]),
-      ])
-        .then(([taskData, publicQueueData, noticeData]) => {
-          if (cancelled) return;
-          if (Array.isArray(publicQueueData)) {
-            setPublicQueueRaw(publicQueueData as TaskFromAPI[]);
-          }
-          if (isAssistantRole(pollingProfile.role)) {
-            setReassignmentNotices(Array.isArray(noticeData) ? noticeData as StandbyReassignmentNoticeFromAPI[] : []);
-          } else {
-            setReassignmentNotices([]);
-          }
-          if (Array.isArray(taskData)) {
-            applyTaskDataForProfile(taskData as TaskFromAPI[], pollingProfile, activeBuildingId ?? pollingProfile.buildingId);
-          }
-        })
-        .catch(console.error)
-        .finally(() => { inFlight = false; });
     };
     // 首次立即执行一次，确保初始数据同步
     poll();
-    const timer = setInterval(poll, 8000);
     return () => {
       cancelled = true;
-      clearInterval(timer);
+      if (timer) clearTimeout(timer);
     };
   }, [activeBuildingId, applyTaskDataForProfile, pollingProfile, refreshAssistants]);
 
@@ -3330,6 +3347,9 @@ export default function PhotographerPage() {
   const handleAssistantStatusChange = useCallback(async (action: "start" | "complete", targetTask?: TaskFromAPI | null) => {
     const task = targetTask ?? currentRawTask;
     if (!task) return;
+    const actionKey = `${action}:${task.id}:${profile?.id ?? ""}`;
+    if (assistantActionPendingRef.current.has(actionKey)) return;
+    assistantActionPendingRef.current.add(actionKey);
     try {
       const res = await fetch(`/api/tasks/${task.id}`, {
         method: "PATCH",
@@ -3372,6 +3392,8 @@ export default function PhotographerPage() {
       }
     } catch (e) {
       console.error("Failed to update task status", e);
+    } finally {
+      assistantActionPendingRef.current.delete(actionKey);
     }
   }, [activeBuildingId, applyOptimisticAssistantTaskStatus, applyTaskDataForProfile, currentRawTask, profile, refreshAssistants, showTaskCreateError]);
 
@@ -10051,15 +10073,18 @@ export default function PhotographerPage() {
                               const currentPresence = assistantPresenceState(p);
                               const currentPresenceMeta = assistantPresenceMeta(currentPresence);
                               const otherStatuses = (["online", "eating", "on_break"] as AssistantPresenceState[]).filter((s) => s !== currentPresence);
+                              const identityAssistantDock = isAssistant
+                                ? assistantDockById.get(p.id) ?? profileToQuickBookAssistant(p)
+                                : null;
                               const assistantServiceBuildingId = isAssistant ? p.activeBuildingId ?? p.buildingId : p.buildingId;
                               const assistantServiceBuildingName =
                                 buildings.find((b) => b.id === assistantServiceBuildingId)?.name ?? p.building.name;
                               const otherBuildings = buildings.filter((b) => b.id !== assistantServiceBuildingId);
 
                               return (
-                                <div
-                                  key={p.id}
-                                  className={`group/identity flex items-center gap-2.5 rounded-[16px] px-2.5 py-1.5 text-left transition-colors duration-150 ${
+                                  <div
+                                    key={p.id}
+                                  className={`group/identity grid ${isAssistant ? "grid-cols-[32px_minmax(0,1fr)_82px]" : "grid-cols-[32px_minmax(0,1fr)]"} items-center gap-2.5 rounded-[16px] px-2.5 py-1.5 text-left transition-colors duration-150 ${
                                     isCurrent
                                       ? "bg-orange-500/[0.07]"
                                       : "hover:bg-white/24"
@@ -10077,20 +10102,17 @@ export default function PhotographerPage() {
                                         <span className="text-xs font-extrabold text-white">{p.name[0]}</span>
                                       )}
                                     </div>
-                                    {isAssistant && (() => {
-                                      const a = assistants.find((x) => x.id === p.id);
-                                      return a ? (
-                                        <span
-                                          className="absolute bottom-0 right-0 rounded-full"
-                                          style={{
-                                            width: 8,
-                                            height: 8,
-                                            backgroundColor: assistantDockDotColor(a),
-                                            boxShadow: "0 0 0 2px rgba(255,255,255,0.95)",
-                                          }}
-                                        />
-                                      ) : null;
-                                    })()}
+                                    {identityAssistantDock && (
+                                      <span
+                                        className="absolute bottom-0 right-0 rounded-full"
+                                        style={{
+                                          width: 8,
+                                          height: 8,
+                                          backgroundColor: assistantDockDotColor(identityAssistantDock),
+                                          boxShadow: "0 0 0 2px rgba(255,255,255,0.95)",
+                                        }}
+                                      />
+                                    )}
                                   </div>
                                   {/* 名字+工号 */}
                                   <div
@@ -10105,13 +10127,13 @@ export default function PhotographerPage() {
                                   </div>
                                   {/* 助理专属：状态按钮 + 场地按钮 */}
                                   {isAssistant && (
-                                    <div className="flex items-center gap-1 shrink-0">
+                                    <div className="flex w-[82px] shrink-0 items-center justify-end gap-1">
                                       {/* 状态按钮 — 文字标签 */}
                                       <div className="relative">
                                         <button
                                           type="button"
                                           disabled={!isCurrent}
-                                          className={`flex h-6 items-center justify-center rounded-lg border px-1.5 text-[9px] font-extrabold shadow-sm backdrop-blur-xl transition-colors disabled:cursor-not-allowed ${identityPresenceButtonSurface(currentPresence)} ${isCurrent ? resolvedTheme === "dark" ? "cursor-pointer hover:bg-white/[0.20] hover:border-white/30" : "cursor-pointer hover:bg-white/66 hover:border-white" : ""} ${identityPresenceText(currentPresence)}`}
+                                          className={`flex h-6 w-[50px] items-center justify-center rounded-lg border px-1.5 text-[9px] font-extrabold shadow-sm backdrop-blur-xl transition-colors disabled:cursor-not-allowed ${identityPresenceButtonSurface(currentPresence)} ${isCurrent ? resolvedTheme === "dark" ? "cursor-pointer hover:bg-white/[0.20] hover:border-white/30" : "cursor-pointer hover:bg-white/66 hover:border-white" : ""} ${identityPresenceText(currentPresence)}`}
                                           onPointerDown={(e) => {
                                             e.stopPropagation();
                                           }}

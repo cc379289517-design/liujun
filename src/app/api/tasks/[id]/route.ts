@@ -1,6 +1,7 @@
 import { NextRequest } from "next/server";
 import { prisma } from "@/lib/prisma";
 import {
+  assertAssistantCanStartTaskByPriority,
   completeTask,
   assignTask,
   ironingMachineAvailabilityForTask,
@@ -149,6 +150,7 @@ export async function PATCH(request: NextRequest, { params }: RouteContext) {
         if (!actorId) {
           return Response.json({ error: "actorAssistantId required for start" }, { status: 400 });
         }
+        await assertAssistantCanStartTaskByPriority(id, actorId);
         await prepareWaitingTaskForAssistantStart(id, actorId);
         const ironingAvailability = await ironingMachineAvailabilityForTask(id);
         const refreshedTask = await prisma.bookingTask.findUnique({
@@ -545,6 +547,7 @@ export async function PATCH(request: NextRequest, { params }: RouteContext) {
       "目标助理",
       "不能使用交换",
       "不能接手",
+      "更高优先级",
     ];
     const isBusinessError =
       error instanceof Error &&
