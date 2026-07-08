@@ -62,6 +62,9 @@ type Persona = {
   role: "photographer" | "assistant" | "admin";
   profile: Profile;
   intervalMs: number;
+  syncToken: string | null;
+  lastFullSyncAtMs: number;
+  taskCache: TaskLike[];
 };
 
 const execFileAsync = promisify(execFile);
@@ -81,6 +84,7 @@ const visiblePollMs = Math.max(500, numberArg(args, "poll-ms", mode === "smoke" 
 const adminPollMs = Math.max(1000, numberArg(args, "admin-poll-ms", mode === "smoke" ? 4000 : 12_000));
 const writeRatePerMin = Math.max(0, numberArg(args, "write-rate-per-min", mode === "mixed" ? 60 : 0));
 const assistantActionChance = Math.max(0, Math.min(1, numberArg(args, "assistant-action-chance", mode === "mixed" ? 0.25 : 0)));
+const fullSyncIntervalMs = Math.max(10_000, numberArg(args, "full-sync-interval-ms", 60_000));
 const allowWrites = booleanArg(args, "allow-writes", false);
 const allowRemote = booleanArg(args, "allow-remote", false);
 const serverPid = Math.floor(numberArg(args, "server-pid", Number(process.env.SERVER_PID ?? "0"))) || undefined;
@@ -213,6 +217,7 @@ async function request(
 
   if (event.endpoint === "/api/workbench/sync" && data && typeof data === "object") {
     const record = data as Record<string, unknown>;
+    event.syncMode = record.syncMode === "delta" ? "delta" : record.syncMode === "full" ? "full" : undefined;
     event.counts = {
       profiles: Array.isArray(record.profiles) ? record.profiles.length : undefined,
       tasks: Array.isArray(record.tasks) ? record.tasks.length : undefined,
@@ -234,7 +239,8 @@ function personaBuildingId(profile: Profile): number {
   return profile.activeBuildingId ?? profile.buildingId;
 }
 
-function syncEndpoint(profile: Profile, role: Persona["role"]): string {
+function syncEndpoint(persona: Persona): string {
+  const { profile, role } = persona;
   const view = role === "assistant" ? "assistant" : role === "photographer" ? "photographer" : "admin";
   const params = new URLSearchParams({
     profileId: profile.id,
@@ -242,6 +248,13 @@ function syncEndpoint(profile: Profile, role: Persona["role"]): string {
     buildingId: String(personaBuildingId(profile)),
     view,
   });
+  const syncToken = persona.syncToken;
+  const shouldFullSync = !syncToken || Date.now() - persona.lastFullSyncAtMs >= fullSyncIntervalMs;
+  if (shouldFullSync) {
+    params.set("full", "1");
+  } else {
+    params.set("since", syncToken);
+  }
   return `/api/workbench/sync?${params.toString()}`;
 }
 
@@ -259,6 +272,68 @@ function adminTasksEndpoint(profile: Profile): string {
 function taskBelongsToAssistant(task: TaskLike, assistantId: string): boolean {
   return task.assistantId === assistantId ||
     (task.collaborators ?? []).some((collaborator) => collaborator.assistantId === assistantId && collaborator.status !== "left");
+}
+
+function stringIds(value: unknown): string[] | null {
+  return Array.isArray(value)
+    ? value.filter((id): id is string => typeof id === "string")
+    : null;
+}
+
+function mergeIncrementalTasks(
+  current: TaskLike[],
+  incoming: TaskLike[],
+  visibleIds: string[] | null,
+  syncMode: "full" | "delta",
+): TaskLike[] {
+  if (syncMode !== "delta") return incoming;
+
+  const byId = new Map<string, TaskLike>();
+  for (const task of current) byId.set(task.id, task);
+  for (const task of incoming) {
+    const existing = byId.get(task.id);
+    byId.set(task.id, existing ? { ...existing, ...task } : task);
+  }
+
+  if (!visibleIds) return [...byId.values()];
+  return visibleIds
+    .map((id) => byId.get(id))
+    .filter((task): task is TaskLike => task != null);
+}
+
+function hasMissingVisibleTaskDetails(
+  current: TaskLike[],
+  incoming: TaskLike[],
+  visibleIds: string[] | null,
+): boolean {
+  if (!visibleIds) return false;
+  const knownIds = new Set<string>();
+  for (const task of current) knownIds.add(task.id);
+  for (const task of incoming) knownIds.add(task.id);
+  return visibleIds.some((id) => !knownIds.has(id));
+}
+
+function applyPersonaSyncCache(persona: Persona, data: Record<string, unknown>): TaskLike[] {
+  const incomingTasks = Array.isArray(data.tasks) ? data.tasks as TaskLike[] : [];
+  const syncMode = data.syncMode === "delta" ? "delta" : "full";
+  const taskIds = stringIds(data.taskIds);
+
+  if (
+    syncMode === "delta" &&
+    (!taskIds || data.syncTruncated === true || hasMissingVisibleTaskDetails(persona.taskCache, incomingTasks, taskIds))
+  ) {
+    persona.syncToken = null;
+    persona.lastFullSyncAtMs = 0;
+    return persona.taskCache;
+  }
+
+  const nextTasks = mergeIncrementalTasks(persona.taskCache, incomingTasks, taskIds, syncMode);
+  persona.taskCache = nextTasks;
+  persona.syncToken = typeof data.syncToken === "string" ? data.syncToken : null;
+  if (syncMode === "full") {
+    persona.lastFullSyncAtMs = Date.now();
+  }
+  return nextTasks;
 }
 
 async function maybeCreateTask(
@@ -333,10 +408,10 @@ async function personaLoop(
         persona,
         mode === "mixed" ? "mixed-sync" : "readonly-sync",
         "GET",
-        syncEndpoint(persona.profile, persona.role),
+        syncEndpoint(persona),
       );
       const data = sync.data && typeof sync.data === "object" ? sync.data as Record<string, unknown> : {};
-      const tasks = Array.isArray(data.tasks) ? data.tasks as TaskLike[] : [];
+      const tasks = applyPersonaSyncCache(persona, data);
       if (mode === "mixed") {
         await maybeCreateTask(persona, tasks, buildings, categories);
         await maybeAssistantAction(persona, tasks);
@@ -414,9 +489,33 @@ async function main() {
   const assistants = loadtestProfiles(profiles, "assistant", assistantCount);
   const admins = loadtestProfiles(profiles, "admin", adminCount);
   const personas: Persona[] = [
-    ...photographers.map((profile) => ({ id: profile.id, role: "photographer" as const, profile, intervalMs: visiblePollMs })),
-    ...assistants.map((profile) => ({ id: profile.id, role: "assistant" as const, profile, intervalMs: visiblePollMs })),
-    ...admins.map((profile) => ({ id: profile.id, role: "admin" as const, profile, intervalMs: adminPollMs })),
+    ...photographers.map((profile) => ({
+      id: profile.id,
+      role: "photographer" as const,
+      profile,
+      intervalMs: visiblePollMs,
+      syncToken: null,
+      lastFullSyncAtMs: 0,
+      taskCache: [],
+    })),
+    ...assistants.map((profile) => ({
+      id: profile.id,
+      role: "assistant" as const,
+      profile,
+      intervalMs: visiblePollMs,
+      syncToken: null,
+      lastFullSyncAtMs: 0,
+      taskCache: [],
+    })),
+    ...admins.map((profile) => ({
+      id: profile.id,
+      role: "admin" as const,
+      profile,
+      intervalMs: adminPollMs,
+      syncToken: null,
+      lastFullSyncAtMs: 0,
+      taskCache: [],
+    })),
   ];
 
   config.gitCommit = await gitCommit();
@@ -458,6 +557,7 @@ const config: LoadtestReportConfig = {
     adminPollMs,
     writeRatePerMin,
     assistantActionChance,
+    fullSyncIntervalMs,
     timeoutMs,
     allowWrites,
     allowRemote,

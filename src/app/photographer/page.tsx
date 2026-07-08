@@ -339,6 +339,44 @@ function visibleTasksForProfile(
   return raw;
 }
 
+function mergeIncrementalTasks(
+  current: TaskFromAPI[],
+  incoming: TaskFromAPI[],
+  visibleIds: string[] | null,
+  syncMode: "full" | "delta",
+): TaskFromAPI[] {
+  if (syncMode !== "delta") return incoming;
+
+  const byId = new Map<string, TaskFromAPI>();
+  for (const task of current) {
+    byId.set(task.id, task);
+  }
+  for (const task of incoming) {
+    const existing = byId.get(task.id);
+    byId.set(task.id, existing ? { ...existing, ...task } : task);
+  }
+
+  if (visibleIds) {
+    return visibleIds
+      .map((id) => byId.get(id))
+      .filter((task): task is TaskFromAPI => task != null);
+  }
+
+  return [...byId.values()];
+}
+
+function hasMissingVisibleTaskDetails(
+  current: TaskFromAPI[],
+  incoming: TaskFromAPI[],
+  visibleIds: string[] | null,
+): boolean {
+  if (!visibleIds) return false;
+  const knownIds = new Set<string>();
+  for (const task of current) knownIds.add(task.id);
+  for (const task of incoming) knownIds.add(task.id);
+  return visibleIds.some((id) => !knownIds.has(id));
+}
+
 function getAutoTheme(): "light" | "dark" {
   const h = new Date().getHours();
   return h >= 6 && h < 18 ? "light" : "dark";
@@ -593,6 +631,11 @@ export default function PhotographerPage() {
   const pendingRawTaskRef = useRef<TaskFromAPI | null>(null);
   const assistantActionPendingRef = useRef<Set<string>>(new Set());
   const recentTaskPatchesRef = useRef<Map<string, { task: TaskFromAPI; appliedAt: number }>>(new Map());
+  const taskListRawRef = useRef<TaskFromAPI[]>([]);
+  const assistantRawTasksRef = useRef<TaskFromAPI[]>([]);
+  const publicQueueRawRef = useRef<TaskFromAPI[]>([]);
+  const workbenchSyncTokenRef = useRef<string | null>(null);
+  const workbenchLastFullSyncAtRef = useRef(0);
   const pollingProfileId = profile?.id ?? null;
   const pollingProfileRole = profile?.role ?? null;
   const pollingProfileBuildingId = profile?.buildingId ?? null;
@@ -606,6 +649,15 @@ export default function PhotographerPage() {
   useEffect(() => {
     pendingRawTaskRef.current = pendingRawTask;
   }, [pendingRawTask]);
+  useEffect(() => {
+    taskListRawRef.current = taskListRaw;
+  }, [taskListRaw]);
+  useEffect(() => {
+    assistantRawTasksRef.current = assistantRawTasks;
+  }, [assistantRawTasks]);
+  useEffect(() => {
+    publicQueueRawRef.current = publicQueueRaw;
+  }, [publicQueueRaw]);
   const assistantDockById = useMemo(
     () => new Map(assistants.map((assistant) => [assistant.id, assistant])),
     [assistants],
@@ -1098,9 +1150,11 @@ export default function PhotographerPage() {
 
     const raw = visibleTasksForProfile(patchedTaskData, targetProfile, targetBuildingId);
     const assistantView = isAssistantRole(targetProfile.role);
+    taskListRawRef.current = raw;
     setTaskListRaw(raw);
     setTasks(sortTasksByStatus(raw.map((t) => apiTaskToDisplay(t, assistantView ? targetProfile.id : undefined))));
     if (assistantView) {
+      assistantRawTasksRef.current = raw;
       setAssistantRawTasks(raw);
       const { current: active, paused, pending, deferredWaiting } = resolveAssistantTasks(raw, targetProfile.id);
       setCurrentRawTask(active);
@@ -1108,6 +1162,7 @@ export default function PhotographerPage() {
       setPendingRawTask(pending);
       setDeferredWaitingRawTask(deferredWaiting);
     } else {
+      assistantRawTasksRef.current = [];
       setAssistantRawTasks([]);
       setDeferredWaitingRawTask(null);
       setCurrentRawTask(null);
@@ -1165,6 +1220,8 @@ export default function PhotographerPage() {
     };
     const nextTaskList = mergeTask(taskListRaw);
     const nextAssistantTasks = mergeTask(assistantRawTasks.length > 0 ? assistantRawTasks : taskListRaw);
+    taskListRawRef.current = nextTaskList;
+    assistantRawTasksRef.current = nextAssistantTasks;
     setTaskListRaw(nextTaskList);
     setAssistantRawTasks(nextAssistantTasks);
     setTasks(sortTasksByStatus(nextTaskList.map((t) => apiTaskToDisplay(t, profile.id))));
@@ -1943,6 +2000,9 @@ export default function PhotographerPage() {
     let timer: ReturnType<typeof setTimeout> | null = null;
     const activeDelay = 3000;
     const hiddenDelay = 12000;
+    const fullSyncIntervalMs = 60_000;
+    workbenchSyncTokenRef.current = null;
+    workbenchLastFullSyncAtRef.current = 0;
     const scheduleNext = (delayMs: number) => {
       if (cancelled) return;
       if (timer) clearTimeout(timer);
@@ -1962,6 +2022,14 @@ export default function PhotographerPage() {
             ? "photographer"
             : "building",
       });
+      const lastSyncToken = workbenchSyncTokenRef.current;
+      const shouldFullSync = !lastSyncToken || Date.now() - workbenchLastFullSyncAtRef.current >= fullSyncIntervalMs;
+      if (shouldFullSync) {
+        params.set("full", "1");
+      } else {
+        params.set("since", lastSyncToken);
+      }
+      let retryDelayMs: number | null = null;
       try {
         const response = await fetch(`/api/workbench/sync?${params.toString()}`, { cache: "no-store" });
         const syncData = await response.json().catch(() => null) as {
@@ -1969,6 +2037,11 @@ export default function PhotographerPage() {
           publicQueue?: unknown;
           tasks?: unknown;
           notices?: unknown;
+          syncMode?: unknown;
+          syncToken?: unknown;
+          syncTruncated?: unknown;
+          taskIds?: unknown;
+          publicQueueIds?: unknown;
           nextPollMs?: number;
         } | null;
         if (cancelled || !response.ok || !syncData) return;
@@ -1976,18 +2049,59 @@ export default function PhotographerPage() {
         const publicQueueData = Array.isArray(syncData.publicQueue) ? syncData.publicQueue as TaskFromAPI[] : [];
         const taskData = Array.isArray(syncData.tasks) ? syncData.tasks as TaskFromAPI[] : [];
         const noticeData = Array.isArray(syncData.notices) ? syncData.notices as StandbyReassignmentNoticeFromAPI[] : [];
-        await refreshAssistants({ profiles: syncData.profiles, tasks: publicQueueData });
+        const serverSyncMode = syncData.syncMode === "delta" ? "delta" : "full";
+        const taskIds = Array.isArray(syncData.taskIds)
+          ? syncData.taskIds.filter((id): id is string => typeof id === "string")
+          : null;
+        const publicQueueIds = Array.isArray(syncData.publicQueueIds)
+          ? syncData.publicQueueIds.filter((id): id is string => typeof id === "string")
+          : null;
+        const personalBase = isAssistantRole(pollingProfile.role) && assistantRawTasksRef.current.length > 0
+          ? assistantRawTasksRef.current
+          : taskListRawRef.current;
+        const deltaNeedsFullRetry = serverSyncMode === "delta" && (
+          syncData.syncTruncated === true ||
+          !taskIds ||
+          !publicQueueIds ||
+          hasMissingVisibleTaskDetails(personalBase, taskData, taskIds) ||
+          hasMissingVisibleTaskDetails(publicQueueRawRef.current, publicQueueData, publicQueueIds)
+        );
+        if (deltaNeedsFullRetry) {
+          workbenchSyncTokenRef.current = null;
+          workbenchLastFullSyncAtRef.current = 0;
+          retryDelayMs = 0;
+          return;
+        }
+        const mergedPublicQueue = mergeIncrementalTasks(
+          publicQueueRawRef.current,
+          publicQueueData,
+          publicQueueIds,
+          serverSyncMode,
+        );
+        const mergedTaskData = mergeIncrementalTasks(personalBase, taskData, taskIds, serverSyncMode);
+
+        await refreshAssistants({ profiles: syncData.profiles, tasks: mergedPublicQueue });
         if (cancelled) return;
+        const syncToken = typeof syncData.syncToken === "string" ? syncData.syncToken : null;
+        if (syncToken) {
+          workbenchSyncTokenRef.current = syncToken;
+        } else {
+          workbenchSyncTokenRef.current = null;
+        }
+        if (serverSyncMode === "full") {
+          workbenchLastFullSyncAtRef.current = Date.now();
+        }
         startTransition(() => {
-          setPublicQueueRaw(publicQueueData);
+          publicQueueRawRef.current = mergedPublicQueue;
+          setPublicQueueRaw(mergedPublicQueue);
           setReassignmentNotices(isAssistantRole(pollingProfile.role) ? noticeData : []);
-          applyTaskDataForProfile(taskData, pollingProfile, buildingId);
+          applyTaskDataForProfile(mergedTaskData, pollingProfile, buildingId);
         });
       } catch (error) {
         console.error(error);
       } finally {
         inFlight = false;
-        scheduleNext(document.visibilityState === "visible" ? activeDelay : hiddenDelay);
+        scheduleNext(retryDelayMs ?? (document.visibilityState === "visible" ? activeDelay : hiddenDelay));
       }
     };
     const onVisibilityChange = () => {

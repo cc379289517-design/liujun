@@ -25,6 +25,7 @@ export type RequestLogEvent = {
     publicQueue?: number;
     notices?: number;
   };
+  syncMode?: "full" | "delta";
   maintenanceRan?: boolean;
 };
 
@@ -224,6 +225,8 @@ export function buildReport(events: RawLogEvent[], config: LoadtestReportConfig)
     avgNotices: round(
       average(workbenchRequests.map((request) => request.counts?.notices).filter(isNumber)),
     ),
+    fullSyncs: summarizeWorkbenchSyncMode(workbenchRequests, "full"),
+    deltaSyncs: summarizeWorkbenchSyncMode(workbenchRequests, "delta"),
     maintenanceRuns: workbenchRequests.filter((request) => request.maintenanceRan).length,
   };
 
@@ -320,6 +323,8 @@ function renderMarkdownReport(summary: ReturnType<typeof buildReport>["summary"]
   lines.push(`- Avg personal tasks per sync: ${summary.workbench.avgTasks}`);
   lines.push(`- Avg public queue per sync: ${summary.workbench.avgPublicQueue}`);
   lines.push(`- Avg notices per sync: ${summary.workbench.avgNotices}`);
+  lines.push(`- Full syncs: ${summary.workbench.fullSyncs.count}, total ${summary.workbench.fullSyncs.totalMb} MB, avg bytes ${summary.workbench.fullSyncs.avgBytes}, p95 bytes ${summary.workbench.fullSyncs.p95Bytes}`);
+  lines.push(`- Delta syncs: ${summary.workbench.deltaSyncs.count}, total ${summary.workbench.deltaSyncs.totalMb} MB, avg bytes ${summary.workbench.deltaSyncs.avgBytes}, p95 bytes ${summary.workbench.deltaSyncs.p95Bytes}`);
   lines.push(`- Maintenance runs observed in sync responses: ${summary.workbench.maintenanceRuns}`);
   lines.push("");
   lines.push("## System Samples");
@@ -358,6 +363,21 @@ function average(values: number[]): number {
 
 function isNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value);
+}
+
+function summarizeWorkbenchSyncMode(requests: RequestLogEvent[], syncMode: "full" | "delta") {
+  const rows = requests.filter((request) => request.syncMode === syncMode);
+  const bytes = summarizeNumbers(rows.map((request) => request.bytes));
+  const totalBytes = rows.reduce((sum, request) => sum + request.bytes, 0);
+  return {
+    count: rows.length,
+    totalBytes,
+    totalMb: round(totalBytes / 1024 / 1024, 2),
+    avgBytes: bytes.avg,
+    p95Bytes: bytes.p95,
+    avgTasks: round(average(rows.map((request) => request.counts?.tasks).filter(isNumber))),
+    avgPublicQueue: round(average(rows.map((request) => request.counts?.publicQueue).filter(isNumber))),
+  };
 }
 
 function escapeCell(value: string): string {

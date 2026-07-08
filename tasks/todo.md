@@ -6300,7 +6300,8 @@
 
 ### 阶段 C：同步接口降载与数据结构
 
-- [ ] `/api/workbench/sync` 从有界全量快照推进到 `since` 增量/摘要同步：服务端返回任务变更、删除/完成标记、公共队列摘要和当前助理状态。
+- [x] `/api/workbench/sync` 从有界全量快照推进到兼容型 `since` 增量同步：服务端返回 `syncMode/syncToken`、变更任务片段、当前可见 `taskIds/publicQueueIds` 和 `publicQueueSummary`，前端首轮全量、后续增量、约 60 秒全量校准。
+- [ ] 继续把同步接口推进到摘要化：返回 `removedIds/completedIds`、首屏公共队列摘要和当前助理状态，减少 profiles/公共队列重复传输。
 - [ ] 公共队列不再每轮 `take: 500` 深 include；首屏返回摘要，任务详情按需补齐。
 - [ ] 服务端计算 `assistantStatus`，减少前端每轮从任务列表反推人员状态。
 - [ ] GET 同步中的维护写入继续评估：单进程 SQLite 保持节流；多进程/生产扩展前改为单维护入口或后台 worker。
@@ -6358,3 +6359,19 @@
 - 代价与下一步：`start` 业务 409 增多，主要是正确拦截“已有执行中/暂停中任务还想开始熨烫”；下一批应优化 `notified` 重新分配/释放，让获得机器使用权但已去做普通任务的助理不长期占着准备熨烫入口。
 - 同步降载下一刀：必须从“轻 include”升级到真正 `since` 增量/摘要同步，返回 `changedTasks`、`removedIds/completedIds`、`publicQueueSummary`、服务端计算的 `assistantStatus`；公共队列首屏只传 30-50 条摘要，详情按需补齐。
 - 验证通过：`npx prisma validate`、`npx tsc --noEmit --pretty false --incremental false`、`DATABASE_URL=file:./prisma/loadtest.db npm run build`、`git diff --check`、本地生产服务 3100 端口短混合压测。
+
+### 阶段 C 第二批评审（2026-07-08）
+
+- 已完成兼容型增量同步：`/api/workbench/sync` 支持 `since` 和 `full=1`；响应新增 `syncMode/syncToken/syncTruncated/taskIds/publicQueueIds/publicQueueSummary`，旧客户端不带 `since` 仍拿全量快照。
+- 已补齐 delta 正确性保护：服务端将完成登记、提权申请、移交请求、协作参与记录等关联表变化合并进 changed task；变更触顶时返回 `syncTruncated=true`，前端和压测工具放弃本轮 delta、清游标后重拉 full。
+- 已完成前端轮询接入：工作台首轮、身份/楼座切换和约 60 秒校准走 `full=1`，其他轮次带 `since`；本地用 `taskIds/publicQueueIds` 裁剪缓存，`startTransition` 合并后再刷新个人任务、公共队列和 Dock/地图状态。
+- 已完成弱网/乱序防闪回延续：任务写操作返回的权威任务片段仍通过最近 patch 保护短时间内的本地状态；增量同步只校准，不改变后端业务规则。
+- 已完成压测工具升级：每个虚拟用户保存自己的 `syncToken` 和任务缓存；报告区分 full/delta 次数、总 MB、平均响应体和 p95 响应体，避免继续用全量轮询误测数据体积。
+- 设计取舍：本批没有一次性重写工作台 store，也没有引入 Socket/SSE；先用低风险增量轮询把 150 人高频重复 JSON 体积降下来，后续再做服务端 `assistantStatus` 和公共队列摘要化。
+- 验证通过：`npx prisma validate`、`npx tsc --noEmit --pretty false --incremental false`、`DATABASE_URL=file:./prisma/loadtest.db npm run build`、`git diff --check`。
+- Smoke 验证：9 会话、60 秒、499 请求、0 错误；full 平均约 101.8KB，delta 平均约 5.3KB、p95 约 5.2KB。
+- 只读短压测：80 摄影师、30 助理、5 管理、3 分钟，6,676 请求、0 错误；`/api/workbench/sync` p95 18.5ms，平均响应体约 10KB；full 330 次共 31.77MB，delta 6,270 次共 31.39MB，delta 平均约 5.2KB、p95 约 5.2KB。
+- 混合短压测：80 摄影师、30 助理、5 管理、3 分钟，7,229 请求；同步接口 0 错误，写操作 320 个错误均为业务 409（熨烫忙/已有任务、高优先级兜底、摄影师发布上限），无 500、无 SQLite locked/busy。
+- 混合体积：`/api/workbench/sync` 平均约 12.9KB；full 330 次共 35.81MB，delta 6,266 次共 45.58MB，delta 平均约 7.6KB、p95 约 12.7KB。对比上一批 116KB/次，3 秒轮询下前端 JSON 解析和网络压力已明显下降。
+- 对抗性审查：数据库查询确认无重复 active primary、无同助理多个执行/暂停根任务、无熨烫 `using` 超正常机器容量；压测 raw 日志确认无 HTTP 500 和 locked/busy。
+- 残余风险：混合写下 sync p95 仍到约 220.5ms、p99 约 1494.5ms，主要来自 SQLite 单进程写入期间读请求排队和 full 校准大包；下一步继续推进服务端 `assistantStatus` 摘要、公共队列首屏摘要/详情按需、管理端 `/api/tasks` 降载。
