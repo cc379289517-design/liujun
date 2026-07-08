@@ -6292,8 +6292,8 @@
 
 ### 阶段 B：后端原子性第二批
 
-- [ ] 熨烫派发：`attachIroningTaskToAssistant()` 改成事务内条件化认领，重新确认任务仍可派、助理仍可接、机器槽位仍满足。
-- [ ] 熨烫开始：开始任务时把槽位检查和进入 `using/executing` 放在同一事务或同一条件命令中，避免多人同时抢空闲机器。
+- [x] 熨烫派发：`attachIroningTaskToAssistant()` 改成事务内条件化认领，重新确认任务仍可派、助理仍可接、机器槽位仍满足。
+- [x] 熨烫开始：开始任务时把槽位检查和进入 `using/executing` 放在同一事务或同一条件命令中，避免多人同时抢空闲机器。
 - [ ] 插单路径：`interruptAssistant()` 与 `interruptWaitingPreempt()` 的候选筛选和写入条件收口，事务内再次确认被插助理/任务仍处于可插状态。
 - [ ] 指定助理创建：指定任务创建和助理状态更新改为完整事务内 claim；`profile.updateMany count=0` 不能继续当作成功。
 - [ ] 并发回归：补最小脚本/测试场景覆盖重复派单、高优先级压制、熨烫槽位、移交贡献、取消边界和伪造 actor。
@@ -6345,3 +6345,16 @@
 - 优先级调整：下一批应先推进阶段 B 中“熨烫派发条件化认领 + 熨烫开始槽位原子化”，同时阶段 C 需要把 `/api/workbench/sync` 拆成摘要/增量，降低每轮 100KB-300KB 级响应体。
 - 验证通过：`npx tsc --noEmit --pretty false --incremental false`、`DATABASE_URL=file:./prisma/loadtest.db npm run build`、正式 smoke/readonly/mixed 压测。
 - 注意：`prisma/dev.db` 仍是本地运行态改动，继续排除提交；`prisma/loadtest.db*` 和 `loadtest/results/` 为本地压测产物，不提交。
+
+### 阶段 B/C 第一批评审（2026-07-08）
+
+- 已完成阶段 B 第一批：熨烫派发改为条件化认领，认领时重新确认任务仍 `waiting`、非摄影师限流锁、非插单子任务、助理在线同楼座且无真实占用工作；认领失败返回 false，派发循环换下一个候选。
+- 已完成阶段 B 第一批：同楼座熨烫槽位计算与 `notified/using` 写入增加单 Node 进程内楼座级串行锁；SQLite 仍保持单进程写库前提，避免两个请求同时看到空槽后同时写入。
+- 已完成阶段 B 第一批：熨烫开始进入 `using/executing` 前在事务内重新确认机器槽位；如果助理已经有其他执行中/暂停中真实工作，拒绝开始熨烫，避免普通任务和熨烫任务同时执行。
+- 已完成阶段 C 第一刀：`/api/workbench/sync` 中个人 `tasks` 保留完整详情，区域 `publicQueue` 改用轻 include，不再把完成登记大对象和多条移交记录每轮广播给所有客户端；真正 `since` 增量和摘要同步仍未完成。
+- 数据体积结论：数据库落盘不大，隔离压测库 115 人画像、360 初始任务加短混合写后 `prisma/loadtest.db` 约 2MB，WAL 约 4MB；大头是高频同步响应体和前端 JSON 解析。
+- 体积估算：当前同步平均体积按只读约 101KB/次、混合高峰约 235KB/次估算，150 人前台 3 秒轮询 10 小时约 180GB-423GB 同步响应体；24 小时极端前台在线约 436GB-1.0TB。实际数据库新增文本通常只是 MB 到几十 MB 级，上传图片另算。
+- 短测结果：`mixed-after-phase2-3min-r2`，115 会话 3 分钟，7,248 请求，无 500；`/api/workbench/sync` p50 9.6ms、p95 148ms、p99 235ms、平均 116KB；熨烫 using 槽位无超容量，同一助理多执行根任务为 0。
+- 代价与下一步：`start` 业务 409 增多，主要是正确拦截“已有执行中/暂停中任务还想开始熨烫”；下一批应优化 `notified` 重新分配/释放，让获得机器使用权但已去做普通任务的助理不长期占着准备熨烫入口。
+- 同步降载下一刀：必须从“轻 include”升级到真正 `since` 增量/摘要同步，返回 `changedTasks`、`removedIds/completedIds`、`publicQueueSummary`、服务端计算的 `assistantStatus`；公共队列首屏只传 30-50 条摘要，详情按需补齐。
+- 验证通过：`npx prisma validate`、`npx tsc --noEmit --pretty false --incremental false`、`DATABASE_URL=file:./prisma/loadtest.db npm run build`、`git diff --check`、本地生产服务 3100 端口短混合压测。

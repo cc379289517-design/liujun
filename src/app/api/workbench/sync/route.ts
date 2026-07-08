@@ -9,7 +9,7 @@ const VISIBLE_PRIORITY_UPGRADE_REQUEST_STATUSES: PriorityUpgradeRequestStatus[] 
 ];
 const VISIBLE_ASSISTANT_TRANSFER_REQUEST_STATUSES = ["confirming", "pending", "pending_after_complete", "ready_to_takeover"];
 
-const TASK_INCLUDE = {
+const FULL_TASK_INCLUDE = {
   photographer: { select: { id: true, name: true, currentRoom: true, buildingId: true } },
   assistant: { select: { id: true, name: true, currentRoom: true } },
   category: {
@@ -61,6 +61,71 @@ const TASK_INCLUDE = {
     where: { status: { in: VISIBLE_ASSISTANT_TRANSFER_REQUEST_STATUSES } },
     orderBy: { requestedAt: "desc" },
     take: 3,
+    select: {
+      id: true,
+      taskId: true,
+      fromAssistantId: true,
+      targetAssistantId: true,
+      counterpartTaskId: true,
+      kind: true,
+      responseMode: true,
+      status: true,
+      reason: true,
+      requestedAt: true,
+      targetConfirmedAt: true,
+      completedAt: true,
+      canceledAt: true,
+    },
+  },
+} as const;
+
+const QUEUE_TASK_INCLUDE = {
+  photographer: { select: { id: true, name: true, currentRoom: true, buildingId: true } },
+  assistant: { select: { id: true, name: true, currentRoom: true } },
+  category: {
+    select: {
+      id: true,
+      name: true,
+      priorityLevel: true,
+      estDuration: true,
+      minDuration: true,
+      maxDuration: true,
+    },
+  },
+  collaborators: {
+    where: { status: { not: "left" } },
+    select: {
+      id: true,
+      taskId: true,
+      assistantId: true,
+      role: true,
+      status: true,
+      joinedAt: true,
+      leftAt: true,
+      startedAt: true,
+      completedAt: true,
+      effectiveWorkSeconds: true,
+      workSegmentStartedAt: true,
+      assistant: { select: { id: true, name: true, currentRoom: true, avatar: true, buildingId: true } },
+    },
+  },
+  priorityUpgradeRequests: {
+    where: { status: { in: VISIBLE_PRIORITY_UPGRADE_REQUEST_STATUSES } },
+    orderBy: { createdAt: "desc" },
+    take: 1,
+    select: {
+      id: true,
+      status: true,
+      fromPriority: true,
+      targetPriority: true,
+      reason: true,
+      createdAt: true,
+    },
+  },
+  assistantTransferRequests: {
+    where: { status: { in: VISIBLE_ASSISTANT_TRANSFER_REQUEST_STATUSES } },
+    orderBy: { requestedAt: "desc" },
+    take: 1,
     select: {
       id: true,
       taskId: true,
@@ -169,7 +234,7 @@ export async function GET(request: NextRequest) {
           createdAt,
           AND: [areaWhere],
         },
-        include: TASK_INCLUDE,
+        include: QUEUE_TASK_INCLUDE,
         orderBy: [{ priority: "asc" }, { createdAt: "asc" }],
         take: 500,
       }),
@@ -178,7 +243,7 @@ export async function GET(request: NextRequest) {
           createdAt,
           AND: taskFilters,
         },
-        include: TASK_INCLUDE,
+        include: FULL_TASK_INCLUDE,
         orderBy: [{ priority: "asc" }, { createdAt: "asc" }],
         take: 200,
       }),
