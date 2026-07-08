@@ -198,7 +198,7 @@ export async function PATCH(request: NextRequest, { params }: RouteContext) {
           await completeTask(id);
         }
         const updated = await prisma.bookingTask.findUnique({ where: { id } });
-        await runTaskMaintenance();
+        await runTaskMaintenance({ force: true });
         return Response.json(updated);
       }
 
@@ -216,7 +216,7 @@ export async function PATCH(request: NextRequest, { params }: RouteContext) {
         if (newStatus === "completed") {
           await completeTask(id);
           const updated = await prisma.bookingTask.findUnique({ where: { id } });
-          await runTaskMaintenance();
+          await runTaskMaintenance({ force: true });
           return Response.json(updated);
         }
 

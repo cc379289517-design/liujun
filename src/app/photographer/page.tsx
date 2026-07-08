@@ -438,7 +438,7 @@ export default function PhotographerPage() {
   } | null>(null);
   const [enteringTaskId, setEnteringTaskId] = useState<string | null>(null);
   const [taskCreateError, setTaskCreateError] = useState<string | null>(null);
-  const [taskCreateNoticeTone, setTaskCreateNoticeTone] = useState<"error" | "info" | "success">("error");
+  const [taskCreateNoticeTone, setTaskCreateNoticeTone] = useState<"error" | "info" | "success" | "transfer">("error");
   const [taskCreateLimitWarning, setTaskCreateLimitWarning] = useState(false);
   const [presenceSwitchConfirm, setPresenceSwitchConfirm] = useState<{
     profileId: string;
@@ -1031,7 +1031,7 @@ export default function PhotographerPage() {
   // 登录账号角色（区别于切换后的 profile.role）
   const [loginRole, setLoginRole] = useState<string | null>(null);
 
-  const showTaskCreateError = useCallback((message: string, shake = false, tone: "error" | "info" | "success" = "error") => {
+  const showTaskCreateError = useCallback((message: string, shake = false, tone: "error" | "info" | "success" | "transfer" = "error") => {
     setTaskCreateNoticeTone(tone);
     setTaskCreateError(message);
     if (shake) {
@@ -3351,11 +3351,22 @@ export default function PhotographerPage() {
         return;
       }
       if (profile) {
-        applyOptimisticAssistantTaskStatus(task, action);
-        const taskRes = await fetch(taskListUrlForProfile(profile), { cache: "no-store" });
-        const taskData = await taskRes.json();
-        if (Array.isArray(taskData)) {
-          applyTaskDataForProfile(taskData as TaskFromAPI[], profile, activeBuildingId ?? profile.buildingId);
+        let appliedFreshTasks = false;
+        if (action !== "complete") {
+          applyOptimisticAssistantTaskStatus(task, action);
+        }
+        try {
+          const taskRes = await fetch(taskListUrlForProfile(profile), { cache: "no-store" });
+          const taskData = await taskRes.json().catch(() => null);
+          if (Array.isArray(taskData)) {
+            applyTaskDataForProfile(taskData as TaskFromAPI[], profile, activeBuildingId ?? profile.buildingId);
+            appliedFreshTasks = true;
+          }
+        } catch (refreshError) {
+          console.error("Failed to refresh assistant tasks", refreshError);
+        }
+        if (action === "complete" && !appliedFreshTasks) {
+          applyOptimisticAssistantTaskStatus(task, action);
         }
         refreshAssistants();
       }
@@ -3931,7 +3942,7 @@ export default function PhotographerPage() {
       setPausedRawTask((prev) => prev?.id === updated.id ? (removeFromCurrentAssistant ? null : updated) : prev);
       setPendingRawTask((prev) => prev?.id === updated.id ? (removeFromCurrentAssistant ? null : updated) : prev);
       refreshAssistants();
-      showTaskCreateError("已发送移交请求；目标助理确认并实际接手前，你仍负责当前任务", false, "success");
+      showTaskCreateError("已发送移交请求；目标助理确认并实际接手前，你仍负责当前任务", false, "transfer");
       closeTransferModal();
     } catch (error) {
       console.error("Failed to transfer assistant", error);
@@ -3969,7 +3980,10 @@ export default function PhotographerPage() {
         updated.assistantId === profile.id ||
         activeTaskParticipants(updated).some((participant) => participant.assistantId === profile.id) ||
         confirmingTransferForTask(updated)?.targetAssistantId === profile.id ||
-        (updatedActiveTransfer?.targetAssistantId === profile.id && updatedActiveTransfer.status === "pending_after_complete");
+        (
+          updatedActiveTransfer?.targetAssistantId === profile.id &&
+          (updatedActiveTransfer.status === "pending_after_complete" || updatedActiveTransfer.status === "ready_to_takeover")
+        );
       const mergeForTarget = (list: TaskFromAPI[]) => {
         const withoutUpdated = list.filter((task) => task.id !== updated.id);
         return shouldKeepForCurrentAssistant ? [...withoutUpdated, updated] : withoutUpdated;
@@ -3993,7 +4007,7 @@ export default function PhotographerPage() {
           : responseMode === "after_complete"
             ? "已确认结束后前往，当前任务完成后系统会提醒原助理并转入待就位"
             : "已确认接替，请前往待就位任务";
-      showTaskCreateError(successMessage, false, accepted ? "success" : "info");
+      showTaskCreateError(successMessage, false, "transfer");
     } catch (error) {
       console.error("Failed to respond transfer request", error);
       showTaskCreateError("移交请求处理失败，请检查网络后重试");
@@ -4062,7 +4076,7 @@ export default function PhotographerPage() {
                     info.selectable
                       ? resolvedTheme === "dark"
                         ? "bg-white/[0.11] text-slate-50 hover:bg-white/[0.16]"
-                        : "bg-white/60 text-slate-700 hover:bg-orange-50"
+                        : "bg-white/60 text-slate-700 hover:bg-purple-50"
                       : resolvedTheme === "dark"
                         ? "bg-white/[0.075] text-slate-300"
                         : "bg-slate-100/70 text-slate-400"
@@ -4086,14 +4100,14 @@ export default function PhotographerPage() {
                       info.mode === "reserved"
                         ? "text-purple-600"
                         : info.mode === "immediate"
-                          ? "text-emerald-600"
-                          : resolvedTheme === "dark" ? "text-slate-200/80" : "text-[--text-muted]"
+                          ? "text-purple-600"
+                          : resolvedTheme === "dark" ? "text-purple-100/80" : "text-purple-500/80"
                     }`}>
                       {transferStatusText}
                     </span>
                   </span>
                   {showBubble && (
-                    <span className="pointer-events-none absolute left-full top-1/2 z-[5] ml-2 w-max max-w-[170px] -translate-y-1/2 rounded-xl bg-slate-900 px-2 py-1 text-[10px] font-semibold text-white shadow-lg">
+                    <span className="pointer-events-none absolute left-full top-1/2 z-[5] ml-2 w-max max-w-[170px] -translate-y-1/2 rounded-xl bg-purple-950 px-2 py-1 text-[10px] font-semibold text-purple-50 shadow-lg shadow-purple-900/20">
                       {info.reason}
                     </span>
                   )}
@@ -5337,9 +5351,10 @@ export default function PhotographerPage() {
       }
 
       if (activeReassignmentNotice) {
+        const activeReassignmentNoticeIsWarning = activeReassignmentNoticeRole === "old" && !activeReassignmentKeepsOldOnline;
         return withMobilePausedEatingStrip(
-          <div className={`rounded-[24px] border p-5 backdrop-blur-2xl ${mobileGlassPanel} bg-orange-400/12`}>
-            <p className="text-[13px] font-extrabold leading-relaxed text-orange-600">{activeReassignmentMessage}</p>
+          <div className={`rounded-[24px] border p-5 backdrop-blur-2xl ${mobileGlassPanel} ${activeReassignmentNoticeIsWarning ? "bg-red-400/12" : "bg-purple-400/12"}`}>
+            <p className={`text-[13px] font-extrabold leading-relaxed ${activeReassignmentNoticeIsWarning ? "text-red-600" : "text-purple-600"}`}>{activeReassignmentMessage}</p>
             <button
               type="button"
               disabled={reassignmentNoticeSavingId === activeReassignmentNotice.id}
@@ -5347,7 +5362,7 @@ export default function PhotographerPage() {
                 activeReassignmentNotice,
                 activeReassignmentNoticeRole === "old" ? "acknowledgeOld" : "acknowledgeNew",
               )}
-              className="mt-4 min-h-[44px] w-full rounded-2xl bg-orange-500 px-4 text-[14px] font-extrabold text-white shadow-lg shadow-orange-500/20 disabled:opacity-60"
+              className={`mt-4 min-h-[44px] w-full rounded-2xl px-4 text-[14px] font-extrabold text-white shadow-lg disabled:opacity-60 ${activeReassignmentNoticeIsWarning ? "bg-red-500 shadow-red-500/20" : "bg-purple-500 shadow-purple-500/20"}`}
             >
               确认
             </button>
@@ -5397,11 +5412,6 @@ export default function PhotographerPage() {
               <div className={`rounded-[18px] border px-4 py-2 backdrop-blur-2xl ${mobileGlassPanel} bg-purple-400/10`}>
                 <p className="truncate text-[12px] font-extrabold text-purple-600">
                   {afterCompleteSwapRequest?.status === "ready_to_takeover" ? "点击开始接替" : "结束后前往"} · {afterCompleteSwapTask.roomNumber}室 · {afterCompleteSwapTask.category?.name ?? "任务"}
-                </p>
-                <p className="mt-0.5 truncate text-[10px] font-semibold text-purple-600/70">
-                  {afterCompleteSwapRequest?.status === "ready_to_takeover"
-                    ? "对方正在等待你就位，开始后原助理释放"
-                    : "已确认互换，完成当前任务后系统会转入待就位"}
                 </p>
               </div>
             </div>
@@ -5903,6 +5913,10 @@ export default function PhotographerPage() {
     ? resolvedTheme === "dark"
       ? "border-emerald-300/25 bg-emerald-950/90 text-emerald-200 shadow-black/50"
       : "border-emerald-100 bg-white/94 text-emerald-600 shadow-emerald-200/35"
+    : taskCreateNoticeTone === "transfer"
+      ? resolvedTheme === "dark"
+        ? "border-purple-300/25 bg-purple-950/90 text-purple-100 shadow-black/50"
+        : "border-purple-100 bg-white/94 text-purple-600 shadow-purple-200/35"
     : taskCreateNoticeTone === "info"
       ? resolvedTheme === "dark"
         ? "border-blue-300/25 bg-slate-950/92 text-blue-200 shadow-black/50"
@@ -5912,6 +5926,8 @@ export default function PhotographerPage() {
         : "border-red-100 bg-white/94 text-red-600 shadow-red-200/35";
   const taskCreateNoticeDotCls = taskCreateNoticeTone === "success"
     ? "bg-emerald-500"
+    : taskCreateNoticeTone === "transfer"
+      ? "bg-purple-500"
     : taskCreateNoticeTone === "info"
       ? "bg-blue-500"
       : "bg-red-500";
@@ -5920,11 +5936,11 @@ export default function PhotographerPage() {
     <div className="relative w-full h-full overflow-hidden select-none">
       {taskCreateError && (
         <div className="pointer-events-none fixed inset-0 z-[220] flex items-center justify-center px-4">
-          <div className={`flex max-w-sm items-center gap-2 rounded-3xl border px-5 py-3 text-center text-[13px] font-extrabold leading-relaxed shadow-2xl backdrop-blur-2xl ${taskCreateNoticeCls} ${
+          <div className={`grid w-[min(460px,calc(100vw-32px))] grid-cols-[10px_minmax(0,1fr)] items-start gap-3 rounded-3xl border px-5 py-3 text-left text-[13px] font-extrabold leading-relaxed shadow-2xl backdrop-blur-2xl ${taskCreateNoticeCls} ${
 	          taskCreateLimitWarning ? "collab-limit-shake" : ""
 	        }`}>
-            <span className={`h-2.5 w-2.5 shrink-0 rounded-full ${taskCreateNoticeDotCls}`} />
-            <span>{taskCreateError}</span>
+            <span className={`mt-1.5 h-2.5 w-2.5 rounded-full ${taskCreateNoticeDotCls}`} />
+            <span className="min-w-0 text-pretty">{taskCreateError}</span>
           </div>
         </div>
       )}
@@ -7627,9 +7643,9 @@ export default function PhotographerPage() {
               </button>
               <div className="mb-6 flex items-center gap-3">
                 <div className={`flex h-12 w-12 items-center justify-center rounded-full ${
-                  activeReassignmentNoticeRole === "old"
+                  activeReassignmentNoticeRole === "old" && !activeReassignmentKeepsOldOnline
                     ? "bg-red-500/15 text-red-600"
-                    : "bg-amber-500/15 text-amber-600"
+                    : "bg-purple-500/15 text-purple-600"
                 }`}>
                   {activeReassignmentNoticeRole === "old" ? (
                     <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
@@ -7642,7 +7658,9 @@ export default function PhotographerPage() {
                   )}
                 </div>
 		                <div>
-		                  <p className="text-[23px] font-bold leading-tight text-[--text-primary]">
+		                  <p className={`text-[23px] font-bold leading-tight ${
+                        activeReassignmentNoticeRole === "old" && !activeReassignmentKeepsOldOnline ? "text-[--text-primary]" : "text-purple-950"
+                      }`}>
 		                    {activeReassignmentNoticeRole === "old"
                         ? activeReassignmentKeepsOldOnline
                           ? "任务转派提醒"
@@ -7657,10 +7675,10 @@ export default function PhotographerPage() {
 	              <div className={`rounded-3xl border px-6 py-5 ${
 	                activeReassignmentNoticeRole === "old" && !activeReassignmentKeepsOldOnline
 	                  ? "border-red-100 bg-red-50/75"
-	                  : "border-amber-100 bg-amber-50/75"
+	                  : "border-purple-100 bg-purple-50/75"
 	              }`}>
 	                <p className={`whitespace-pre-wrap break-words text-[21px] leading-relaxed ${
-	                  activeReassignmentNoticeRole === "old" && !activeReassignmentKeepsOldOnline ? "text-red-900" : "text-amber-900"
+	                  activeReassignmentNoticeRole === "old" && !activeReassignmentKeepsOldOnline ? "text-red-900" : "text-purple-950"
 	                }`}>
 	                  {activeReassignmentMessage}
 	                </p>
@@ -7670,8 +7688,10 @@ export default function PhotographerPage() {
                 disabled={reassignmentNoticeSavingId === activeReassignmentNotice.id}
                 className={`mt-8 w-full rounded-3xl px-6 py-4 text-[21px] font-bold text-white shadow-lg transition-colors active:scale-[0.99] disabled:opacity-70 ${
                   activeReassignmentNoticeRole === "old"
-                    ? "bg-red-500 shadow-red-500/20 hover:bg-red-600"
-                    : "bg-amber-500 shadow-amber-500/20 hover:bg-amber-600"
+                    ? activeReassignmentKeepsOldOnline
+                      ? "bg-purple-500 shadow-purple-500/20 hover:bg-purple-600"
+                      : "bg-red-500 shadow-red-500/20 hover:bg-red-600"
+                    : "bg-purple-500 shadow-purple-500/20 hover:bg-purple-600"
                 }`}
                 onClick={() => handleAcknowledgeReassignmentNotice(
                   activeReassignmentNotice,
@@ -7704,28 +7724,28 @@ export default function PhotographerPage() {
                 ×
               </button>
               <div className="mb-6 flex items-center gap-3">
-                <div className="flex h-12 w-12 items-center justify-center rounded-full bg-amber-500/15 text-amber-600">
+                <div className="flex h-12 w-12 items-center justify-center rounded-full bg-purple-500/15 text-purple-600">
                   <TransferArrowsIcon className="h-7 w-7" />
                 </div>
                 <div>
-                  <p className="text-[23px] font-bold leading-tight text-[--text-primary]">任务转派提醒</p>
+                  <p className="text-[23px] font-bold leading-tight text-purple-950">任务转派提醒</p>
                   <p className="mt-1 text-[17px] leading-snug text-[--text-secondary]">
                     {`${transferTask.roomNumber}室 · ${transferTask.category?.name ?? "任务"} · P${transferTask.priority}`}
                   </p>
                 </div>
               </div>
-              <div className="rounded-3xl border border-amber-100 bg-amber-50/75 px-6 py-5">
-                <p className="whitespace-pre-wrap break-words text-[21px] leading-relaxed text-amber-900">
+              <div className="rounded-3xl border border-purple-100 bg-purple-50/75 px-6 py-5">
+                <p className="whitespace-pre-wrap break-words text-[21px] leading-relaxed text-purple-950">
                   {`当前任务转派是否与「${transferConfirmTarget.assistantName}」沟通协商确认？`}
                 </p>
-                <p className="mt-3 whitespace-pre-wrap break-words text-[15px] font-semibold leading-relaxed text-amber-900/72">
+                <p className="mt-3 whitespace-pre-wrap break-words text-[15px] font-semibold leading-relaxed text-purple-950/72">
                   点击确认后只会向目标助理发送接替确认请求；对方确认并实际接手前，你仍保持当前任务状态。
                 </p>
               </div>
               <button
                 type="button"
                 disabled={transferSavingAssistantId === transferConfirmTarget.assistantId}
-                className="mt-8 w-full rounded-3xl bg-amber-500 px-6 py-4 text-[21px] font-bold text-white shadow-lg shadow-amber-500/20 transition-colors hover:bg-amber-600 active:scale-[0.99] disabled:opacity-70"
+                className="mt-8 w-full rounded-3xl bg-purple-500 px-6 py-4 text-[21px] font-bold text-white shadow-lg shadow-purple-500/20 transition-colors hover:bg-purple-600 active:scale-[0.99] disabled:opacity-70"
                 onClick={() => void handleTransferAssistant(transferConfirmTarget.assistantId)}
               >
                 {transferSavingAssistantId === transferConfirmTarget.assistantId ? "确认中..." : "确认"}
@@ -7752,7 +7772,7 @@ export default function PhotographerPage() {
                   <TransferArrowsIcon className="h-7 w-7" />
                 </div>
                 <div>
-                  <p className="text-[23px] font-bold leading-tight text-[--text-primary]">收到移交请求</p>
+                  <p className="text-[23px] font-bold leading-tight text-purple-950">收到移交请求</p>
                   <p className="mt-1 text-[17px] leading-snug text-[--text-secondary]">
                     {`${incomingConfirmingTransferTask.roomNumber}室 · ${incomingConfirmingTransferTask.category?.name ?? "任务"} · P${incomingConfirmingTransferTask.priority}`}
                   </p>
@@ -7790,7 +7810,7 @@ export default function PhotographerPage() {
                     <button
                       type="button"
                       disabled={transferResponseSaving != null}
-                      className="min-h-[54px] flex-1 rounded-3xl bg-indigo-500 px-4 text-[17px] font-bold text-white shadow-lg shadow-indigo-500/20 transition-colors hover:bg-indigo-600 active:scale-[0.99] disabled:opacity-70"
+                      className="min-h-[54px] flex-1 rounded-3xl bg-purple-600 px-4 text-[17px] font-bold text-white shadow-lg shadow-purple-600/20 transition-colors hover:bg-purple-700 active:scale-[0.99] disabled:opacity-70"
                       onClick={() => void handleRespondTransferRequest(true, "after_complete")}
                     >
                       {transferResponseSaving === "after_complete" ? "处理中..." : "结束后前往"}
@@ -8884,11 +8904,6 @@ export default function PhotographerPage() {
                         {afterCompleteSwapRequest?.status === "ready_to_takeover" ? "点击开始接替" : "结束后前往"}
                       </span>
                       {lineRoomPhotoCategory(task, "text-purple-600/75")}
-                      <p className="max-w-full truncate text-[10px] font-semibold text-purple-600/65">
-                        {afterCompleteSwapRequest?.status === "ready_to_takeover"
-                          ? "对方正在等待你就位，开始后原助理释放"
-                          : "已确认互换，完成当前任务后转入待就位"}
-                      </p>
                     </div>
                   );
 

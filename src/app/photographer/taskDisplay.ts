@@ -93,7 +93,7 @@ export function taskParticipantForProfile(
   if (!task || !profileId) return null;
   return taskParticipants(task).find((participant) => {
     if (participant.assistantId !== profileId) return false;
-    if (participant.role === "primary") return task.assistantId === profileId;
+    if (participant.role === "primary") return task.assistantId === profileId || participant.status === "completed";
     return true;
   }) ?? null;
 }
@@ -159,6 +159,9 @@ export function taskAssigneeNames(task: TaskFromAPI | undefined | null, fallback
   const names = [
     task?.assistant?.name ?? fallbackName ?? null,
     ...helperParticipants(task).map((c) => c.assistant.name),
+    ...taskParticipants(task)
+      .filter((participant) => participant.status === "completed")
+      .map((participant) => participant.assistant.name),
   ].filter((name): name is string => Boolean(name));
   return [...new Set(names)];
 }

@@ -680,7 +680,6 @@ export async function prepareWaitingTaskForAssistantStart(taskId: string, assist
       taskId,
       targetAssistantId: assistantId,
       status: "ready_to_takeover",
-      responseMode: "after_complete",
     },
     orderBy: { targetConfirmedAt: "desc" },
   });
@@ -1368,11 +1367,13 @@ async function executePrimaryAssistantTransfer(
     await tx.taskCollaborator.updateMany({
       where: {
         taskId,
+        assistantId: fromAssistantId,
         role: "primary",
-        status: { not: "left" },
+        status: { in: ACTIVE_PARTICIPANT_STATUSES },
       },
       data: {
-        status: "left",
+        status: "completed",
+        completedAt: now,
         leftAt: now,
         effectiveWorkSeconds: flushedPrimary.effectiveWorkSeconds,
         workSegmentStartedAt: null,
@@ -1415,7 +1416,7 @@ async function executePrimaryAssistantTransfer(
     await tx.taskAssistantTransferRequest.updateMany({
       where: {
         taskId,
-        status: { in: ["confirming", "pending", "pending_after_complete"] },
+        status: { in: ["confirming", "pending", "pending_after_complete", "ready_to_takeover"] },
         ...(transferRequestId ? { id: { not: transferRequestId } } : {}),
       },
       data: { status: "canceled", canceledAt: now, reason: "任务已完成其他移交" },
@@ -1462,11 +1463,13 @@ async function executeImmediateAssistantSwap(
     await tx.taskCollaborator.updateMany({
       where: {
         taskId,
+        assistantId: fromAssistantId,
         role: "primary",
-        status: { not: "left" },
+        status: { in: ACTIVE_PARTICIPANT_STATUSES },
       },
       data: {
-        status: "left",
+        status: "completed",
+        completedAt: now,
         leftAt: now,
         effectiveWorkSeconds: flushedSourcePrimary.effectiveWorkSeconds,
         workSegmentStartedAt: null,
@@ -1475,11 +1478,13 @@ async function executeImmediateAssistantSwap(
     await tx.taskCollaborator.updateMany({
       where: {
         taskId: counterpartTaskId,
+        assistantId: targetAssistantId,
         role: "primary",
-        status: { not: "left" },
+        status: { in: ACTIVE_PARTICIPANT_STATUSES },
       },
       data: {
-        status: "left",
+        status: "completed",
+        completedAt: now,
         leftAt: now,
         effectiveWorkSeconds: flushedCounterpartPrimary.effectiveWorkSeconds,
         workSegmentStartedAt: null,
@@ -1549,7 +1554,7 @@ async function executeImmediateAssistantSwap(
     await tx.taskAssistantTransferRequest.updateMany({
       where: {
         id: { not: transferRequestId },
-        status: { in: ["confirming", "pending", "pending_after_complete"] },
+        status: { in: ["confirming", "pending", "pending_after_complete", "ready_to_takeover"] },
         OR: [
           { taskId },
           { taskId: counterpartTaskId },
@@ -1577,7 +1582,7 @@ export async function requestPrimaryAssistantTransfer(
   if (fromAssistantId === targetAssistantId) throw new Error("不能移交给自己");
   const { taskBuildingId } = await validateManualTransferTask(taskId, fromAssistantId);
   const existing = await prisma.taskAssistantTransferRequest.findFirst({
-    where: { taskId, status: { in: ["confirming", "pending", "pending_after_complete"] } },
+    where: { taskId, status: { in: ["confirming", "pending", "pending_after_complete", "ready_to_takeover"] } },
     select: { id: true },
   });
   if (existing) throw new Error("该任务已有移交请求，请等待目标助理处理后再操作");
@@ -1660,16 +1665,21 @@ export async function respondPrimaryAssistantTransfer(
 
   const kind = request.kind as AssistantTransferKind;
   if (kind === "handoff") {
-    await prisma.taskAssistantTransferRequest.update({
-      where: { id: request.id },
-      data: {
-        status: "pending",
-        responseMode: null,
-        targetConfirmedAt: now,
-        reason: "target_assistant_confirmed_handoff",
-      },
+    await prisma.$transaction(async (tx) => {
+      await tx.taskAssistantTransferRequest.update({
+        where: { id: request.id },
+        data: {
+          status: "ready_to_takeover",
+          responseMode: null,
+          targetConfirmedAt: now,
+          reason: "target_assistant_confirmed_handoff_ready_to_takeover",
+        },
+      });
+      await tx.profile.update({
+        where: { id: request.targetAssistantId },
+        data: { status: ProfileStatus.assigned },
+      });
     });
-    await processPendingTaskAssistantTransfers();
     return { mode: "accepted", requestId: request.id, kind, responseMode: null };
   }
 
@@ -3480,6 +3490,18 @@ export async function syncProfileStatus(): Promise<void> {
       },
     });
 
+    const readyTransferTargets = await prisma.taskAssistantTransferRequest.findMany({
+      where: {
+        targetAssistantId: { in: assistants.map((a) => a.id) },
+        status: "ready_to_takeover",
+        task: {
+          status: { in: [TaskStatus.waiting, TaskStatus.executing, TaskStatus.paused] },
+        },
+      },
+      select: { targetAssistantId: true },
+      distinct: ["targetAssistantId"],
+    });
+
     // 按助理聚合：取最高优先状态 executing > waiting > paused
     const taskStatusMap = new Map<string, string>();
     const rememberStatus = (assistantId: string | null, status: string) => {
@@ -3496,6 +3518,9 @@ export async function syncProfileStatus(): Promise<void> {
     }
     for (const c of activeCollaborations) {
       rememberStatus(c.assistantId, c.status);
+    }
+    for (const transfer of readyTransferTargets) {
+      rememberStatus(transfer.targetAssistantId, "waiting");
     }
 
     // 对比并修正
