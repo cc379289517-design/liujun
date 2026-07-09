@@ -805,6 +805,7 @@ export default function PhotographerPage() {
   const pendingRawTaskRef = useRef<TaskFromAPI | null>(null);
   const assistantActionPendingRef = useRef<Set<string>>(new Set());
   const recentTaskPatchesRef = useRef<Map<string, { task: TaskFromAPI; appliedAt: number }>>(new Map());
+  const recentHiddenTaskUntilRef = useRef<Map<string, { profileId: string; hiddenUntil: number }>>(new Map());
   const taskListRawRef = useRef<TaskFromAPI[]>([]);
   const assistantRawTasksRef = useRef<TaskFromAPI[]>([]);
   const publicQueueRawRef = useRef<TaskFromAPI[]>([]);
@@ -1314,8 +1315,17 @@ export default function PhotographerPage() {
     targetBuildingId = targetProfile.buildingId,
   ) => {
     const nowMs = Date.now();
+    const visibleTaskData = taskData.filter((task) => {
+      const hidden = recentHiddenTaskUntilRef.current.get(task.id);
+      if (hidden == null) return true;
+      if (hidden.hiddenUntil <= nowMs) {
+        recentHiddenTaskUntilRef.current.delete(task.id);
+        return true;
+      }
+      return hidden.profileId !== targetProfile.id;
+    });
     const patchedIds = new Set<string>();
-    const patchedTaskData = taskData.map((task) => {
+    const patchedTaskData = visibleTaskData.map((task) => {
       const patch = recentTaskPatchesRef.current.get(task.id);
       if (!patch) return task;
       if (nowMs - patch.appliedAt > RECENT_TASK_PATCH_TTL_MS) {
@@ -1330,6 +1340,8 @@ export default function PhotographerPage() {
         recentTaskPatchesRef.current.delete(taskId);
         continue;
       }
+      const hidden = recentHiddenTaskUntilRef.current.get(taskId);
+      if (hidden != null && hidden.hiddenUntil > nowMs && hidden.profileId === targetProfile.id) continue;
       if (!patchedIds.has(taskId) && !patchedTaskData.some((task) => task.id === taskId)) {
         patchedTaskData.push(patch.task);
       }
@@ -1512,6 +1524,7 @@ export default function PhotographerPage() {
     targetProfile = profile,
   ) => {
     if (!targetProfile) return;
+    recentHiddenTaskUntilRef.current.delete(updatedTask.id);
     recentTaskPatchesRef.current.set(updatedTask.id, { task: updatedTask, appliedAt: Date.now() });
     const byId = new Map<string, TaskFromAPI>();
     for (const task of [...taskListRawRef.current, ...assistantRawTasksRef.current]) {
@@ -1521,6 +1534,54 @@ export default function PhotographerPage() {
     byId.set(updatedTask.id, existing ? { ...existing, ...updatedTask } : updatedTask);
     applyTaskDataForProfile([...byId.values()], targetProfile, activeBuildingId ?? targetProfile.buildingId);
   }, [activeBuildingId, applyTaskDataForProfile, profile]);
+
+  const replaceVisibleTaskForProfile = useCallback((
+    updatedTask: TaskFromAPI,
+    keepTask: boolean,
+    targetProfile: { id: string; role: string; buildingId: number },
+  ) => {
+    const nowMs = Date.now();
+    if (keepTask) {
+      recentHiddenTaskUntilRef.current.delete(updatedTask.id);
+      recentTaskPatchesRef.current.set(updatedTask.id, { task: updatedTask, appliedAt: nowMs });
+    } else {
+      recentTaskPatchesRef.current.delete(updatedTask.id);
+      recentHiddenTaskUntilRef.current.set(updatedTask.id, { profileId: targetProfile.id, hiddenUntil: nowMs + RECENT_TASK_PATCH_TTL_MS });
+    }
+
+    const replaceOrRemove = (list: TaskFromAPI[]): TaskFromAPI[] => {
+      const withoutUpdated = list.filter((task) => task.id !== updatedTask.id);
+      return keepTask ? [...withoutUpdated, updatedTask] : withoutUpdated;
+    };
+
+    const nextTaskList = replaceOrRemove(taskListRawRef.current);
+    taskListRawRef.current = nextTaskList;
+    setTaskListRaw(nextTaskList);
+    setTasks(sortTasksByStatus(nextTaskList.map((task) => apiTaskToDisplay(task, isAssistantRole(targetProfile.role) ? targetProfile.id : undefined))));
+
+    if (isAssistantRole(targetProfile.role)) {
+      const assistantSource = assistantRawTasksRef.current.length > 0
+        ? assistantRawTasksRef.current
+        : taskListRawRef.current;
+      const nextAssistantTasks = replaceOrRemove(assistantSource);
+      assistantRawTasksRef.current = nextAssistantTasks;
+      setAssistantRawTasks(nextAssistantTasks);
+      const { current: active, paused, pending, deferredWaiting } = resolveAssistantTasks(nextAssistantTasks, targetProfile.id);
+      pendingRawTaskRef.current = pending;
+      setCurrentRawTask(active);
+      setPausedRawTask(paused);
+      setPendingRawTask(pending);
+      setDeferredWaitingRawTask(deferredWaiting);
+    } else {
+      assistantRawTasksRef.current = [];
+      pendingRawTaskRef.current = null;
+      setAssistantRawTasks([]);
+      setCurrentRawTask(null);
+      setPausedRawTask(null);
+      setPendingRawTask(null);
+      setDeferredWaitingRawTask(null);
+    }
+  }, []);
 
   const applyOptimisticAssistantTaskStatus = useCallback((task: TaskFromAPI, action: "start" | "complete") => {
     if (!profile || !isAssistantRole(profile.role)) return;
@@ -4512,15 +4573,7 @@ export default function PhotographerPage() {
       }
       const updated = await response.json() as TaskFromAPI & { transferResult?: { mode?: string } };
       const removeFromCurrentAssistant = updated.transferResult?.mode === "immediate" && updated.assistantId !== profile.id;
-      const mergeUpdated = (task: TaskFromAPI): TaskFromAPI => task.id === updated.id ? updated : task;
-      const mergeOrRemove = (list: TaskFromAPI[]) => removeFromCurrentAssistant
-        ? list.filter((task) => task.id !== updated.id)
-        : list.map(mergeUpdated);
-      setTaskListRaw(mergeOrRemove);
-      setAssistantRawTasks(mergeOrRemove);
-      setCurrentRawTask((prev) => prev?.id === updated.id ? (removeFromCurrentAssistant ? null : updated) : prev);
-      setPausedRawTask((prev) => prev?.id === updated.id ? (removeFromCurrentAssistant ? null : updated) : prev);
-      setPendingRawTask((prev) => prev?.id === updated.id ? (removeFromCurrentAssistant ? null : updated) : prev);
+      replaceVisibleTaskForProfile(updated, !removeFromCurrentAssistant, profile);
       refreshAssistants();
       showTaskCreateError("已发送移交请求；目标助理确认并实际接手前，你仍负责当前任务", false, "transfer");
       closeTransferModal();
@@ -4530,7 +4583,7 @@ export default function PhotographerPage() {
     } finally {
       setTransferSavingAssistantId(null);
     }
-  }, [closeTransferModal, profile, refreshAssistants, showTaskCreateError, transferSavingAssistantId, transferTask]);
+  }, [closeTransferModal, profile, refreshAssistants, replaceVisibleTaskForProfile, showTaskCreateError, transferSavingAssistantId, transferTask]);
 
   const handleRespondTransferRequest = useCallback(async (
     accepted: boolean,
@@ -4564,20 +4617,7 @@ export default function PhotographerPage() {
           updatedActiveTransfer?.targetAssistantId === profile.id &&
           (updatedActiveTransfer.status === "pending_after_complete" || updatedActiveTransfer.status === "ready_to_takeover")
         );
-      const mergeForTarget = (list: TaskFromAPI[]) => {
-        const withoutUpdated = list.filter((task) => task.id !== updated.id);
-        return shouldKeepForCurrentAssistant ? [...withoutUpdated, updated] : withoutUpdated;
-      };
-      const nextTaskList = mergeForTarget(taskListRaw);
-      const nextAssistantTasks = mergeForTarget(assistantRawTasks.length > 0 ? assistantRawTasks : taskListRaw);
-      setTaskListRaw(nextTaskList);
-      setAssistantRawTasks(nextAssistantTasks);
-      setTasks(sortTasksByStatus(nextTaskList.map((task) => apiTaskToDisplay(task, profile.id))));
-      const { current: active, paused, pending, deferredWaiting } = resolveAssistantTasks(nextAssistantTasks, profile.id);
-      setCurrentRawTask(active);
-      setPausedRawTask(paused);
-      setPendingRawTask(pending);
-      setDeferredWaitingRawTask(deferredWaiting);
+      replaceVisibleTaskForProfile(updated, shouldKeepForCurrentAssistant, profile);
       setDismissedTransferRequestIds((prev) => [...prev, incomingConfirmingTransfer.id]);
       refreshAssistants();
       const successMessage = !accepted
@@ -4599,11 +4639,10 @@ export default function PhotographerPage() {
     confirmingTransferForTask,
     incomingConfirmingTransfer,
     incomingConfirmingTransferTask,
-    assistantRawTasks,
     profile,
     refreshAssistants,
+    replaceVisibleTaskForProfile,
     showTaskCreateError,
-    taskListRaw,
     transferResponseSaving,
   ]);
 

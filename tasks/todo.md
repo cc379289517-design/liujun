@@ -6449,6 +6449,22 @@
 - 验证通过：`npx tsc --noEmit --pretty false --incremental false`、`git diff --check -- src/app/photographer/page.tsx tasks/todo.md tasks/lessons.md`、`DATABASE_URL=file:./prisma/loadtest.db npm run build`、本地隔离服务 `http://localhost:3100/photographer` 200、`/api/config` 200、`/api/workbench/sync?role=photographer&buildingId=1&full=1` 200。
 - 待后续：移交/互换响应仍有带可见性判断的手写任务源更新，应单独抽 `replaceVisibleTaskSetForProfile` 或进入 reducer/store，避免把业务可见性变化和普通补丁混在一起。
 
+#### 阶段 D 第八批计划：移交/互换可见性任务源收口
+
+- [x] 新增窄 helper：按“当前身份是否还应看见这条权威任务”统一替换或移除本地任务源，并同步 `taskListRawRef`、`assistantRawTasksRef`、`pendingRawTaskRef` 和展示 `tasks`。
+- [x] 替换 `handleTransferAssistant` 的移交成功路径，保留现有 `removeFromCurrentAssistant` 判断，不改变“目标真正接手前原助理仍负责”的业务提示。
+- [x] 替换 `handleRespondTransferRequest` 的确认/拒绝路径，保留现有 `shouldKeepForCurrentAssistant` 判断，不改变 `pause_and_go / after_complete / ready_to_takeover` 口径。
+- [x] 验证 `tsc`、`git diff --check`、生产构建与本地轻量接口；本批若只做前端任务源收口，不更新长期业务文档。
+
+#### 阶段 D 第八批评审：移交/互换可见性任务源收口
+
+- 已完成：新增 `replaceVisibleTaskForProfile()`，统一按“当前身份是否继续可见”替换或移除任务，并同步 `taskListRawRef`、`assistantRawTasksRef`、`pendingRawTaskRef`、当前/暂停/pending/让行任务卡和展示 `tasks`。
+- 已完成：移交发起成功路径改走 helper，继续保留原 `removeFromCurrentAssistant` 判断；互换/移交响应路径改走 helper，继续保留原 `shouldKeepForCurrentAssistant` 判断。
+- 已补充：新增 `recentHiddenTaskUntilRef`，对刚从当前身份可见任务源移除的任务做短 TTL 隐藏保护，避免旧轮询快照把已移走任务闪回；隐藏保护按 `profileId` 生效，避免身份切换后误隐藏目标助理该看到的任务。
+- 业务边界：本批只做前端本地任务源一致性和弱网闪回保护，不改变 API、后端状态命令、移交/互换、优先级、熨烫机或数据库结构；长期业务文档无需新增规则。
+- 验证通过：`npx tsc --noEmit --pretty false --incremental false`、`git diff --check -- src/app/photographer/page.tsx tasks/todo.md tasks/lessons.md`、`DATABASE_URL=file:./prisma/loadtest.db npm run build`、本地隔离服务 `http://localhost:3100/photographer` 200、`/api/config` 200、`/api/workbench/sync?role=photographer&buildingId=1&full=1` 200。
+- 待后续：阶段 D 剩余重点是完整 reducer/store 和继续拆 `CurrentTaskPanel`、`TaskListPanel`、`MapWorkbench` 的数据适配层。
+
 ### 阶段 E：验收与对抗审查
 
 - [ ] 基线压测完成后，先根据报告排序瓶颈，再决定是否进入 B/C/D 的第一批代码改动。
