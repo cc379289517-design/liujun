@@ -2553,6 +2553,7 @@ export default function PhotographerPage() {
 
         const publicQueueData = Array.isArray(syncData.publicQueue) ? syncData.publicQueue as TaskFromAPI[] : [];
         const taskData = Array.isArray(syncData.tasks) ? syncData.tasks as TaskFromAPI[] : [];
+        const hasNoticesPayload = Object.prototype.hasOwnProperty.call(syncData, "notices");
         const noticeData = Array.isArray(syncData.notices) ? syncData.notices as StandbyReassignmentNoticeFromAPI[] : [];
         const hasAreaSummaryPayload = Object.prototype.hasOwnProperty.call(syncData, "areaSummary");
         const nextAreaSummary = hasAreaSummaryPayload
@@ -2611,7 +2612,11 @@ export default function PhotographerPage() {
             setWorkbenchAreaSummary(nextAreaSummary ? { buildingId, summary: nextAreaSummary } : null);
           }
           replacePublicQueueRaw(mergedPublicQueue);
-          setReassignmentNotices(isAssistantRole(pollingProfile.role) ? noticeData : []);
+          if (!isAssistantRole(pollingProfile.role)) {
+            setReassignmentNotices([]);
+          } else if (hasNoticesPayload) {
+            setReassignmentNotices(noticeData);
+          }
           applyTaskDataForProfile(mergedTaskData, pollingProfile, buildingId);
         });
       } catch (error) {

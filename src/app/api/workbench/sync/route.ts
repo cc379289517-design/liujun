@@ -324,6 +324,40 @@ async function relatedChangedTaskIdsSince(
   };
 }
 
+function noticeVisibleWhereForAssistant(assistantId: string): Prisma.StandbyReassignmentNoticeWhereInput {
+  return {
+    OR: [
+      { newAssistantId: assistantId, newAssistantAcknowledgedAt: null },
+      { oldAssistantId: assistantId, oldAssistantAcknowledgedAt: null },
+    ],
+  };
+}
+
+function noticeChangedWhereForAssistant(
+  assistantId: string,
+  since: Date | null,
+): Prisma.StandbyReassignmentNoticeWhereInput | null {
+  if (!since) return null;
+  return {
+    OR: [
+      {
+        newAssistantId: assistantId,
+        OR: [
+          { createdAt: { gte: since } },
+          { newAssistantAcknowledgedAt: { gte: since } },
+        ],
+      },
+      {
+        oldAssistantId: assistantId,
+        OR: [
+          { createdAt: { gte: since } },
+          { oldAssistantAcknowledgedAt: { gte: since } },
+        ],
+      },
+    ],
+  };
+}
+
 type AssistantProfileRow = Prisma.ProfileGetPayload<{
   select: typeof PUBLIC_PROFILE_SELECT;
 }>;
@@ -1079,7 +1113,11 @@ export async function GET(request: NextRequest) {
       ? [{ updatedAt: "asc" as const }, { id: "asc" as const }]
       : taskOrderBy;
 
-    const [profiles, areaTaskIds, areaTasks, taskIds, tasks, notices] = await Promise.all([
+    const shouldCheckNotices = Boolean(profileId && isAssistantRole(role));
+    const noticeChangedWhere = profileId && isAssistantRole(role)
+      ? noticeChangedWhereForAssistant(profileId, since)
+      : null;
+    const [profiles, areaTaskIds, areaTasks, taskIds, tasks, noticeChanged] = await Promise.all([
       prisma.profile.findMany({
         where: {
           role: { in: ["assistant", "assistant_leader"] },
@@ -1115,29 +1153,31 @@ export async function GET(request: NextRequest) {
         orderBy: changedTaskOrderBy,
         take: SCOPED_TASK_LIMIT + 1,
       }),
-      profileId && isAssistantRole(role)
-        ? prisma.standbyReassignmentNotice.findMany({
-            where: {
-              OR: [
-                { newAssistantId: profileId, newAssistantAcknowledgedAt: null },
-                { oldAssistantId: profileId, oldAssistantAcknowledgedAt: null },
-              ],
-            },
-            include: {
-              task: {
-                select: {
-                  id: true,
-                  note: true,
-                  roomNumber: true,
-                  status: true,
-                },
+      noticeChangedWhere
+        ? prisma.standbyReassignmentNotice.findFirst({
+            where: noticeChangedWhere,
+            select: { id: true },
+          })
+        : Promise.resolve(null),
+    ]);
+    const shouldSendNotices = shouldCheckNotices && (!since || noticeChanged != null);
+    const notices = shouldSendNotices && profileId
+      ? await prisma.standbyReassignmentNotice.findMany({
+          where: noticeVisibleWhereForAssistant(profileId),
+          include: {
+            task: {
+              select: {
+                id: true,
+                note: true,
+                roomNumber: true,
+                status: true,
               },
             },
-            orderBy: { createdAt: "asc" },
-            take: 5,
-          })
-        : Promise.resolve([]),
-    ]);
+          },
+          orderBy: { createdAt: "asc" },
+          take: 5,
+        })
+      : undefined;
     const areaTaskIdsTruncated = areaTaskIds.length > AREA_TASK_LIMIT;
     const areaTasksTruncated = areaTasks.length > AREA_TASK_LIMIT;
     const scopedTaskIdsTruncated = taskIds.length > SCOPED_TASK_LIMIT;

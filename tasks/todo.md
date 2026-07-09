@@ -7112,6 +7112,26 @@
 - 不变量审查通过：同助理多个执行/暂停根任务 0、重复 current primary 0、熨烫 `using` 槽位超容量 0。
 - 验证通过：`git diff --check`、`npx prisma validate`、`npx tsc --noEmit --pretty false --incremental false`、`DATABASE_URL=file:./prisma/loadtest.db npm run build`。
 
+#### 阶段 E 第十八批计划：未确认提醒 delta 按变化下发
+
+- [x] `/api/workbench/sync` 中助理未确认转派提醒 `notices` 首轮 full 必带；delta 只有在该助理有新提醒或确认时间变化时才重新下发。
+- [x] 前端同步包没有 `notices` 字段时保留上一份提醒，不再把无变化 delta 误解为空提醒列表；非助理身份继续清空提醒。
+- [x] 保留提醒确认后的即时本地移除逻辑；其他设备/下一轮变化 delta 仍能通过确认时间变化校准。
+- [x] 不改变待就位转派、提醒确认、助理状态和任务派发业务规则；本批只减少助理端固定 delta 包。
+- [x] 验证 TypeScript、生产 build、接口样本、115 会话只读短测和状态不变量。
+
+#### 阶段 E 第十八批评审：未确认提醒 delta 按变化下发
+
+- 改动范围：`/api/workbench/sync` 的助理 `notices` 首轮 full 继续返回可见未确认提醒；delta 仅在该助理有新提醒或对应确认时间变化时查询并返回。
+- 前端兼容：同步包缺少 `notices` 时保留上一份提醒；非助理身份继续清空提醒，避免把字段缺失误解为“提醒已清空”。
+- 样本验证：`lt-assistant-013` full sync 返回 200 / 63165 bytes、`notices=5`；连续无变化 delta 均返回 200 / 723 bytes，且不带 `notices` 字段。
+- Smoke：`phase-e18-notices-gated-smoke-60s`，9 会话 60 秒，254 请求，0 错误；`/api/workbench/sync` p50 15.5ms、p95 23.8ms；delta 平均 660.9 bytes、p95 693 bytes。
+- 115 会话只读短测：`phase-e18-notices-gated-readonly-115-3min`，80 摄影师、30 助理、5 管理，6675 请求，0 错误；`/api/workbench/sync` p50 8.9ms、p95 19.6ms、p99 31.3ms。
+- 体积收益：full 平均 45216.5 bytes；delta 平均 1052.3 bytes、p95 1659 bytes。对比第十七批只读短测 delta 平均 1330.2 bytes，本批继续下降约 20.9%。
+- 异常审查：smoke/raw 266 行、readonly/raw 6711 行精确解析，未发现 HTTP 500、SQLite locked/busy 或 timeout。
+- 不变量审查通过：同助理多个执行/暂停根任务 0、重复 current primary 等价风险 0、熨烫 `using` 槽位超容量 0。
+- 验证通过：`git diff --check`、`npx prisma validate`、`npx tsc --noEmit --pretty false --incremental false`、`DATABASE_URL=file:./prisma/loadtest.db npm run build`。
+
 ### 阶段 A 评审
 
 - 已完成压测工具：新增 `scripts/loadtest/seed.ts`、`run.ts`、`report.ts`、`common.ts`，不引入 k6/artillery 等新依赖；使用 Node 内置 `fetch`、现有 `tsx` 和 Prisma/SQLite。
