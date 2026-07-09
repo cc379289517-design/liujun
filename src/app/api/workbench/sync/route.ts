@@ -16,7 +16,6 @@ import {
   serializeTaskAssistantAvatars,
 } from "@/lib/profilePayload";
 import {
-  assistantTaskScoreFactor,
   assistantTaskScoreFromSeconds,
   displayTaskCategoryName,
   EXTERNAL_MODEL_ASSIST_DISPLAY_NAME,
@@ -32,7 +31,6 @@ const AREA_TASK_LIMIT = 500;
 const SCOPED_TASK_LIMIT = 200;
 const RELATED_CHANGE_ID_LIMIT = 1000;
 const AREA_SUMMARY_CACHE_TTL_MS = 1000;
-const AREA_SUMMARY_RANKING_DETAIL_LIMIT = 8;
 const DISPLAY_TASK_TYPE_ORDER = ["手持", "服装穿戴", "手工DIY", "熨烫", EXTERNAL_MODEL_ASSIST_DISPLAY_NAME, "其他"];
 const DISPLAY_TASK_TYPE_SOLID_HEX: Record<string, string> = {
   "手持": "#f87171",
@@ -886,30 +884,20 @@ function buildAreaSummary(profiles: AssistantProfileRow[], tasks: QueueTask[]) {
       const orderedEntries = [...entries].sort((a, b) => a.completedAtMs - b.completedAtMs);
       const completedCount = orderedEntries.length;
       const workSeconds = orderedEntries.reduce((sum, entry) => sum + entry.workSeconds, 0);
-      const detailEntries = orderedEntries.slice(-AREA_SUMMARY_RANKING_DETAIL_LIMIT);
-      const details = detailEntries.map((entry) => {
-        const scoreFactor = assistantTaskScoreFactor(entry.taskName);
-        const serviceScore = assistantTaskScoreFromSeconds(entry.workSeconds, entry.taskName);
-        return {
-          taskId: entry.taskId,
-          taskTitle: `${entry.roomNumber}室 · ${entry.taskName}`,
-          serviceSeconds: entry.workSeconds,
-          scoreFactor,
-          serviceScore,
-          totalScore: serviceScore,
-        };
-      });
+      const score = orderedEntries.reduce((sum, entry) => (
+        sum + assistantTaskScoreFromSeconds(entry.workSeconds, entry.taskName)
+      ), 0);
       const profile = profileById.get(assistantId);
       const assistantName = profile?.name ?? orderedEntries.at(-1)?.assistantName ?? "未命名助理";
       return {
         assistantId,
         assistantName,
         avatar: profile?.avatar ?? null,
-        score: details.reduce((sum, detail) => sum + detail.totalScore, 0),
+        score,
         completedCount,
         workSeconds,
         lastCompletedAtMs: orderedEntries.at(-1)?.completedAtMs ?? 0,
-        details,
+        details: [],
       };
     })
     .sort((a, b) =>

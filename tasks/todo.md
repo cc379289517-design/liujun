@@ -7036,6 +7036,24 @@
 - 不变量审查通过：同助理多个执行/暂停根任务 0、重复 current primary 0、熨烫 `using` 槽位超容量 0；raw 日志未见 `locked/busy/timeout/500`。
 - 结论：`areaSummary` 摘要化现在达成“full 大包变小、只读 delta 保持极轻”的目标；混合 delta 仍随真实写入和队列变化放大，下一刀应继续做公共队列首屏详情/任务详情按需，或把 `areaSummary` 内排行明细彻底拆成按需详情。
 
+#### 阶段 E 第十四批计划：区域排行明细瘦身与计分修正
+
+- [x] `/api/workbench/sync` 的 `areaSummary.assistantRankingRows` 保留助理排行所需的姓名、头像、总分、完成数、总工时和最后完成时间；高频同步不再默认携带每位助理最近任务明细。
+- [x] 修正服务端排行计分：`score` 必须按该助理今日全部完成贡献累加，不能只按最近明细条目求和；同分排序继续按完成单数、服务时长、完成时间和姓名。
+- [x] 前端分数气泡兼容明细缺失：没有 `details` 时展示总分/完成数/服务时长摘要，不触发空明细渲染错误；旧回退路径仍可用本地任务算明细。
+- [x] 不改变派单、开始、完成、暂停、移交、优先级、熨烫机槽位和区域统计口径；本批只降低同步体积和前端解析成本。
+- [x] 验证 `git diff --check`、`npx prisma validate`、TypeScript、生产 build，并用隔离 `loadtest.db` 对比 `/api/workbench/sync?full=1` 响应体积。
+
+#### 阶段 E 第十四批评审：区域排行明细瘦身与计分修正
+
+- 改动范围：`src/app/api/workbench/sync/route.ts` 的 `areaSummary.assistantRankingRows` 不再携带每位助理最近任务明细；`src/app/photographer/page.tsx` 的分数气泡在明细为空时展示完成单数、累计服务时长和总分摘要。
+- 计分修正：服务端 `score` 改为按该助理今日全部完成贡献累加，避免此前只按最近 8 条明细求分导致长时段排行被低估。
+- 行为保持：派单、开始、完成、暂停、移交、优先级、熨烫机槽位、公共队列排序和区域统计口径均未改变；本批属于同步体积和解析成本优化。
+- 接口验证：隔离 `prisma/loadtest.db` 下 `/api/workbench/sync?profileId=lt-photographer-001&role=photographer&buildingId=1&view=photographer&full=1` 返回 200 / 56678 bytes；`assistantRankingRows=10`，`rankingDetailCount=0`，第一名 `score=1.4097`、`completedCount=5`、`workSeconds=5075`。
+- Smoke：`phase-e14-ranking-summary-smoke-60s`，9 会话 60 秒，254 请求，0 错误；`/api/workbench/sync` p50 18.9ms、p95 27.7ms、p99 117.8ms；full 平均 62940.8 bytes，delta 平均 3660.1 bytes、p95 5692 bytes。
+- 不变量审查通过：同助理多个执行/暂停根任务 0、重复 current primary 0、熨烫 `using` 槽位超容量 0。
+- 验证通过：`git diff --check`、`npx prisma validate`、`npx tsc --noEmit --pretty false --incremental false`、`DATABASE_URL=file:./prisma/loadtest.db npm run build`。
+
 ### 阶段 A 评审
 
 - 已完成压测工具：新增 `scripts/loadtest/seed.ts`、`run.ts`、`report.ts`、`common.ts`，不引入 k6/artillery 等新依赖；使用 Node 内置 `fetch`、现有 `tsx` 和 Prisma/SQLite。

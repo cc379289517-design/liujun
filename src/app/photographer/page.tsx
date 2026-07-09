@@ -1075,7 +1075,11 @@ export default function PhotographerPage() {
               ))}
             </div>
           ) : (
-            <div className="py-1 text-[10px] font-semibold text-[--text-muted]">暂无可展开的任务明细</div>
+            <div className={`rounded-xl px-2.5 py-2 text-[11px] font-semibold leading-relaxed text-[--text-muted] ring-1 ${
+              resolvedTheme === "dark" ? "ring-white/[0.10]" : "ring-slate-900/[0.08]"
+            }`}>
+              今日完成 {row.completedCount} 单，累计服务 {fmtMin(row.workSeconds / 60)}，综合分 {formatAssistantScore(row.score)} 分。
+            </div>
           )}
           <div className={`my-2 h-px ${
             resolvedTheme === "dark" ? "bg-white/[0.12]" : "bg-slate-900/[0.10]"
