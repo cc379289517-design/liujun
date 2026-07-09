@@ -27,6 +27,7 @@
 .mini-deploy.env
 database-backups/
 logs/
+ops-reports/
 *.pem
 
 # debug

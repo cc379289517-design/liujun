@@ -7279,6 +7279,23 @@
 - Mac mini 远程验证：`npm run client-metrics:report -- --ssh-target=lj@192.168.31.171 --remote-log-dir=/Users/lj/liujun-portable/liujun/logs` PASS；当前远程样本来自发布后模拟上报，interaction p75 120ms。
 - 阶段结论：真实体验采集从“有日志”升级为“有验收报告和失败门禁”；试运行一天后可直接用该报告判断手机/平板是否还需要最后一轮前端微调。
 
+#### 阶段 E 第三十批计划：日常总验收报告
+
+- [x] 新增 `scripts/daily-ops-check.ts`，顺序执行生产巡检和真实体验指标报告，合并输出总验收 Markdown。
+- [x] 新增 `npm run ops:daily-check`，默认读取 `.mini-deploy.env`，自动指向 Mac mini 生产站点、备份目录和日志目录。
+- [x] 生成 `ops-reports/daily-check-YYYYMMDD-HHMMSS.md` 留档，并把 `ops-reports/` 加入 `.gitignore`，避免运行报告进入 git。
+- [x] 支持透传阈值与远程参数；任一子门禁失败时总命令返回非 0。
+- [x] 验证总命令、TypeScript、生产 build、Mac mini 发布后总门禁；本批只编排只读验收，不改业务规则、不写数据库。
+
+#### 阶段 E 第三十批评审：日常总验收报告
+
+- 改动范围：新增 `scripts/daily-ops-check.ts`、`npm run ops:daily-check`，并将 `ops-reports/` 加入 `.gitignore`；不改业务规则、不写数据库。
+- 总验收内容：顺序执行 `prod:check` 和 `client-metrics:report`，合并输出 Markdown，任一子门禁失败则总命令非 0。
+- 默认配置：读取 `.mini-deploy.env` 的 `MINI_HOST/MINI_USER/MINI_PROJECT_DIR/SSH_OPTS`，自动检查 Mac mini 生产站点、远程 SQLite 备份、远程真实体验日志。
+- 留档机制：每次生成 `ops-reports/daily-check-YYYYMMDD-HHMMSS.md`，该目录已忽略，方便开店前/收工后留证但不污染 git。
+- 本地验证：`npm run ops:daily-check` PASS，生成 `ops-reports/daily-check-20260709-233427.md`；生产巡检和真实体验报告均 PASS。
+- 阶段结论：运营闭环从“多条命令记得跑”收敛为“一条总命令出报告”；剩余工作主要是让现场真实运行一天后复核报告，而不是继续代码重构。
+
 #### 阶段 E 第二十三批计划：开始/暂停状态切换维护降载
 
 - [x] `src/app/api/tasks/[id]/route.ts`：助理 `start` 和 `pause` 在完成原子状态写入、加载权威任务详情后，不再等待 `runTaskMaintenance()`；改为复用 `scheduleTaskMaintenance()` 异步触发普通维护。
