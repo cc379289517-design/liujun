@@ -1437,10 +1437,7 @@ export async function updateTaskParticipantStatus(
         }
 
         const currentIsIroning = isIroningTaskCategory(currentTask.category);
-        if (currentIsIroning && currentTask.ironingStage !== IroningTaskStage.using) {
-          const currentBuildingId = taskEffectiveBuildingId(currentTask);
-          if (currentBuildingId == null) throw new Error("Cannot resolve ironing task building");
-
+        if (!currentTask.parentTaskId) {
           const blockingPrimary = await tx.bookingTask.findFirst({
             where: {
               id: { not: taskId },
@@ -1450,7 +1447,7 @@ export async function updateTaskParticipantStatus(
             select: { id: true },
           });
           if (blockingPrimary) {
-            throw new Error("当前助理已有执行中或暂停中的任务，不能开始熨烫任务");
+            throw new Error("当前助理已有执行中或暂停中的任务，不能开始新的任务");
           }
 
           const blockingCollaboration = await tx.taskCollaborator.findFirst({
@@ -1465,8 +1462,13 @@ export async function updateTaskParticipantStatus(
             select: { id: true },
           });
           if (blockingCollaboration) {
-            throw new Error("当前助理已有执行中或暂停中的任务，不能开始熨烫任务");
+            throw new Error("当前助理已有执行中或暂停中的任务，不能开始新的任务");
           }
+        }
+
+        if (currentIsIroning && currentTask.ironingStage !== IroningTaskStage.using) {
+          const currentBuildingId = taskEffectiveBuildingId(currentTask);
+          if (currentBuildingId == null) throw new Error("Cannot resolve ironing task building");
 
           const slots = await availableIroningMachineSlotsIncludingClaims(currentBuildingId, taskId, tx);
           const requiredSlots = ironingMachineSlotsForTask(currentTask);

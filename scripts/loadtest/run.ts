@@ -52,6 +52,8 @@ type TaskLike = {
   photographerId?: string;
   assistantId?: string | null;
   status?: "waiting" | "executing" | "paused" | "completed";
+  ironingStage?: "none" | "waiting_machine" | "notified" | "using";
+  parentTaskId?: string | null;
   roomNumber?: string;
   category?: { id: number; name: string; estDuration?: number; maxDuration?: number };
   collaborators?: Array<{ assistantId?: string; status?: string; role?: string }>;
@@ -275,6 +277,35 @@ function taskBelongsToAssistant(task: TaskLike, assistantId: string): boolean {
     (task.collaborators ?? []).some((collaborator) => collaborator.assistantId === assistantId && collaborator.status !== "left");
 }
 
+function isIroningTask(task: TaskLike): boolean {
+  return task.category?.name?.includes("熨") === true;
+}
+
+function taskStatusForAssistant(task: TaskLike, assistantId: string): TaskLike["status"] | string | undefined {
+  const participant = (task.collaborators ?? []).find((collaborator) =>
+    collaborator.assistantId === assistantId &&
+    collaborator.status !== "left"
+  );
+  return participant?.status ?? task.status;
+}
+
+function assistantHasWorkingTask(tasks: TaskLike[], assistantId: string): boolean {
+  return tasks.some((task) => {
+    if (!taskBelongsToAssistant(task, assistantId)) return false;
+    const status = taskStatusForAssistant(task, assistantId);
+    return status === "executing" || status === "paused";
+  });
+}
+
+function canAttemptStartWaitingTask(task: TaskLike, assistantId: string, hasWorkingTask: boolean): boolean {
+  const status = taskStatusForAssistant(task, assistantId);
+  if (status !== "waiting") return false;
+  if (hasWorkingTask && !task.parentTaskId) return false;
+  if (!isIroningTask(task)) return true;
+  if (task.ironingStage === "waiting_machine") return false;
+  return true;
+}
+
 function stringIds(value: unknown): string[] | null {
   return Array.isArray(value)
     ? value.filter((id): id is string => typeof id === "string")
@@ -365,9 +396,10 @@ async function maybeCreateTask(
 async function maybeAssistantAction(persona: Persona, tasks: TaskLike[]): Promise<void> {
   if (persona.role !== "assistant" || random() > assistantActionChance) return;
   const ownTasks = tasks.filter((task) => taskBelongsToAssistant(task, persona.profile.id));
-  const waiting = ownTasks.find((task) => task.status === "waiting");
-  const paused = ownTasks.find((task) => task.status === "paused");
-  const executing = ownTasks.find((task) => task.status === "executing");
+  const hasWorkingTask = assistantHasWorkingTask(ownTasks, persona.profile.id);
+  const waiting = ownTasks.find((task) => canAttemptStartWaitingTask(task, persona.profile.id, hasWorkingTask));
+  const paused = ownTasks.find((task) => taskStatusForAssistant(task, persona.profile.id) === "paused");
+  const executing = ownTasks.find((task) => taskStatusForAssistant(task, persona.profile.id) === "executing");
 
   if (waiting) {
     await request(persona, "mixed-start", "PATCH", `/api/tasks/${waiting.id}`, {

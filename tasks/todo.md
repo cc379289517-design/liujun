@@ -6903,6 +6903,23 @@
 - 不变量审查通过：无同助理多个活跃真实主任务、无重复 current primary、无熨烫 `using` 槽位超容量；raw 日志未见 500、timeout、SQLite locked/busy。
 - 结论：读同步不再被服务端维护硬等待拖住，smoke p95 从上一轮约 45ms 降到 29ms；混合场景主要剩余压力来自写入期间 SQLite 读排队和无效 start 尝试。下一批优先减少前端/压测对“已有执行/暂停任务助理”的无效熨烫开始请求，并继续观察混合写下 sync p95。
 
+#### 阶段 E 第七批计划：减少无效 start 请求并补齐根任务开始兜底
+
+- [x] 前端工作台可开始任务池增加“已有执行/暂停真实工作时不展示普通根任务开始入口”的过滤，结构化插单 `parentTaskId`、继续任务和完成/暂停入口保持不变。
+- [x] 压测虚拟助理动作选择按当前助理参与状态判断 waiting/paused/executing，并避免在已有真实工作时继续尝试开始普通根任务。
+- [x] 后端状态命令补齐事务内兜底：普通根任务开始前重新确认当前助理没有其他执行中/暂停中真实工作；后端 409 保护保留，不改变优先级、熨烫机槽位或移交流程。
+- [x] 跑 TypeScript、生产 build 和短混合压测，对比 `mixed-start` 409 分类是否下降。
+
+#### 阶段 E 第七批评审：减少无效 start 请求并补齐根任务开始兜底
+
+- 改动范围：`src/lib/scheduler.ts` 在 `updateTaskParticipantStatus(..., "executing")` 的事务内增加普通根任务开始兜底；`src/app/photographer/taskDisplay.ts` 和 `page.tsx` 让工作台候选池在已有执行/暂停真实工作时不展示普通根任务开始入口；`scripts/loadtest/run.ts` 的虚拟助理动作选择同步该口径。
+- 行为保持：结构化插单 `parentTaskId` 仍可按原流程开始；暂停/继续/完成、熨烫机槽位、高优先级兜底、移交接手流程不改变。后端兜底用于保证一人一真实主任务不变量，前端过滤用于减少误点和无效请求。
+- 第一轮验证暴露问题：只过滤熨烫 start 后，`mixed-start` 409 从 257 降到 28，但 SQL 发现 2 名助理出现多个执行/暂停根任务，说明后端缺少通用根任务开始兜底，不能提交该版本。
+- 修正后短测：`root-start-guard-mixed-115-3min`，80 摄影师、30 助理、5 管理，7271 请求，119 个错误全部为业务 409；`mixed-start` 仅 18 次 409，其中 14 次高优先级兜底、4 次熨烫机暂时无空位；摄影师发布上限 101 次。
+- 延迟与体积：`/api/workbench/sync` p50 10.4ms、p95 112.8ms、p99 193ms、max 447.2ms；delta 6469 次共 68.01MB、平均 11024.6 bytes、p95 17880 bytes；full 110 次共 10.96MB。
+- 不变量审查通过：同助理多个执行/暂停根任务 0、重复 current primary 0、熨烫 `using` 槽位超容量 0；raw 日志未见 500、timeout、SQLite locked/busy。
+- 结论：本批把压测中最重的无效 start 409 去掉，同时补上后端状态正确性兜底；剩余 409 主要是摄影师发布上限和高优先级规则，属于业务保护。下一步可继续优化摄影师端发布按钮/压测创建节流，减少已满队列时的重复发单请求。
+
 ### 阶段 A 评审
 
 - 已完成压测工具：新增 `scripts/loadtest/seed.ts`、`run.ts`、`report.ts`、`common.ts`，不引入 k6/artillery 等新依赖；使用 Node 内置 `fetch`、现有 `tsx` 和 Prisma/SQLite。

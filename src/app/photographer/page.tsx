@@ -5595,7 +5595,7 @@ export default function PhotographerPage() {
             : "";
 
   const mobileActionableWaitingTasks = isAssistantProfile && profile
-    ? assistantStartCandidateTasksForProfile(taskListRaw, areaTasks, profile.id, freeIroningMachineCount)
+    ? assistantStartCandidateTasksForProfile(taskListRaw, areaTasks, profile.id, freeIroningMachineCount, { blockRootStartWhenWorking: true })
     : [];
   const afterCompleteSwapTask = isAssistantProfile && profile
     ? taskListRaw.find((task) =>
@@ -9156,7 +9156,7 @@ export default function PhotographerPage() {
                     isWorkbenchPendingAction(workbenchTaskActionKey(action, task.id, profile?.id))
                   );
                   const actionableWaitingTasks = profile
-                    ? assistantStartCandidateTasksForProfile(taskListRaw, areaTasks, profile.id, freeIroningMachineCount)
+                    ? assistantStartCandidateTasksForProfile(taskListRaw, areaTasks, profile.id, freeIroningMachineCount, { blockRootStartWhenWorking: true })
                     : [];
 	                  const selectedActionableWaitingTasks = actionableWaitingTasks;
 	                  const recommendedIroningTaskId = freeIroningMachineCount > 0

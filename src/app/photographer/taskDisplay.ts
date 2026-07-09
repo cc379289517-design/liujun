@@ -319,6 +319,15 @@ export function actionableWaitingTasksForProfile(taskData: TaskFromAPI[], profil
   });
 }
 
+export function hasWorkingTaskForProfile(taskData: TaskFromAPI[], profileId?: string): boolean {
+  if (!profileId) return false;
+  return taskData.some((task) => {
+    if (!taskBelongsToProfile(task, profileId)) return false;
+    const status = taskStatusForProfile(task, profileId) ?? task.status;
+    return status === "executing" || status === "paused";
+  });
+}
+
 function taskDurationSortMinutes(task: TaskFromAPI): number {
   return task.category?.minDuration ?? task.category?.estDuration ?? task.category?.maxDuration ?? 9999;
 }
@@ -379,16 +388,23 @@ export function assistantStartCandidateTasksForProfile(
   areaTaskData: TaskFromAPI[],
   profileId: string,
   freeIroningMachineCount: number,
+  options?: { blockRootStartWhenWorking?: boolean },
 ): TaskFromAPI[] {
+  const blockRootStart = options?.blockRootStartWhenWorking === true &&
+    hasWorkingTaskForProfile([...ownTaskData, ...areaTaskData], profileId);
+  const canOfferStart = (task: TaskFromAPI) =>
+    !(blockRootStart && !task.parentTaskId) &&
+    canStartWaitingTaskWithIroningCapacity(task, profileId, freeIroningMachineCount);
+
   const ownCandidates = actionableWaitingTasksForProfile(ownTaskData, profileId)
-    .filter((task) => canStartWaitingTaskWithIroningCapacity(task, profileId, freeIroningMachineCount));
+    .filter(canOfferStart);
   const seen = new Set(ownCandidates.map((task) => task.id));
   const areaIroningCandidates = areaTaskData.filter((task) => {
     if (seen.has(task.id)) return false;
     if (!isIroningTask(task) || task.status !== "waiting") return false;
     if (task.parentTaskId != null || task.isLocked) return false;
     if (helperParticipants(task).length > 0) return false;
-    return canStartWaitingTaskWithIroningCapacity(task, profileId, freeIroningMachineCount);
+    return canOfferStart(task);
   });
 
   const sortedCandidates = [...ownCandidates, ...areaIroningCandidates].sort((a, b) => {
