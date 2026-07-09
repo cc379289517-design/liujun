@@ -6639,7 +6639,7 @@
 - 本地验证：在隔离 `loadtest.db` 写入测试背景后，默认 `/api/config` 200 且约 2.2KB，`/api/config?keys=workbench_page_background&includeLarge=1` 200 可取原始 data URL，`/api/config/background` 200 且返回 `image/png`、68 bytes、ETag。
 - 验证通过：`npx tsc --noEmit --pretty false --incremental false`、`git diff --check -- src/app/api/config/route.ts src/app/api/config/background/route.ts tasks/todo.md tasks/lessons.md`、`DATABASE_URL=file:./prisma/loadtest.db npm run build`、本地隔离服务 `http://localhost:3100/photographer` 200、`/api/config` 200、`/api/config/background` 200、`/api/workbench/sync?role=photographer&buildingId=1&full=1` 200。
 - 验证备注：本地 dev 首启仍需清理 `.next` 中 macOS `._*` 伴生文件和 Turbopack 缓存；本轮清理 898 个伴生文件。`/api/workbench/sync` 在隔离 `loadtest.db` 触发熨烫队列维护日志，不影响 `prisma/dev.db` 或生产库。
-- 待部署验证：Mac mini 生产当前背景曾让 `/api/config` 达到约 3.97MB；部署后应降到 KB 级，背景由 `/api/config/background` 承载。
+- Mac mini 部署验证：生产默认 `/api/config` 从约 3.97MB 降到 3095 bytes；`/api/config?keys=workbench_page_background&includeLarge=1` 仍可取回约 3.97MB 原始 data URL；`/api/config/background` 返回 `image/jpeg`、约 2.98MB、带 ETag。`/photographer` 200，`com.spad.local` 正常运行。
 
 ### 阶段 E：验收与对抗审查
 
