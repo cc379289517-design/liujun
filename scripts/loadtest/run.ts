@@ -84,7 +84,7 @@ const visiblePollMs = Math.max(500, numberArg(args, "poll-ms", mode === "smoke" 
 const adminPollMs = Math.max(1000, numberArg(args, "admin-poll-ms", mode === "smoke" ? 4000 : 12_000));
 const writeRatePerMin = Math.max(0, numberArg(args, "write-rate-per-min", mode === "mixed" ? 60 : 0));
 const assistantActionChance = Math.max(0, Math.min(1, numberArg(args, "assistant-action-chance", mode === "mixed" ? 0.25 : 0)));
-const fullSyncIntervalMs = Math.max(10_000, numberArg(args, "full-sync-interval-ms", 60_000));
+const fullSyncIntervalMs = Math.max(10_000, numberArg(args, "full-sync-interval-ms", 5 * 60_000));
 const allowWrites = booleanArg(args, "allow-writes", false);
 const allowRemote = booleanArg(args, "allow-remote", false);
 const serverPid = Math.floor(numberArg(args, "server-pid", Number(process.env.SERVER_PID ?? "0"))) || undefined;

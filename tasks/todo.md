@@ -6300,7 +6300,7 @@
 
 ### 阶段 C：同步接口降载与数据结构
 
-- [x] `/api/workbench/sync` 从有界全量快照推进到兼容型 `since` 增量同步：服务端返回 `syncMode/syncToken`、变更任务片段、当前可见 `taskIds/publicQueueIds` 和 `publicQueueSummary`，前端首轮全量、后续增量、约 60 秒全量校准。
+- [x] `/api/workbench/sync` 从有界全量快照推进到兼容型 `since` 增量同步：服务端返回 `syncMode/syncToken`、变更任务片段、当前可见 `taskIds/publicQueueIds` 和 `publicQueueSummary`，前端首轮全量、后续增量、约 5 分钟全量校准。
 - [ ] 继续把同步接口推进到摘要化：返回 `removedIds/completedIds`、首屏公共队列摘要和当前助理状态，减少 profiles/公共队列重复传输。
 - [ ] 公共队列不再每轮 `take: 500` 深 include；首屏返回摘要，任务详情按需补齐。
 - [x] 服务端计算 `assistantStatus`，减少前端每轮从任务列表反推人员状态。
@@ -6806,6 +6806,41 @@
 - 生产复核：第二十五批发布后 Mac mini `/api/buildings` full 为 19813561 bytes、summary 为 134 bytes；本批发布后 full 降到 17601 bytes、summary 仍为 134 bytes，首个平面图字段为 `/api/buildings/1/floor-plan` 且不再是 `data:`。
 - 生产图片路由复核：Mac mini `/api/buildings/1/floor-plan` 200 / 2132825 bytes / `image/png`，带 ETag 后 304 / 0 bytes；平面图大图改由浏览器图片缓存承担，不再进入每次楼座 JSON 解析。
 - 待后续：如果楼座平面图仍长期存在 SQLite 文本中，下一阶段可考虑把图片迁到 `public/uploads` 或对象存储；本批先解决高频 JSON 传输和解析压力。
+
+#### 阶段 E 第一批计划：最新版本正式复跑压测
+
+- [x] 重新 seed 隔离 `prisma/loadtest.db`，使用最新代码启动本地生产服务，避免复用上一轮脏库或旧服务。
+- [x] 执行 smoke、80 摄影师 + 30 助理 + 5 管理只读压测、同画像混合写压测；记录 p50/p95/p99、错误分类、响应体、full/delta 同步体积、CPU/内存。
+- [x] 压测后执行不变量审查：重复 active primary、同助理多个执行/暂停根任务、熨烫 using 超机器容量、HTTP 500、SQLite locked/busy。
+- [x] 和上一轮基线对比，判断楼座平面图、profile、building view、增量同步后是否达到 150 人一天使用的轻量目标。
+- [x] 根据报告决定下一瓶颈：公共队列摘要、assistantStatus 摘要、统计聚合、前端局部 store，或进入对抗性审查。
+
+#### 阶段 E 第一批评审：最新版本正式复跑压测
+
+- Smoke：9 会话 60 秒，254 请求，0 错误；`/api/workbench/sync` p95 30ms，delta 平均 6618 bytes，full 平均 104602 bytes。
+- 只读正式压测：80 摄影师、30 助理、5 管理，10 分钟，22229 请求，0 错误；`/api/workbench/sync` p50 9.4ms、p95 22.2ms、p99 208.5ms、max 337.7ms。
+- 只读体积：full 1100 次共 108.58MB、平均 103509 bytes；delta 20878 次共 127.46MB、平均 6402 bytes、p95 6524 bytes；10 分钟总同步约 236MB，较最早基线 2.17GB 明显下降。
+- 混合正式压测：同画像 20 分钟，47782 请求，系统错误 0；3074 个错误全部是业务 409，其中 1951 次为“已有执行/暂停任务不能开始熨烫”，1123 次为摄影师发布上限队列满。
+- 混合延迟：`/api/workbench/sync` p50 9.3ms、p95 132.6ms、p99 184.5ms、max 922.3ms；`complete` p95 333.9ms，`create` p95 195.1ms，`start` p95 29.2ms。
+- 混合体积：full 2200 次共 264.14MB、平均 125894 bytes、p95 137781 bytes；delta 41795 次共 284.53MB、平均 7139 bytes、p95 9591 bytes。
+- 不变量审查通过：重复 current primary 为 0；同助理多个执行/暂停根任务为 0；熨烫 `using` 槽位无超容量；raw 日志无 500、timeout、SQLite locked/busy。
+- 结论：状态正确性和 delta 轻量同步已经基本达标；当前剩余主要瓶颈是每 60 秒一次 full 校准包仍会把 sync p95 bytes 和混合 p95 latency 顶上去，下一批优先降低全量校准频率，并保留截断/缺失时立即 full 重拉。
+
+#### 阶段 E 第二批计划：降低工作台定时 full 校准频率
+
+- [x] 工作台轮询保留首轮 `full=1`，但定时 full 校准从 60 秒降频到 5 分钟；常规实时更新继续走 `since` delta。
+- [x] `syncTruncated`、缺失可见任务详情、身份/楼座切换仍立即清空 token 并触发 full，保证正确性兜底不被削弱。
+- [x] 压测工具默认 full sync 间隔同步改为 5 分钟，确保后续压测贴近真实前端策略。
+- [x] 复跑短只读/混合验证 p95 bytes 是否回落到 delta 级，同时确认无 500、无 locked/busy、无状态不变量破坏。
+
+#### 阶段 E 第二批评审：降低工作台定时 full 校准频率
+
+- 改动范围：`src/app/photographer/page.tsx` 将工作台定时 full 校准间隔统一为 `WORKBENCH_FULL_SYNC_INTERVAL_MS = 5 * 60_000`；`scripts/loadtest/run.ts` 默认 `--full-sync-interval-ms` 同步改为 5 分钟，压测画像贴近真实前端策略。
+- 正确性兜底保持：首轮没有 token 时仍 `full=1`；`syncTruncated`、缺失 `taskIds/publicQueueIds`、本地缺少可见任务详情时仍清空 token 并立即 full 重拉；身份/楼座变化会重建轮询 effect 并重置 token。
+- 只读短测：`full5-readonly-115-3min`，80 摄影师、30 助理、5 管理，6674 请求，0 错误；`/api/workbench/sync` p50 9.2ms、p95 22.2ms、p99 205ms、max 496ms；p95 bytes 6509，full 110 次共 10.9MB，delta 6487 次共 40.07MB、p95 bytes 6509。
+- 混合短测：`full5-mixed-115-3min`，同画像 7241 请求，343 个错误全部为预期业务 409；`/api/workbench/sync` p50 9ms、p95 134.4ms、p99 234.7ms、max 360.3ms；p95 bytes 14427，full 110 次共 10.94MB，delta 6488 次共 52.42MB、p95 bytes 13608。
+- 不变量审查通过：短测后无重复 current primary、无同助理多个执行/暂停根任务、熨烫 `using` 未超机器容量；raw 日志未见 500、timeout、SQLite locked/busy。
+- 结论：定时 full 从 60 秒降到 5 分钟后，只读 p95 bytes 已稳定回落到 delta 级；混合场景 p95 bytes 也从 full 大包主导变成 delta 变化量主导。后续主要瓶颈转向混合写期间的 SQLite 读排队、管理端 `/api/tasks` 列表体积和业务 409 日志噪音。
 
 ### 阶段 A 评审
 

@@ -175,6 +175,7 @@ import {
 const COMPLETION_REGISTRATION_REASON_OPTIONS = ["超时过长", "耗时异常", "其他反馈"] as const;
 type CompletionRegistrationReasonType = typeof COMPLETION_REGISTRATION_REASON_OPTIONS[number];
 const PAGE_NOW_REFRESH_MS = 60_000;
+const WORKBENCH_FULL_SYNC_INTERVAL_MS = 5 * 60_000;
 const LIVE_TIMER_REFRESH_MS = 1_000;
 const DISPLAY_TASK_TYPE_ORDER = ["手持", "服装穿戴", "手工DIY", "熨烫", EXTERNAL_MODEL_ASSIST_DISPLAY_NAME, "其他"];
 const DISPLAY_TASK_TYPE_SOLID_BG: Record<string, string> = {
@@ -2436,7 +2437,7 @@ export default function PhotographerPage() {
     let timer: ReturnType<typeof setTimeout> | null = null;
     const activeDelay = 3000;
     const hiddenDelay = 12000;
-    const fullSyncIntervalMs = 60_000;
+    const fullSyncIntervalMs = WORKBENCH_FULL_SYNC_INTERVAL_MS;
     workbenchSyncTokenRef.current = null;
     workbenchLastFullSyncAtRef.current = 0;
     const scheduleNext = (delayMs: number) => {
