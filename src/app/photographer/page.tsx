@@ -25,6 +25,12 @@ import IroningMachineIcon from "./IroningMachineIcon";
 import MobileQuickBookingPanel from "./MobileQuickBookingPanel";
 import MobileTaskCard from "./MobileTaskCard";
 import {
+  type WorkbenchPendingAction,
+  useWorkbenchPendingActions,
+  workbenchProfileActionKey,
+  workbenchTaskActionKey,
+} from "./useWorkbenchPendingActions";
+import {
   mobileTaskStatusForProfile as deriveMobileTaskStatusForProfile,
   mobileTaskStatusMeta as deriveMobileTaskStatusMeta,
   mobileTaskSubtitle as deriveMobileTaskSubtitle,
@@ -162,17 +168,6 @@ type CompletionRegistrationReasonType = typeof COMPLETION_REGISTRATION_REASON_OP
 const PAGE_NOW_REFRESH_MS = 60_000;
 const LIVE_TIMER_REFRESH_MS = 1_000;
 const RECENT_TASK_PATCH_TTL_MS = 8_000;
-type WorkbenchPendingAction =
-  | "start"
-  | "complete"
-  | "pause"
-  | "resume"
-  | "cancel"
-  | "create"
-  | "create-mobile"
-  | "transfer"
-  | "transfer-response"
-  | "priority-upgrade";
 const DISPLAY_TASK_TYPE_ORDER = ["手持", "服装穿戴", "手工DIY", "熨烫", EXTERNAL_MODEL_ASSIST_DISPLAY_NAME, "其他"];
 const DISPLAY_TASK_TYPE_SOLID_BG: Record<string, string> = {
   ...CAT_SOLID_BG,
@@ -185,14 +180,6 @@ const DISPLAY_TASK_TYPE_SOLID_HEX: Record<string, string> = {
 
 function displayTaskTypeGroupName(name: string | null | undefined, priority?: number | null): string {
   return isExternalModelAssistTaskName(name, priority) ? EXTERNAL_MODEL_ASSIST_DISPLAY_NAME : taskTypeGroupName(name);
-}
-
-function workbenchTaskActionKey(action: WorkbenchPendingAction, taskId: string, actorId?: string | null): string {
-  return `${action}:${actorId ?? "unknown"}:${taskId}`;
-}
-
-function workbenchProfileActionKey(action: WorkbenchPendingAction, profileId?: string | null): string {
-  return `${action}:${profileId ?? "unknown"}`;
 }
 
 function TransferArrowsIcon({ className = "" }: { className?: string }) {
@@ -785,7 +772,11 @@ export default function PhotographerPage() {
   const [reassignmentNoticeSavingId, setReassignmentNoticeSavingId] = useState<string | null>(null);
   const [dismissedReassignmentNoticeIds, setDismissedReassignmentNoticeIds] = useState<string[]>([]);
   const [manualPauseSlide, setManualPauseSlide] = useState<{ taskId: string; expanded: boolean } | null>(null);
-  const [workbenchPendingActionKeys, setWorkbenchPendingActionKeys] = useState<string[]>([]);
+  const {
+    beginPendingAction: beginWorkbenchPendingAction,
+    endPendingAction: endWorkbenchPendingAction,
+    isPendingAction: isWorkbenchPendingAction,
+  } = useWorkbenchPendingActions();
   /** 待就位被插单时，被让行的原较低优先任务 */
   const [deferredWaitingRawTask, setDeferredWaitingRawTask] = useState<TaskFromAPI | null>(null);
   /** 助理视角下最近一次拉取到的原始任务列表（用于列表点击「待就位」与目标任务对齐） */
@@ -814,7 +805,6 @@ export default function PhotographerPage() {
   const publicQueuePromotionSignatureRef = useRef("");
   const publicQueuePromotionRunningRef = useRef(false);
   const pendingRawTaskRef = useRef<TaskFromAPI | null>(null);
-  const assistantActionPendingRef = useRef<Set<string>>(new Set());
   const recentTaskPatchesRef = useRef<Map<string, { task: TaskFromAPI; appliedAt: number }>>(new Map());
   const recentHiddenTaskUntilRef = useRef<Map<string, { profileId: string; hiddenUntil: number }>>(new Map());
   const taskListRawRef = useRef<TaskFromAPI[]>([]);
@@ -844,19 +834,6 @@ export default function PhotographerPage() {
   useEffect(() => {
     publicQueueRawRef.current = publicQueueRaw;
   }, [publicQueueRaw]);
-  const beginWorkbenchPendingAction = useCallback((actionKey: string): boolean => {
-    if (assistantActionPendingRef.current.has(actionKey)) return false;
-    assistantActionPendingRef.current.add(actionKey);
-    setWorkbenchPendingActionKeys((prev) => prev.includes(actionKey) ? prev : [...prev, actionKey]);
-    return true;
-  }, []);
-  const endWorkbenchPendingAction = useCallback((actionKey: string) => {
-    assistantActionPendingRef.current.delete(actionKey);
-    setWorkbenchPendingActionKeys((prev) => prev.filter((key) => key !== actionKey));
-  }, []);
-  const isWorkbenchPendingAction = useCallback((actionKey: string) => (
-    workbenchPendingActionKeys.includes(actionKey)
-  ), [workbenchPendingActionKeys]);
   const assistantDockById = useMemo(
     () => new Map(assistants.map((assistant) => [assistant.id, assistant])),
     [assistants],

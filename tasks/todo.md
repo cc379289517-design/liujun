@@ -6483,6 +6483,23 @@
 - 验证通过：`npx tsc --noEmit --pretty false --incremental false`、`git diff --check -- src/app/photographer/page.tsx tasks/todo.md tasks/lessons.md`、`DATABASE_URL=file:./prisma/loadtest.db npm run build`、本地隔离服务 `http://localhost:3100/photographer` 200、`/api/config` 200、`/api/workbench/sync?role=photographer&buildingId=1&full=1` 200。
 - 验证备注：首次构建因 Google 字体瞬时请求失败中断，复核字体 URL 可访问后重跑通过；本地 dev 首次启动遇到 `.next` Turbopack 缓存被 macOS `._*` 污染，按既有安全脚本清理 `.next` 缓存后通过，不涉及数据库。
 
+#### 阶段 D 第十批计划：pendingActions 本地 store 第一批
+
+- [x] 新增 `useWorkbenchPendingActions`：用 reducer + ref 管理 pending action keys，保留同步 ref 拦截和 React state 反馈双层能力。
+- [x] 将 `WorkbenchPendingAction`、`workbenchTaskActionKey`、`workbenchProfileActionKey` 从 `page.tsx` 移到独立 hook 文件，作为后续 `tasksById/profilesById` store 的第一块边界。
+- [x] 页面继续使用 `beginWorkbenchPendingAction/endWorkbenchPendingAction/isWorkbenchPendingAction` 语义，不改变按钮文案、业务动作、API 请求或状态命令。
+- [x] 验证 `tsc`、`git diff --check`、生产构建和本地轻量接口；本批只做前端状态管理边界拆分，不更新长期业务文档。
+
+#### 阶段 D 第十批评审：pendingActions 本地 store 第一批
+
+- 已完成：新增 `src/app/photographer/useWorkbenchPendingActions.ts`，用 reducer 管理 pending keys、用 ref 做同一事件循环内的重复提交拦截。
+- 已完成：`WorkbenchPendingAction`、`workbenchTaskActionKey()`、`workbenchProfileActionKey()` 从 `page.tsx` 外移，页面只保留 `begin/end/is` 语义调用，后续可继续扩展到 `tasksById/profilesById/optimisticPatches`。
+- 已保持：开始、完成、暂停、继续、取消、桌面/手机发单、移交、移交响应、人工提权的按钮文案、禁用逻辑、API 请求和本地补丁语义不变。
+- 业务边界：本批只做前端 pendingActions 状态管理边界拆分，不改变创建任务、移交/互换、提权审批、优先级、熨烫机或数据库结构；长期业务文档无需新增规则。
+- 验证通过：`npx tsc --noEmit --pretty false --incremental false`、`git diff --check -- src/app/photographer/page.tsx src/app/photographer/useWorkbenchPendingActions.ts tasks/todo.md tasks/lessons.md`、`DATABASE_URL=file:./prisma/loadtest.db npm run build`、本地隔离服务 `http://localhost:3100/photographer` 200、`/api/config` 200、`/api/workbench/sync?role=photographer&buildingId=1&full=1` 200。
+- 验证备注：本地 dev 首启再次遇到 `.next` Turbopack 缓存被 macOS `._*` 污染，按既有安全脚本清理 `.next` 缓存后通过，不涉及数据库。
+- 待后续：继续把任务源 helpers 抽成 `tasksById + optimisticPatches` reducer，逐步减少 `taskListRaw/currentRawTask/tasks/publicQueueRaw` 多组状态并行维护。
+
 ### 阶段 E：验收与对抗审查
 
 - [ ] 基线压测完成后，先根据报告排序瓶颈，再决定是否进入 B/C/D 的第一批代码改动。
