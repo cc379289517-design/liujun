@@ -6624,6 +6624,23 @@
 - 验证备注：本地 dev 首启仍需清理 `.next` 中 macOS `._*` 伴生文件和 Turbopack 缓存；本轮清理 883 个伴生文件。`/api/workbench/sync` 在隔离 `loadtest.db` 触发熨烫队列维护日志，不影响 `prisma/dev.db` 或生产库。
 - 待后续：继续推进公共队列摘要/首屏截断、`areaTasks`/排行榜派生索引，或拆解 `now` 对区域统计和队列列表的秒级重算影响。
 
+#### 阶段 D 第十八批计划：配置接口大字段瘦身
+
+- [x] `/api/config` 默认返回轻量配置，排除 `workbench_page_background` 这类大字段；新增 `includeLarge=1`、`keys=` 或等价方式用于按需读取完整值。
+- [x] 摄影师工作台和后台首页先加载轻量配置，再单独按需读取页面背景，避免每次健康检查/初始化都下载 4MB base64 JSON。
+- [x] 后台空间设置保留上传/清除背景的保存入口；本批先保证兼容现有 `data:image/...` 配置，不直接删除生产背景数据。
+- [x] 验证本地和 Mac mini `/api/config` 响应体显著下降，同时 `/api/config?keys=workbench_page_background&includeLarge=1` 能取回背景；跑 `tsc`、`git diff --check`、生产构建和本地页面冒烟。
+
+#### 阶段 D 第十八批评审：配置接口大字段瘦身
+
+- 已完成：`/api/config` 默认不再返回 `workbench_page_background` 的原始 base64 大字段，而是返回 `/api/config/background?v=updatedAt` 轻量 URL；需要原始值时可用 `includeLarge=1`，并支持 `keys=` 限定读取。
+- 已完成：新增 `/api/config/background` 图片路由，兼容现有 `data:image/...;base64,...` 配置，返回真实图片 `Content-Type`、`Content-Length`、`ETag`，浏览器可走图片缓存/304，而不是每次解析大 JSON。
+- 已保持：后台空间设置继续通过 `PUT /api/config` 保存/清除背景；不迁移、不删除生产 `system_config` 中的原始背景数据；摄影师端和后台端原本消费 `value` 作为 URL，自动接入轻量图片路由。
+- 本地验证：在隔离 `loadtest.db` 写入测试背景后，默认 `/api/config` 200 且约 2.2KB，`/api/config?keys=workbench_page_background&includeLarge=1` 200 可取原始 data URL，`/api/config/background` 200 且返回 `image/png`、68 bytes、ETag。
+- 验证通过：`npx tsc --noEmit --pretty false --incremental false`、`git diff --check -- src/app/api/config/route.ts src/app/api/config/background/route.ts tasks/todo.md tasks/lessons.md`、`DATABASE_URL=file:./prisma/loadtest.db npm run build`、本地隔离服务 `http://localhost:3100/photographer` 200、`/api/config` 200、`/api/config/background` 200、`/api/workbench/sync?role=photographer&buildingId=1&full=1` 200。
+- 验证备注：本地 dev 首启仍需清理 `.next` 中 macOS `._*` 伴生文件和 Turbopack 缓存；本轮清理 898 个伴生文件。`/api/workbench/sync` 在隔离 `loadtest.db` 触发熨烫队列维护日志，不影响 `prisma/dev.db` 或生产库。
+- 待部署验证：Mac mini 生产当前背景曾让 `/api/config` 达到约 3.97MB；部署后应降到 KB 级，背景由 `/api/config/background` 承载。
+
 ### 阶段 E：验收与对抗审查
 
 - [ ] 基线压测完成后，先根据报告排序瓶颈，再决定是否进入 B/C/D 的第一批代码改动。
