@@ -161,6 +161,7 @@ const COMPLETION_REGISTRATION_REASON_OPTIONS = ["超时过长", "耗时异常", 
 type CompletionRegistrationReasonType = typeof COMPLETION_REGISTRATION_REASON_OPTIONS[number];
 const PAGE_NOW_REFRESH_MS = 60_000;
 const LIVE_TIMER_REFRESH_MS = 1_000;
+type WorkbenchPendingAction = "start" | "complete" | "pause" | "resume" | "cancel" | "create-mobile";
 const DISPLAY_TASK_TYPE_ORDER = ["手持", "服装穿戴", "手工DIY", "熨烫", EXTERNAL_MODEL_ASSIST_DISPLAY_NAME, "其他"];
 const DISPLAY_TASK_TYPE_SOLID_BG: Record<string, string> = {
   ...CAT_SOLID_BG,
@@ -173,6 +174,14 @@ const DISPLAY_TASK_TYPE_SOLID_HEX: Record<string, string> = {
 
 function displayTaskTypeGroupName(name: string | null | undefined, priority?: number | null): string {
   return isExternalModelAssistTaskName(name, priority) ? EXTERNAL_MODEL_ASSIST_DISPLAY_NAME : taskTypeGroupName(name);
+}
+
+function workbenchTaskActionKey(action: WorkbenchPendingAction, taskId: string, actorId?: string | null): string {
+  return `${action}:${actorId ?? "unknown"}:${taskId}`;
+}
+
+function workbenchProfileActionKey(action: WorkbenchPendingAction, profileId?: string | null): string {
+  return `${action}:${profileId ?? "unknown"}`;
 }
 
 function TransferArrowsIcon({ className = "" }: { className?: string }) {
@@ -760,6 +769,7 @@ export default function PhotographerPage() {
   const [reassignmentNoticeSavingId, setReassignmentNoticeSavingId] = useState<string | null>(null);
   const [dismissedReassignmentNoticeIds, setDismissedReassignmentNoticeIds] = useState<string[]>([]);
   const [manualPauseSlide, setManualPauseSlide] = useState<{ taskId: string; expanded: boolean } | null>(null);
+  const [workbenchPendingActionKeys, setWorkbenchPendingActionKeys] = useState<string[]>([]);
   /** 待就位被插单时，被让行的原较低优先任务 */
   const [deferredWaitingRawTask, setDeferredWaitingRawTask] = useState<TaskFromAPI | null>(null);
   /** 助理视角下最近一次拉取到的原始任务列表（用于列表点击「待就位」与目标任务对齐） */
@@ -817,6 +827,19 @@ export default function PhotographerPage() {
   useEffect(() => {
     publicQueueRawRef.current = publicQueueRaw;
   }, [publicQueueRaw]);
+  const beginWorkbenchPendingAction = useCallback((actionKey: string): boolean => {
+    if (assistantActionPendingRef.current.has(actionKey)) return false;
+    assistantActionPendingRef.current.add(actionKey);
+    setWorkbenchPendingActionKeys((prev) => prev.includes(actionKey) ? prev : [...prev, actionKey]);
+    return true;
+  }, []);
+  const endWorkbenchPendingAction = useCallback((actionKey: string) => {
+    assistantActionPendingRef.current.delete(actionKey);
+    setWorkbenchPendingActionKeys((prev) => prev.filter((key) => key !== actionKey));
+  }, []);
+  const isWorkbenchPendingAction = useCallback((actionKey: string) => (
+    workbenchPendingActionKeys.includes(actionKey)
+  ), [workbenchPendingActionKeys]);
   const assistantDockById = useMemo(
     () => new Map(assistants.map((assistant) => [assistant.id, assistant])),
     [assistants],
@@ -2779,6 +2802,8 @@ export default function PhotographerPage() {
       showTaskCreateError("只有任务发布摄影师可以取消未开始任务");
       return;
     }
+    const actionKey = workbenchTaskActionKey("cancel", taskId, profile.id);
+    if (!beginWorkbenchPendingAction(actionKey)) return;
     setRemovingTaskId(taskId);
     try {
       // 调用 API 删除任务
@@ -2789,6 +2814,7 @@ export default function PhotographerPage() {
           showTaskCreateError(data?.error || "任务取消失败，请稍后重试");
           setRemovingTaskId(null);
           setHoveredTagId(null);
+          endWorkbenchPendingAction(actionKey);
           return;
         }
         refreshAssistants();
@@ -2799,14 +2825,16 @@ export default function PhotographerPage() {
         setAssistantRawTasks((prev) => prev.filter((t) => t.id !== taskId));
         setRemovingTaskId(null);
         setHoveredTagId(null);
+        endWorkbenchPendingAction(actionKey);
       }, 450);
     } catch (error) {
       console.error("Failed to cancel task", error);
       showTaskCreateError("任务取消失败，请检查网络后重试");
       setRemovingTaskId(null);
       setHoveredTagId(null);
+      endWorkbenchPendingAction(actionKey);
     }
-  }, [profile, removingTaskId, refreshAssistants, showTaskCreateError]);
+  }, [beginWorkbenchPendingAction, endWorkbenchPendingAction, profile, removingTaskId, refreshAssistants, showTaskCreateError]);
 
   const canCancelSpecifiedAssistant = useCallback((task: TaskFromAPI | null | undefined) => {
     if (!task || !task.isSpecified || !task.assistantId) return false;
@@ -3641,6 +3669,8 @@ export default function PhotographerPage() {
   const handlePauseCurrentTask = useCallback(async () => {
     if (!currentRawTask || !profile || manualPauseSlide) return;
     const task = currentRawTask;
+    const actionKey = workbenchTaskActionKey("pause", task.id, profile.id);
+    if (!beginWorkbenchPendingAction(actionKey)) return;
     setManualPauseSlide({ taskId: task.id, expanded: false });
     try {
       await nextAnimationFrame();
@@ -3655,7 +3685,6 @@ export default function PhotographerPage() {
       if (!res.ok) {
         const errText = await res.text().catch(() => "");
         console.error("暂停任务失败", res.status, errText);
-        setManualPauseSlide(null);
         return;
       }
 
@@ -3695,19 +3724,19 @@ export default function PhotographerPage() {
       refreshAssistants();
     } catch (e) {
       console.error("Failed to pause task", e);
-      setManualPauseSlide(null);
       return;
+    } finally {
+      setManualPauseSlide(null);
+      endWorkbenchPendingAction(actionKey);
     }
-    setManualPauseSlide(null);
-  }, [currentRawTask, manualPauseSlide, profile, refreshAssistants]);
+  }, [beginWorkbenchPendingAction, currentRawTask, endWorkbenchPendingAction, manualPauseSlide, profile, refreshAssistants]);
 
   // 助理：切换任务状态（targetTask 优先，避免界面展示任务与 currentRawTask 短暂不一致时点击无效）
   const handleAssistantStatusChange = useCallback(async (action: "start" | "complete", targetTask?: TaskFromAPI | null) => {
     const task = targetTask ?? currentRawTask;
     if (!task || !profile) return;
-    const actionKey = `${action}:${task.id}:${profile.id}`;
-    if (assistantActionPendingRef.current.has(actionKey)) return;
-    assistantActionPendingRef.current.add(actionKey);
+    const actionKey = workbenchTaskActionKey(action, task.id, profile.id);
+    if (!beginWorkbenchPendingAction(actionKey)) return;
     try {
       const res = await fetch(`/api/tasks/${task.id}`, {
         method: "PATCH",
@@ -3754,19 +3783,25 @@ export default function PhotographerPage() {
     } catch (e) {
       console.error("Failed to update task status", e);
     } finally {
-      assistantActionPendingRef.current.delete(actionKey);
+      endWorkbenchPendingAction(actionKey);
     }
-  }, [activeBuildingId, applyOptimisticAssistantTaskStatus, applyTaskDataForProfile, currentRawTask, mergeAuthoritativeTaskForProfile, profile, refreshAssistants, showTaskCreateError]);
+  }, [activeBuildingId, applyOptimisticAssistantTaskStatus, applyTaskDataForProfile, beginWorkbenchPendingAction, currentRawTask, endWorkbenchPendingAction, mergeAuthoritativeTaskForProfile, profile, refreshAssistants, showTaskCreateError]);
 
   const handleResumePausedTask = useCallback(async (task: TaskFromAPI) => {
-    if (manualPauseSlide) return;
-    setManualPauseSlide({ taskId: task.id, expanded: true });
-    await nextAnimationFrame();
-    setManualPauseSlide({ taskId: task.id, expanded: false });
-    await wait(MANUAL_PAUSE_SLIDE_MS);
-    await handleAssistantStatusChange("start", task);
-    setManualPauseSlide(null);
-  }, [handleAssistantStatusChange, manualPauseSlide]);
+    if (manualPauseSlide || !profile) return;
+    const actionKey = workbenchTaskActionKey("resume", task.id, profile.id);
+    if (!beginWorkbenchPendingAction(actionKey)) return;
+    try {
+      setManualPauseSlide({ taskId: task.id, expanded: true });
+      await nextAnimationFrame();
+      setManualPauseSlide({ taskId: task.id, expanded: false });
+      await wait(MANUAL_PAUSE_SLIDE_MS);
+      await handleAssistantStatusChange("start", task);
+    } finally {
+      setManualPauseSlide(null);
+      endWorkbenchPendingAction(actionKey);
+    }
+  }, [beginWorkbenchPendingAction, endWorkbenchPendingAction, handleAssistantStatusChange, manualPauseSlide, profile]);
 
   const handleBook = useCallback(
     (catName: string, dur: BuiltCategory["durations"][number], e: React.MouseEvent) => {
@@ -5384,6 +5419,8 @@ export default function PhotographerPage() {
       return;
     }
 
+    const actionKey = workbenchProfileActionKey("create-mobile", profile.id);
+    if (!beginWorkbenchPendingAction(actionKey)) return;
     const priority = parseInt(dur.priority.replace("P", ""), 10);
     const tempId = `temp-mobile-${Date.now()}`;
     const createdAt = new Date().toISOString();
@@ -5454,8 +5491,10 @@ export default function PhotographerPage() {
       setTasks((prev) => prev.filter((task) => task.id !== tempId));
       showTaskCreateError("任务创建失败，请检查网络后重试");
       console.error("Failed to create mobile task", error);
+    } finally {
+      endWorkbenchPendingAction(actionKey);
     }
-  }, [photographerMaxActiveTasks, profile, profileCurrentWorkbenchRoom, refreshAssistants, selectedQuickBookAssistant, selectedQuickBookAssistantCanSubmit, showTaskCreateError, taskPublishBuilding, taskPublishBuildingId]);
+  }, [beginWorkbenchPendingAction, endWorkbenchPendingAction, photographerMaxActiveTasks, profile, profileCurrentWorkbenchRoom, refreshAssistants, selectedQuickBookAssistant, selectedQuickBookAssistantCanSubmit, showTaskCreateError, taskPublishBuilding, taskPublishBuildingId]);
 
   const mobileTaskStatusForProfile = useCallback((task: TaskFromAPI) => (
     deriveMobileTaskStatusForProfile(task, { isAssistantProfile, profileId: profile?.id })
@@ -5627,6 +5666,14 @@ export default function PhotographerPage() {
     const canStart = primaryAction === "start" && status === "waiting";
     const canComplete = primaryAction === "complete" && status === "executing";
     const canResume = primaryAction === "resume";
+    const primaryActionPending = primaryAction === "resume"
+      ? isWorkbenchPendingAction(workbenchTaskActionKey("resume", task.id, profile?.id)) ||
+        isWorkbenchPendingAction(workbenchTaskActionKey("start", task.id, profile?.id))
+      : primaryAction != null
+        ? isWorkbenchPendingAction(workbenchTaskActionKey(primaryAction, task.id, profile?.id))
+        : false;
+    const pausePending = isWorkbenchPendingAction(workbenchTaskActionKey("pause", task.id, profile?.id));
+    const cancelPending = isWorkbenchPendingAction(workbenchTaskActionKey("cancel", task.id, profile?.id));
     const priorityControl = renderPriorityUpgradeControl(task, true);
     const completionControl = renderCompletionRegistrationControl(task, true);
     const footerControls = priorityControl || completionControl
@@ -5651,6 +5698,9 @@ export default function PhotographerPage() {
         footer={footerControls}
         primaryAction={primaryAction}
         showCancel={options?.showCancel}
+        primaryActionPending={primaryActionPending}
+        pausePending={pausePending}
+        cancelPending={cancelPending}
         onPrimaryAction={() => {
           if (canStart || canComplete) void handleAssistantStatusChange(primaryAction, task);
           if (canResume) void handleResumePausedTask(task);
@@ -5659,7 +5709,11 @@ export default function PhotographerPage() {
         onCancel={() => handleCancelTask(task.id)}
       />
     );
-  }, [handleAssistantStatusChange, handleCancelTask, handlePauseCurrentTask, handleResumePausedTask, isAssistantProfile, mobileGlassPanel, mobileRecommendedIroningTaskId, mobileTaskStatusForProfile, mobileTaskStatusMeta, mobileTaskSubtitle, mobileTaskTimeLine, profile?.id, renderCompletionRegistrationControl, renderEscalationBadge, renderPriorityUpgradeControl]);
+  }, [handleAssistantStatusChange, handleCancelTask, handlePauseCurrentTask, handleResumePausedTask, isAssistantProfile, isWorkbenchPendingAction, mobileGlassPanel, mobileRecommendedIroningTaskId, mobileTaskStatusForProfile, mobileTaskStatusMeta, mobileTaskSubtitle, mobileTaskTimeLine, profile?.id, renderCompletionRegistrationControl, renderEscalationBadge, renderPriorityUpgradeControl]);
+
+  const mobileCreatePending = profile
+    ? isWorkbenchPendingAction(workbenchProfileActionKey("create-mobile", profile.id))
+    : false;
 
   const renderMobileCurrentView = useCallback(() => {
     if (isAssistantProfile) {
@@ -5827,6 +5881,7 @@ export default function PhotographerPage() {
             glassPanelClassName={mobileGlassPanel}
             softPanelClassName={mobileSoftPanel}
             isDark={resolvedTheme === "dark"}
+            createPending={mobileCreatePending}
             onTogglePicker={() => setMobileQuickBookAssistantPickerOpen((open) => !open)}
             onClearAssistant={() => setSpecifiedQuickBookAssistantId(null)}
             onSelectAssistant={(assistantId) => {
@@ -5902,6 +5957,7 @@ export default function PhotographerPage() {
     mobileActionableWaitingTasks,
     mobileGlassPanel,
     mobileIcon,
+    mobileCreatePending,
     mobileQuickBookCategory,
     mobileQuickBookAssistantPickerOpen,
     mobileRecommendedIroningTaskId,
@@ -8878,6 +8934,9 @@ export default function PhotographerPage() {
                     const status = myTaskStatus(task);
                     return { ...taskTimingForProfile(task, profile?.id), status };
                   };
+                  const taskActionPending = (action: WorkbenchPendingAction, task: TaskFromAPI) => (
+                    isWorkbenchPendingAction(workbenchTaskActionKey(action, task.id, profile?.id))
+                  );
                   const actionableWaitingTasks = profile
                     ? assistantStartCandidateTasksForProfile(taskListRaw, areaTasks, profile.id, freeIroningMachineCount)
                     : [];
@@ -8892,6 +8951,7 @@ export default function PhotographerPage() {
                       const timing = myTaskTiming(task);
 	                      const pauseSlideActive = manualPauseSlide?.taskId === task.id;
 	                      const pauseSlideCollapsed = pauseSlideActive && !manualPauseSlide.expanded;
+                      const resumePending = taskActionPending("resume", task) || taskActionPending("start", task);
                       if (withResume) {
                         return (
 	                          <div
@@ -8914,16 +8974,17 @@ export default function PhotographerPage() {
 	                              {lineRoomPhotoCategory(task, "text-gray-500")}
 	                              <LiveHMSBlock source={timing} mode="paused" colorClassName="text-gray-600" />
 	                            </div>
-                            <button
-                              type="button"
-                              onClick={() => handleResumePausedTask(task)}
-                              disabled={pauseSlideActive}
-                              className={`absolute left-[24%] right-[24%] bottom-2.5 z-[2] h-[34px] rounded-lg border border-green-600 bg-green-500 text-[15px] font-extrabold text-white shadow-sm transition-[opacity,background-color,transform] duration-150 active:scale-[0.99] disabled:cursor-default ${
-                                pauseSlideCollapsed ? "pointer-events-none opacity-0" : "opacity-100 hover:bg-green-600"
-                              }`}
-                            >
-                              继续任务
-                            </button>
+	                            <button
+	                              type="button"
+	                              onClick={() => handleResumePausedTask(task)}
+	                              disabled={pauseSlideActive || resumePending}
+                              aria-busy={resumePending}
+	                              className={`absolute left-[24%] right-[24%] bottom-2.5 z-[2] h-[34px] rounded-lg border border-green-600 bg-green-500 text-[15px] font-extrabold text-white shadow-sm transition-[opacity,background-color,transform] duration-150 active:scale-[0.99] disabled:cursor-default ${
+	                                pauseSlideCollapsed ? "pointer-events-none opacity-0" : "opacity-100 hover:bg-green-600"
+	                              }`}
+	                            >
+	                              {resumePending ? "继续中..." : "继续任务"}
+	                            </button>
                           </div>
                         );
                     }
@@ -8964,9 +9025,11 @@ export default function PhotographerPage() {
                   };
 
 	                  // 渲染执行中任务区块（有插单任务时：可完成当前任务，也可短暂离开）
-	                  const renderExecutingWithPause = (task: TaskFromAPI, flex: number) => {
-	                    const timing = myTaskTiming(task);
-	                    const isExternalModelFollow = isExternalModelFollowTask(task);
+		                  const renderExecutingWithPause = (task: TaskFromAPI, flex: number) => {
+		                    const timing = myTaskTiming(task);
+		                    const isExternalModelFollow = isExternalModelFollowTask(task);
+                    const completePending = taskActionPending("complete", task);
+                    const pausePending = taskActionPending("pause", task);
                     const bgCls = isExternalModelFollow ? "bg-purple-400/20" : "bg-orange-400/20";
                     const hoverCls = isExternalModelFollow ? "hover:bg-purple-400/10" : "hover:bg-orange-400/10";
                     const dotBg = isExternalModelFollow ? "bg-purple-500/20" : "bg-orange-500/20";
@@ -8985,26 +9048,30 @@ export default function PhotographerPage() {
                         className={`w-full min-h-0 rounded-xl ${bgCls} relative overflow-hidden`}
                         style={flexStyle(flex)}
                       >
-                        <button
-                          type="button"
-                          onClick={() => handleAssistantStatusChange("complete", task)}
-                          className={`absolute inset-x-0 top-0 bottom-[42px] z-[1] flex cursor-pointer flex-col items-center justify-center gap-1 px-2 pt-1.5 pb-1 transition-colors ${hoverCls} active:scale-[0.99]`}
-                        >
+	                        <button
+	                          type="button"
+	                          onClick={() => handleAssistantStatusChange("complete", task)}
+                          disabled={completePending}
+                          aria-busy={completePending}
+	                          className={`absolute inset-x-0 top-0 bottom-[42px] z-[1] flex cursor-pointer flex-col items-center justify-center gap-1 px-2 pt-1.5 pb-1 transition-colors ${hoverCls} active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-70`}
+	                        >
                           <div className={`w-8 max-w-full min-w-0 min-h-0 shrink-[2] max-h-[min(2rem,26%)] h-[min(2rem,26%)] rounded-full ${dotBg} flex items-center justify-center overflow-hidden`}>
                             <div className={`min-w-0 min-h-0 w-[42%] h-[42%] max-w-[min(72%,1.1rem)] max-h-[min(72%,1.1rem)] rounded-full ${dotColor} animate-pulse`} />
                           </div>
-	                          <span className={`text-[13px] font-extrabold ${textColor}`}>完成当前任务</span>
+		                          <span className={`text-[13px] font-extrabold ${textColor}`}>{completePending ? "完成中..." : "完成当前任务"}</span>
 	                          {renderEscalationBadge(task, { compact: true })}
 	                          {lineRoomPhotoCategory(task, subColor)}
 	                          <LiveHMSBlock source={timing} mode="effective" colorClassName={textColor} />
 	                        </button>
-                        <button
-                          type="button"
-                          onClick={handlePauseCurrentTask}
-                          className={`absolute left-[24%] right-[24%] bottom-2.5 z-[2] h-[30px] rounded-lg border text-[13px] font-extrabold text-white shadow-sm transition-[background-color,transform] duration-150 active:scale-[0.99] ${pauseButtonCls}`}
-                        >
-                          {pauseButtonLabel}
-                        </button>
+	                        <button
+	                          type="button"
+	                          onClick={handlePauseCurrentTask}
+                          disabled={pausePending}
+                          aria-busy={pausePending}
+	                          className={`absolute left-[24%] right-[24%] bottom-2.5 z-[2] h-[30px] rounded-lg border text-[13px] font-extrabold text-white shadow-sm transition-[background-color,transform] duration-150 active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-70 ${pauseButtonCls}`}
+	                        >
+	                          {pausePending ? "暂停中..." : pauseButtonLabel}
+	                        </button>
                         <div className="absolute bottom-0 left-0 right-0 z-[3] h-1 overflow-hidden pointer-events-none">
                           <div className={`h-full w-[200%] bg-gradient-to-r ${barFrom} ${barTo} ${barFrom} animate-[shimmer_2s_linear_infinite]`} />
                         </div>
@@ -9091,25 +9158,28 @@ export default function PhotographerPage() {
 	                    </span>
 	                  );
 
-	                  const renderWaitingChoiceBlock = (task: TaskFromAPI) => {
-		                    const tone = waitingActionTone(task);
+		                  const renderWaitingChoiceBlock = (task: TaskFromAPI) => {
+			                    const tone = waitingActionTone(task);
                     const showInlineIroningHint = recommendedIroningTaskId === task.id;
                     const isRecommendedIroning = showInlineIroningHint && isIroningTask(task);
+                    const startPending = taskActionPending("start", task);
                     return (
                       <button
                         type="button"
                         key={task.id}
                         onClick={() => handleWaitingChoiceStart(task)}
-	                        className={`flex min-h-0 w-full items-center gap-2 rounded-xl border px-2.5 py-2 text-left shadow-sm transition-all hover:translate-x-0.5 active:scale-[0.99] ${isRecommendedIroning ? "flex-[1.7]" : "flex-[0.82]"} ${tone.card}`}
+                        disabled={startPending}
+                        aria-busy={startPending}
+		                        className={`flex min-h-0 w-full items-center gap-2 rounded-xl border px-2.5 py-2 text-left shadow-sm transition-all hover:translate-x-0.5 active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-70 ${isRecommendedIroning ? "flex-[1.7]" : "flex-[0.82]"} ${tone.card}`}
                       >
                         <div className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full ${tone.dotWrap}`}>
                           <div className={`h-4 w-4 rounded-full ${tone.dot}`} />
                         </div>
                         <div className="min-w-0 flex-1">
                           <div className="flex min-w-0 items-center gap-1.5">
-                            <span className={`truncate text-[14px] font-extrabold leading-tight ${tone.title}`}>
-                              {startActionLabel(task)}
-                            </span>
+	                            <span className={`truncate text-[14px] font-extrabold leading-tight ${tone.title}`}>
+	                              {startPending ? "开始中..." : startActionLabel(task)}
+	                            </span>
                             <span className={`shrink-0 rounded-md px-1.5 py-0.5 text-[9px] font-extrabold leading-tight ${tone.tag}`}>
                               <span className="block">
                                 {isIroningTask(task) ? "准备熨烫" : "待就位"}
@@ -9148,55 +9218,63 @@ export default function PhotographerPage() {
                     </div>
                   );
 
-                  const renderPassiveIroningWaitingBlock = (task: TaskFromAPI, flex: number) => (
-                    <div
-                      key={task.id}
-                      className="w-full min-h-0 rounded-xl bg-emerald-400/12 flex flex-col items-center justify-center gap-1.5 pt-2 pb-1.5 px-2"
-                      style={flexStyle(flex)}
-                    >
-                      <div className="w-10 max-w-full min-w-0 min-h-0 shrink-[2] max-h-[min(2.5rem,28%)] h-[min(2.5rem,28%)] rounded-full bg-emerald-500/16 flex items-center justify-center overflow-hidden">
-                        <div className="min-w-0 min-h-0 w-[45%] h-[45%] max-w-[min(72%,1.35rem)] max-h-[min(72%,1.35rem)] rounded-full bg-emerald-500/80" />
-                      </div>
-                      <span className="text-[16px] font-extrabold text-emerald-700">
-                        {task.ironingStage === "notified" ? "准备熨烫" : "等待熨烫机"}
-                      </span>
-                      {renderEscalationBadge(task, { compact: true })}
-                      {lineRoomPhotoCategory(task, "text-emerald-700/80")}
-                      <p className="text-[11px] text-emerald-700/70 text-center px-2">
-                        当前无空余熨烫机，只能开始做其他任务
-                      </p>
-                      <button
-                        type="button"
-                        onClick={() => void handleCancelTask(task.id)}
-                        className="mt-0.5 rounded-lg border border-red-200/80 bg-white/55 px-3 py-1 text-[11px] font-extrabold text-red-500 transition-colors hover:bg-red-50 active:scale-[0.98]"
+                  const renderPassiveIroningWaitingBlock = (task: TaskFromAPI, flex: number) => {
+                    const cancelPending = taskActionPending("cancel", task);
+                    return (
+                      <div
+                        key={task.id}
+                        className="w-full min-h-0 rounded-xl bg-emerald-400/12 flex flex-col items-center justify-center gap-1.5 pt-2 pb-1.5 px-2"
+                        style={flexStyle(flex)}
                       >
-                        取消任务
-                      </button>
-                    </div>
-                  );
+                        <div className="w-10 max-w-full min-w-0 min-h-0 shrink-[2] max-h-[min(2.5rem,28%)] h-[min(2.5rem,28%)] rounded-full bg-emerald-500/16 flex items-center justify-center overflow-hidden">
+                          <div className="min-w-0 min-h-0 w-[45%] h-[45%] max-w-[min(72%,1.35rem)] max-h-[min(72%,1.35rem)] rounded-full bg-emerald-500/80" />
+                        </div>
+                        <span className="text-[16px] font-extrabold text-emerald-700">
+                          {task.ironingStage === "notified" ? "准备熨烫" : "等待熨烫机"}
+                        </span>
+                        {renderEscalationBadge(task, { compact: true })}
+                        {lineRoomPhotoCategory(task, "text-emerald-700/80")}
+                        <p className="text-[11px] text-emerald-700/70 text-center px-2">
+                          当前无空余熨烫机，只能开始做其他任务
+                        </p>
+                        <button
+                          type="button"
+                          disabled={cancelPending}
+                          aria-busy={cancelPending}
+                          onClick={() => void handleCancelTask(task.id)}
+                          className="mt-0.5 rounded-lg border border-red-200/80 bg-white/55 px-3 py-1 text-[11px] font-extrabold text-red-500 transition-colors hover:bg-red-50 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-70"
+                        >
+                          {cancelPending ? "取消中..." : "取消任务"}
+                        </button>
+                      </div>
+                    );
+                  };
 
                   // 渲染单个任务区块（正常流程）
                   const renderTaskBlock = (task: TaskFromAPI, flex: number) => {
                     const status = myTaskStatus(task);
                     if (isPassiveIroningWaitingTask(task)) return renderPassiveIroningWaitingBlock(task, flex);
                     if (status === "paused") return renderPausedBlock(task, flex);
-                    if (status === "waiting") {
-                      const readyIroning = isIroningTask(task);
-                      const tone = waitingActionTone(task);
-                      return (
-                        <button
-                          type="button"
-                          key={task.id}
-                          onClick={() => handleAssistantStatusChange("start", task)}
-	                          className={`w-full min-h-0 rounded-xl border flex flex-col items-center justify-center gap-1.5 pt-2 pb-1.5 cursor-pointer transition-colors active:scale-[0.98] ${tone.card}`}
-                          style={flexStyle(flex)}
-                        >
+	                    if (status === "waiting") {
+	                      const readyIroning = isIroningTask(task);
+	                      const tone = waitingActionTone(task);
+                      const startPending = taskActionPending("start", task);
+	                      return (
+	                        <button
+	                          type="button"
+	                          key={task.id}
+	                          onClick={() => handleAssistantStatusChange("start", task)}
+                            disabled={startPending}
+                            aria-busy={startPending}
+		                          className={`w-full min-h-0 rounded-xl border flex flex-col items-center justify-center gap-1.5 pt-2 pb-1.5 cursor-pointer transition-colors active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-70 ${tone.card}`}
+	                          style={flexStyle(flex)}
+	                        >
                           <div className={`w-10 max-w-full min-w-0 min-h-0 shrink-[2] max-h-[min(2.5rem,28%)] h-[min(2.5rem,28%)] rounded-full ${tone.dotWrap} flex items-center justify-center overflow-hidden`}>
                             <div className={`min-w-0 min-h-0 w-[45%] h-[45%] max-w-[min(72%,1.35rem)] max-h-[min(72%,1.35rem)] rounded-full ${tone.dot}`} />
                           </div>
-                          <span className={`text-[16px] font-extrabold ${tone.title}`}>
-                            {readyIroning ? "点击开始熨烫" : "点击开始任务"}
-                          </span>
+	                          <span className={`text-[16px] font-extrabold ${tone.title}`}>
+	                            {startPending ? "开始中..." : readyIroning ? "点击开始熨烫" : "点击开始任务"}
+	                          </span>
                           {renderEscalationBadge(task, { compact: true })}
 	                          {lineRoomPhotoCategory(task, tone.meta)}
 	                          <p className={`flex items-center justify-center gap-1.5 px-2 text-center text-[11px] ${tone.meta}`}>
@@ -9227,25 +9305,28 @@ export default function PhotographerPage() {
 	                        ? "border-purple-500 bg-purple-500 hover:bg-purple-600"
 	                        : "border-[#e55f5f] bg-[#ef6b6b] hover:bg-[#e85f5f]";
 	                      const pauseButtonLabel = isExternalModelFollow ? "吃饭/短暂离开" : "短暂离开";
-	                      const timing = myTaskTiming(task);
-	                      const pauseSlideActive = manualPauseSlide?.taskId === task.id;
-                      const pauseSlideExpanded = pauseSlideActive && manualPauseSlide.expanded;
+		                      const timing = myTaskTiming(task);
+		                      const pauseSlideActive = manualPauseSlide?.taskId === task.id;
+                      const completePending = taskActionPending("complete", task);
+                      const pausePending = taskActionPending("pause", task);
+	                      const pauseSlideExpanded = pauseSlideActive && manualPauseSlide.expanded;
                       return (
                         <div
 	                          key={task.id}
 	                          className={`w-full min-h-0 rounded-xl ${bgCls} relative overflow-hidden`}
 	                          style={flexStyle(flex)}
 	                        >
-	                            <button
-	                              type="button"
-	                              onClick={() => handleAssistantStatusChange("complete", task)}
-                              disabled={pauseSlideActive}
-                              className={`absolute inset-0 z-[1] flex cursor-pointer flex-col items-center justify-center gap-1 px-2 pb-[46px] pt-2 transition-opacity duration-150 active:scale-[0.98] disabled:cursor-default ${pauseSlideActive ? "opacity-0" : "opacity-100"}`}
-                            >
+		                            <button
+		                              type="button"
+		                              onClick={() => handleAssistantStatusChange("complete", task)}
+	                              disabled={pauseSlideActive || completePending}
+                              aria-busy={completePending}
+	                              className={`absolute inset-0 z-[1] flex cursor-pointer flex-col items-center justify-center gap-1 px-2 pb-[46px] pt-2 transition-opacity duration-150 active:scale-[0.98] disabled:cursor-default ${pauseSlideActive ? "opacity-0" : "opacity-100"} ${completePending ? "opacity-70" : ""}`}
+	                            >
                               <div className={`w-10 max-w-full min-w-0 min-h-0 shrink-[2] max-h-[min(2.5rem,28%)] h-[min(2.5rem,28%)] rounded-full ${dotBg} flex items-center justify-center overflow-hidden`}>
                                 <div className={`min-w-0 min-h-0 w-[45%] h-[45%] max-w-[min(72%,1.35rem)] max-h-[min(72%,1.35rem)] rounded-full ${dotColor} animate-pulse`} />
                             </div>
-	                            <span className={`text-[16px] font-extrabold ${textColor}`}>点击完成任务</span>
+		                            <span className={`text-[16px] font-extrabold ${textColor}`}>{completePending ? "完成中..." : "点击完成任务"}</span>
 	                            {renderEscalationBadge(task, { compact: true })}
 	                            {lineRoomPhotoCategory(task, subColor)}
 	                            <LiveHMSBlock source={timing} mode="effective" colorClassName={textColor} />
@@ -9267,17 +9348,17 @@ export default function PhotographerPage() {
 	                                <LiveHMSBlock source={timing} mode="paused" colorClassName="text-gray-600" />
 	                              </div>
                             </div>
-                            <button
-                              type="button"
-                              onClick={handlePauseCurrentTask}
-                              disabled={pauseSlideActive}
-                              aria-busy={pauseSlideActive}
-                              className={`absolute left-[24%] right-[24%] bottom-2.5 z-[3] flex h-[34px] items-center justify-center overflow-hidden rounded-lg border text-[15px] font-extrabold text-white shadow-sm transition-[opacity,background-color,transform] duration-150 active:scale-[0.99] disabled:cursor-default ${pauseButtonCls} ${
-                                pauseSlideActive ? "pointer-events-none opacity-0" : "opacity-100"
-                              }`}
-                            >
-                              {pauseButtonLabel}
-                            </button>
+	                            <button
+	                              type="button"
+	                              onClick={handlePauseCurrentTask}
+	                              disabled={pauseSlideActive || pausePending}
+	                              aria-busy={pauseSlideActive || pausePending}
+	                              className={`absolute left-[24%] right-[24%] bottom-2.5 z-[3] flex h-[34px] items-center justify-center overflow-hidden rounded-lg border text-[15px] font-extrabold text-white shadow-sm transition-[opacity,background-color,transform] duration-150 active:scale-[0.99] disabled:cursor-default ${pauseButtonCls} ${
+	                                pauseSlideActive ? "pointer-events-none opacity-0" : "opacity-100"
+	                              }`}
+	                            >
+	                              {pausePending ? "暂停中..." : pauseButtonLabel}
+	                            </button>
                             <div className={`absolute bottom-0 left-0 right-0 z-[3] h-1 overflow-hidden pointer-events-none transition-opacity duration-200 ${pauseSlideActive ? "opacity-0" : "opacity-100"}`}>
                               <div className={`h-full w-[200%] bg-gradient-to-r ${barFrom} ${barTo} ${barFrom} animate-[shimmer_2s_linear_infinite]`} />
                             </div>
@@ -9765,14 +9846,16 @@ export default function PhotographerPage() {
                     })
                   )
                 ) : tasks.map((task) => {
-                  const isRemoving = removingTaskId === task.id;
-                  const rawForTask = taskListRaw.find((x) => x.id === task.id);
+	                  const isRemoving = removingTaskId === task.id;
+                  const cancelPending = isWorkbenchPendingAction(workbenchTaskActionKey("cancel", task.id, profile?.id));
+                  const cancelInFlight = isRemoving || cancelPending;
+	                  const rawForTask = taskListRaw.find((x) => x.id === task.id);
                   const isPhotographerQueueTask = rawForTask != null && isPhotographerLimitQueuedTask(rawForTask);
                   const isAssistantTaskList = isAssistantRole(profile?.role);
                   const isCancellable = !isAssistantTaskList && (canCancelRawTask(rawForTask) || isPhotographerQueueTask);
-                  const showCancel = isCancellable && hoveredTagId === task.id && !isRemoving;
-                  const canRegisterCompletion = canOpenCompletionRegistration(rawForTask);
-                  const showCompletionRegistration = canRegisterCompletion && hoveredTagId === task.id && !isRemoving;
+	                  const showCancel = isCancellable && hoveredTagId === task.id && !cancelInFlight;
+	                  const canRegisterCompletion = canOpenCompletionRegistration(rawForTask);
+	                  const showCompletionRegistration = canRegisterCompletion && hoveredTagId === task.id && !cancelInFlight;
                   const statusBadgeInteractive = isCancellable || canRegisterCompletion;
                   const displayStatusLabel = taskStatusLabelForList(task, rawForTask, taskListRaw);
                   const showPausedWaitingDots =
@@ -9784,8 +9867,10 @@ export default function PhotographerPage() {
                     collaboratorCount > 0 &&
                     completedAssigneeNames.length > 1;
                   const statusBadgeLabel = isCompletedCollaboration ? "多人协作完成" : displayStatusLabel;
-                  const statusBadgeCls = showCancel
-                    ? "bg-red-100/80 text-red-500 cursor-pointer hover:bg-red-200/80 scale-105"
+	                  const statusBadgeCls = cancelInFlight
+                      ? "bg-red-100/80 text-red-500 cursor-default"
+                      : showCancel
+	                    ? "bg-red-100/80 text-red-500 cursor-pointer hover:bg-red-200/80 scale-105"
                     : showCompletionRegistration
                       ? rawForTask?.completionRegistration
                         ? "bg-emerald-100/80 text-emerald-600 cursor-pointer hover:bg-emerald-200/80 scale-105"
@@ -9864,23 +9949,23 @@ export default function PhotographerPage() {
                         resolvedTheme === "dark" ? "border-white/[0.22] bg-white/[0.12] backdrop-blur-xl shadow-sm shadow-black/10" : ""
                       }${
                         enteringTaskId === task.id ? " task-genie-enter" : ""
-                      }${isRemoving ? " task-slide-out" : ""}`}
-                      style={{
-                        transition: isRemoving ? "none" : "transform 0.35s cubic-bezier(0.34, 1.56, 0.64, 1), box-shadow 0.2s",
-                      }}
-                      onMouseEnter={(e) => {
-                        if (!isRemoving) {
-                          (e.currentTarget as HTMLElement).style.transform = "translateX(4px) scale(1.02)";
-                          (e.currentTarget as HTMLElement).style.boxShadow = "0 4px 12px rgba(0,0,0,0.08)";
-                        }
+	                        }${cancelInFlight ? " task-slide-out" : ""}`}
+	                      style={{
+	                        transition: cancelInFlight ? "none" : "transform 0.35s cubic-bezier(0.34, 1.56, 0.64, 1), box-shadow 0.2s",
+	                      }}
+	                      onMouseEnter={(e) => {
+	                        if (!cancelInFlight) {
+	                          (e.currentTarget as HTMLElement).style.transform = "translateX(4px) scale(1.02)";
+	                          (e.currentTarget as HTMLElement).style.boxShadow = "0 4px 12px rgba(0,0,0,0.08)";
+	                        }
                         if (isCancellable) {
                           setHoveredTagId(task.id);
                         }
                       }}
                       onMouseLeave={(e) => {
-                        if (!isRemoving) {
-                          (e.currentTarget as HTMLElement).style.transform = "translateX(0) scale(1)";
-                          (e.currentTarget as HTMLElement).style.boxShadow = "";
+	                        if (!cancelInFlight) {
+	                          (e.currentTarget as HTMLElement).style.transform = "translateX(0) scale(1)";
+	                          (e.currentTarget as HTMLElement).style.boxShadow = "";
                         }
                         setHoveredTagId(null);
                         setHoveredSpecifiedTaskId(null);
@@ -9930,17 +10015,19 @@ export default function PhotographerPage() {
                           onMouseEnter={() => statusBadgeInteractive && setHoveredTagId(task.id)}
                           onMouseLeave={() => setHoveredTagId(null)}
                           onClick={(e) => {
-                            if (isCancellable) {
-                              e.stopPropagation();
-                              handleCancelTask(task.id);
+	                            if (isCancellable && !cancelInFlight) {
+	                              e.stopPropagation();
+	                              handleCancelTask(task.id);
                             } else if (canRegisterCompletion && rawForTask) {
                               e.stopPropagation();
                               openCompletionRegistrationModal(rawForTask);
                             }
                           }}
                         >
-                          {showCancel ? (
-                            "取消"
+	                          {cancelInFlight ? (
+	                            "取消中"
+	                          ) : showCancel ? (
+	                            "取消"
                           ) : showCompletionRegistration ? (
                             rawForTask?.completionRegistration ? "查看登记" : "添加登记"
                           ) : (

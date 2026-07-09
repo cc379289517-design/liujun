@@ -6348,6 +6348,23 @@
 - 验证通过：`npx tsc --noEmit --pretty false --incremental false`、`git diff --check -- src/app/photographer/page.tsx src/app/photographer/MobileTaskCard.tsx tasks/todo.md`、`DATABASE_URL=file:./prisma/loadtest.db npm run build`、隔离服务 `/photographer` 200 与 `/api/config` 正常响应。
 - 待后续：阶段 D 下一批优先做 action-level pending 锁和本地 reducer/store，解决重复点击、弱网闪回、任务源多组 `setState` 的流畅度瓶颈。
 
+#### 阶段 D 第二批计划：操作级 pending 锁第一批
+
+- [x] 新增工作台操作 pending 状态：按 `action:taskId` / `action:profileId` 粒度锁住开始、完成、暂停、继续、取消、手机快捷发单等高频入口。
+- [x] 操作发起后 100ms 内按钮进入禁用/处理中状态；重复点击直接忽略，不再重复提交同一个状态命令。
+- [x] 移动端任务卡接收 `primaryActionPending`、`pausePending`、`cancelPending` 和处理中标签；桌面当前任务状态区同步禁用对应按钮。
+- [x] 失败路径必须释放 pending 并保留现有错误提示；成功路径继续合并后端权威任务详情，不改变派单、优先级、熨烫、移交等业务规则。
+- [x] 验证 `tsc`、`git diff --check`、build；本批不做浏览器截图，后续统一做弱网交互专项验收。
+
+#### 阶段 D 第二批评审：操作级 pending 锁第一批
+
+- 已完成：新增 `workbenchPendingActionKeys` 与 `begin/end/isWorkbenchPendingAction`，用 ref 同步拦截重复提交，用 state 驱动按钮禁用和处理中文案。
+- 已完成：助理开始、完成、暂停、继续、取消任务和手机快捷发单按 action 粒度上锁；失败路径释放 pending 并保留现有错误提示，成功路径继续走原有权威任务合并/刷新。
+- 已完成：移动端任务卡显示「开始中... / 完成中... / 继续中... / 暂停中... / 取消中...」；手机快捷发单显示「发布中...」；桌面当前任务区和任务列表取消态同步禁用/提示。
+- 业务边界：本批只加前端交互锁和反馈，不改 API 参数、后端状态机、优先级、熨烫机槽位、移交、取消规则或吃饭规则；长期业务文档无需新增规则。
+- 验证通过：`npx tsc --noEmit --pretty false --incremental false`、`git diff --check -- src/app/photographer/page.tsx src/app/photographer/MobileTaskCard.tsx src/app/photographer/MobileQuickBookingPanel.tsx tasks/todo.md`、`DATABASE_URL=file:./prisma/loadtest.db npm run build`。
+- 待后续：继续推进本地 reducer/store，把 `taskListRaw/currentRawTask/pausedRawTask/tasks/publicQueueRaw` 的多组 setState 收口，减少弱网轮询和操作响应乱序导致的闪回。
+
 ### 阶段 E：验收与对抗审查
 
 - [ ] 基线压测完成后，先根据报告排序瓶颈，再决定是否进入 B/C/D 的第一批代码改动。

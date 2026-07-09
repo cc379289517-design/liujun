@@ -13,6 +13,7 @@ type MobileQuickBookingPanelProps = {
   glassPanelClassName: string;
   softPanelClassName: string;
   isDark: boolean;
+  createPending?: boolean;
   onTogglePicker: () => void;
   onClearAssistant: () => void;
   onSelectAssistant: (assistantId: string) => void;
@@ -35,6 +36,7 @@ export default function MobileQuickBookingPanel({
   glassPanelClassName,
   softPanelClassName,
   isDark,
+  createPending = false,
   onTogglePicker,
   onClearAssistant,
   onSelectAssistant,
@@ -158,10 +160,12 @@ export default function MobileQuickBookingPanel({
             <button
               type="button"
               key={`${selectedCategory.name}-${duration.priority}`}
+              disabled={createPending}
               onClick={() => onCreateTask(selectedCategory.name, duration)}
-              className="flex min-h-[44px] items-center justify-between rounded-2xl bg-white/60 px-4 text-[13px] font-extrabold text-[--text-primary] shadow-sm active:scale-[0.99]"
+              aria-busy={createPending}
+              className="flex min-h-[44px] items-center justify-between rounded-2xl bg-white/60 px-4 text-[13px] font-extrabold text-[--text-primary] shadow-sm active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-70"
             >
-              <span>{duration.label}</span>
+              <span>{createPending ? "发布中..." : duration.label}</span>
               <span className={`rounded-lg px-2 py-1 text-[11px] ${duration.cls}`}>{duration.priority}</span>
             </button>
           ))}
@@ -169,10 +173,12 @@ export default function MobileQuickBookingPanel({
             <button
               type="button"
               key={`${selectedCategory.name}-special-${action.title}`}
+              disabled={createPending}
               onClick={() => onCreateTask(action.title, action)}
-              className="flex min-h-[44px] items-center justify-between rounded-2xl bg-purple-500 px-4 text-[13px] font-extrabold text-white shadow-sm shadow-purple-500/20 active:scale-[0.99]"
+              aria-busy={createPending}
+              className="flex min-h-[44px] items-center justify-between rounded-2xl bg-purple-500 px-4 text-[13px] font-extrabold text-white shadow-sm shadow-purple-500/20 active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-70"
             >
-              <span>{action.title}</span>
+              <span>{createPending ? "发布中..." : action.title}</span>
               <span className="rounded-lg bg-white/18 px-2 py-1 text-[11px]">{action.priority}</span>
             </button>
           ))}

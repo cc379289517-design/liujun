@@ -20,6 +20,9 @@ type MobileTaskCardProps = {
   subtitleHint?: string | null;
   primaryAction?: MobileTaskPrimaryAction | null;
   showCancel?: boolean;
+  primaryActionPending?: boolean;
+  pausePending?: boolean;
+  cancelPending?: boolean;
   escalationBadge?: ReactNode;
   footer?: ReactNode;
   onPrimaryAction?: () => void;
@@ -42,6 +45,9 @@ export default function MobileTaskCard({
   subtitleHint,
   primaryAction = null,
   showCancel = false,
+  primaryActionPending = false,
+  pausePending = false,
+  cancelPending = false,
   escalationBadge,
   footer,
   onPrimaryAction,
@@ -50,6 +56,13 @@ export default function MobileTaskCard({
 }: MobileTaskCardProps) {
   const specifiedTask = Boolean(task.isSpecified);
   const canComplete = primaryAction === "complete";
+  const primaryActionLabel = primaryActionPending
+    ? primaryAction === "complete"
+      ? "完成中..."
+      : primaryAction === "resume"
+        ? "继续中..."
+        : "开始中..."
+    : actionLabel;
 
   return (
     <div className={`rounded-[20px] border backdrop-blur-2xl ${featured ? "p-5 shadow-lg shadow-lime-500/10" : "p-4"} ${glassPanelClassName} ${compact ? "" : meta.panel}`}>
@@ -95,28 +108,34 @@ export default function MobileTaskCard({
           {primaryAction && (
             <button
               type="button"
+              disabled={primaryActionPending}
+              aria-busy={primaryActionPending}
               onClick={onPrimaryAction}
-              className="min-h-[44px] flex-1 rounded-2xl bg-orange-500 px-4 text-[14px] font-extrabold text-white shadow-lg shadow-orange-500/20 active:scale-[0.99]"
+              className="min-h-[44px] flex-1 rounded-2xl bg-orange-500 px-4 text-[14px] font-extrabold text-white shadow-lg shadow-orange-500/20 active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-70"
             >
-              {actionLabel}
+              {primaryActionLabel}
             </button>
           )}
           {canComplete && (
             <button
               type="button"
+              disabled={pausePending}
+              aria-busy={pausePending}
               onClick={onPause}
-              className="min-h-[44px] rounded-2xl bg-red-500/90 px-4 text-[13px] font-extrabold text-white shadow-lg shadow-red-500/15 active:scale-[0.99]"
+              className="min-h-[44px] rounded-2xl bg-red-500/90 px-4 text-[13px] font-extrabold text-white shadow-lg shadow-red-500/15 active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-70"
             >
-              短暂离开
+              {pausePending ? "暂停中..." : "短暂离开"}
             </button>
           )}
           {showCancel && (
             <button
               type="button"
+              disabled={cancelPending}
+              aria-busy={cancelPending}
               onClick={onCancel}
-              className="min-h-[44px] rounded-2xl border border-red-200/80 bg-white/54 px-4 text-[13px] font-extrabold text-red-500 active:scale-[0.99]"
+              className="min-h-[44px] rounded-2xl border border-red-200/80 bg-white/54 px-4 text-[13px] font-extrabold text-red-500 active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-70"
             >
-              取消
+              {cancelPending ? "取消中..." : "取消"}
             </button>
           )}
         </div>
