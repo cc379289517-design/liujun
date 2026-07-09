@@ -10607,7 +10607,8 @@ export default function PhotographerPage() {
               body: JSON.stringify({ avatar: dataUrl }),
             });
             if (res.ok) {
-              setProfile((p) => p ? { ...p, avatar: dataUrl } : p);
+              const updated = await res.json().catch(() => null) as { avatar?: string | null } | null;
+              setProfile((p) => p ? { ...p, avatar: updated?.avatar ?? dataUrl } : p);
             }
             setShowAvatarModal(false);
           }}

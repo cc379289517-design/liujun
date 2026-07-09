@@ -11,6 +11,7 @@ import {
   parseEatingOvertimeAlertMin,
   parseEatingReentryCooldownMin,
 } from "@/lib/eatingPresence";
+import { PUBLIC_PROFILE_SELECT, serializeProfileForJson } from "@/lib/profilePayload";
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -42,7 +43,7 @@ export async function GET(_request: NextRequest, { params }: RouteContext) {
       return Response.json({ error: "Profile not found" }, { status: 404 });
     }
 
-    return Response.json(profile);
+    return Response.json(serializeProfileForJson(profile));
   } catch (error) {
     console.error("[GET /api/profiles/[id]]", error);
     return Response.json({ error: "Failed to fetch profile" }, { status: 500 });
@@ -348,7 +349,7 @@ export async function PATCH(request: NextRequest, { params }: RouteContext) {
       return tx.profile.update({
         where: { id },
         data,
-        include: { building: { select: { id: true, name: true, extraVenues: true } } },
+        select: PUBLIC_PROFILE_SELECT,
       });
     });
     if (isBuildingChange) shouldSweep = true;
@@ -367,12 +368,12 @@ export async function PATCH(request: NextRequest, { params }: RouteContext) {
       await runTaskMaintenance({ force: true });
       const fresh = await prisma.profile.findUnique({
         where: { id },
-        include: { building: { select: { id: true, name: true, extraVenues: true } } },
+        select: PUBLIC_PROFILE_SELECT,
       });
       if (fresh) updated = fresh;
     }
 
-    return Response.json({ ...updated, releasedAssignedTaskCount });
+    return Response.json({ ...serializeProfileForJson(updated), releasedAssignedTaskCount });
   } catch (error) {
     console.error("[PATCH /api/profiles/[id]]", error);
     return Response.json({ error: "Failed to update profile" }, { status: 500 });

@@ -1,6 +1,7 @@
 import { NextRequest } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { Role } from "@/generated/prisma/enums";
+import { PUBLIC_PROFILE_SELECT, serializeProfileForJson } from "@/lib/profilePayload";
 
 /**
  * GET /api/profiles - 查询用户列表
@@ -37,13 +38,11 @@ export async function GET(request: NextRequest) {
 
     const profiles = await prisma.profile.findMany({
       where,
-      include: {
-        building: { select: { id: true, name: true, extraVenues: true } },
-      },
+      select: PUBLIC_PROFILE_SELECT,
       orderBy: [{ role: "asc" }, { name: "asc" }],
     });
 
-    return Response.json(profiles);
+    return Response.json(profiles.map(serializeProfileForJson));
   } catch (error) {
     console.error("[GET /api/profiles]", error);
     return Response.json({ error: "Failed to fetch profiles" }, { status: 500 });
@@ -80,10 +79,10 @@ export async function POST(request: NextRequest) {
         department: department || null,
         group: group || null,
       },
-      include: { building: { select: { id: true, name: true } } },
+      select: PUBLIC_PROFILE_SELECT,
     });
 
-    return Response.json(profile, { status: 201 });
+    return Response.json(serializeProfileForJson(profile), { status: 201 });
   } catch (error) {
     console.error("[POST /api/profiles]", error);
     return Response.json({ error: "Failed to create profile" }, { status: 500 });

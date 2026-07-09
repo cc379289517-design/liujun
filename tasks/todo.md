@@ -6729,6 +6729,26 @@
 - 验证备注：本地仅 `prisma/loadtest.db` 写入了一个测试头像用于头像路由验证；`prisma/dev.db` 仍是运行态改动，继续排除提交。
 - 待后续：若头像数量和尺寸继续增大，下一批可把 `/api/profiles` 初始登录资料也改为 `avatarUrl` 模式，或者把头像从 SQLite 文本迁到文件/对象存储，进一步降低数据库读大字段压力。
 
+#### 阶段 D 第二十三批计划：profile API 默认轻量化
+
+- [x] 新增共享 profile payload helper，统一公开资料字段白名单和头像 URL 转换，避免 `/api/workbench/sync`、`/api/profiles`、`/api/profiles/:id` 分散维护。
+- [x] `/api/profiles` 默认返回轻量公开字段，不再带 `password`，头像 data URL 转成 `/api/profiles/:id/avatar?v=...`；创建用户返回同口径公开资料。
+- [x] `/api/profiles/:id` 的 GET/PATCH 返回去除 `password`，头像同样返回可缓存 URL；保留 PATCH 写入 avatar data URL 的能力，避免头像上传入口失效。
+- [x] 验证后台人员页、摄影师工作台初始身份选择、统计页参考资料、头像上传/状态切换返回不破；本批不改角色、状态、派单、熨烫或移交业务规则。
+
+#### 阶段 D 第二十三批评审：profile API 默认轻量化
+
+- 已完成：新增 `src/lib/profilePayload.ts`，统一 `PUBLIC_PROFILE_SELECT`、`AVATAR_PROFILE_SELECT`、公开 profile 序列化和任务协作者头像序列化，`/api/workbench/sync` 不再重复维护同一套头像转换逻辑。
+- 已完成：`GET /api/profiles` 与 `POST /api/profiles` 改为公开字段白名单响应；默认不返回 `password`，头像 data URL 转为 `/api/profiles/:id/avatar?v=updatedAt`。
+- 已完成：`GET /api/profiles/:id` 对原有详情响应做公开序列化，保留 `createdTasks/assignedTasks`；`PATCH /api/profiles/:id` 写入仍接受 avatar data URL，但响应改为公开轻量资料，头像上传成功后前端使用服务端返回的短头像 URL。
+- 已保持：后台人员管理、摄影师身份选择、工作台助理列表、统计页参考资料、状态切换、头像上传入口继续使用 `avatar` 字段；本批不改派单、状态、优先级、熨烫机或移交业务规则。
+- 验证通过：`npx prisma validate`、`npx tsc --noEmit --pretty false --incremental false`、`git diff --check -- src/lib/profilePayload.ts src/app/api/workbench/sync/route.ts src/app/api/profiles/route.ts src/app/api/profiles/[id]/route.ts src/app/photographer/page.tsx tasks/todo.md tasks/lessons.md`、`DATABASE_URL=file:./prisma/loadtest.db npm run build`。
+- 本地隔离服务验证：`/api/profiles` 200 / 62973 bytes / 115 人 / 无 `password`；`/api/profiles?role=assistant&buildingId=1` 200 / 3299 bytes / 无 `password`；`/api/profiles/:id` 200 / 2248 bytes / 无 `password`；`PATCH /api/profiles/:id` 200 / 621 bytes / 无 `password`。
+- 体积验证：隔离 `loadtest.db` 当前 115 人、仅 1 个测试头像时，旧整行 profile JSON 约 69819 bytes，新公开轻量 profile JSON 约 62973 bytes，减少约 9.8%；生产若头像更多，收益会更明显，因为头像不再跟随资料 JSON。
+- 页面冒烟：隔离 `loadtest.db` 下 `/photographer` 200 / 37866 bytes，`/admin` 200 / 13165 bytes，`/stats` 200 / 9926 bytes，`/api/workbench/sync?...&full=1` 200 / 49724 bytes。
+- 验证备注：隔离压测库因头像和 PATCH 冒烟产生运行态变化；`prisma/dev.db` 仍是运行态改动，继续排除提交。
+- 待后续：如果继续追求极致轻量，可将初始 `/api/profiles` 按页面场景拆成 `view=identity/admin/stats`，让摄影师入口只拿身份选择需要字段，后台人员页再按需拿管理字段。
+
 ### 阶段 A 评审
 
 - 已完成压测工具：新增 `scripts/loadtest/seed.ts`、`run.ts`、`report.ts`、`common.ts`，不引入 k6/artillery 等新依赖；使用 Node 内置 `fetch`、现有 `tsx` 和 Prisma/SQLite。

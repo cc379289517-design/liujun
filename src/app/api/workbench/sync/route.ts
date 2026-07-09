@@ -9,6 +9,12 @@ import {
   parseEatingOvertimeAlertMin,
 } from "@/lib/eatingPresence";
 import { effectiveWorkMinutesFromApi, overtimeMinutesBeyondSlot, taskSlotCapMinutes } from "@/lib/taskEffectiveTime";
+import {
+  AVATAR_PROFILE_SELECT,
+  PUBLIC_PROFILE_SELECT,
+  serializeProfileForJson,
+  serializeTaskAssistantAvatars,
+} from "@/lib/profilePayload";
 
 const VISIBLE_PRIORITY_UPGRADE_REQUEST_STATUSES: PriorityUpgradeRequestStatus[] = [
   PriorityUpgradeRequestStatus.pending,
@@ -18,39 +24,6 @@ const VISIBLE_ASSISTANT_TRANSFER_REQUEST_STATUSES = ["confirming", "pending", "p
 const AREA_TASK_LIMIT = 500;
 const SCOPED_TASK_LIMIT = 200;
 const RELATED_CHANGE_ID_LIMIT = 1000;
-
-const ASSISTANT_PROFILE_SELECT = {
-  id: true,
-  employeeId: true,
-  name: true,
-  avatar: true,
-  role: true,
-  department: true,
-  group: true,
-  buildingId: true,
-  currentRoom: true,
-  activeBuildingId: true,
-  activeRoom: true,
-  status: true,
-  subStatus: true,
-  eatingStartedAt: true,
-  eatingPausedAt: true,
-  eatingEndedAt: true,
-  eatingAccumulatedSeconds: true,
-  onlineStatus: true,
-  isOnline: true,
-  updatedAt: true,
-  building: { select: { id: true, name: true, extraVenues: true } },
-} as const;
-
-const ASSISTANT_AVATAR_SELECT = {
-  id: true,
-  name: true,
-  currentRoom: true,
-  avatar: true,
-  buildingId: true,
-  updatedAt: true,
-} as const;
 
 const FULL_TASK_INCLUDE = {
   photographer: { select: { id: true, name: true, currentRoom: true, buildingId: true } },
@@ -68,7 +41,7 @@ const FULL_TASK_INCLUDE = {
   collaborators: {
     where: { status: { not: "left" } },
     include: {
-      assistant: { select: ASSISTANT_AVATAR_SELECT },
+      assistant: { select: AVATAR_PROFILE_SELECT },
     },
   },
   priorityUpgradeRequests: {
@@ -149,7 +122,7 @@ const QUEUE_TASK_INCLUDE = {
       completedAt: true,
       effectiveWorkSeconds: true,
       workSegmentStartedAt: true,
-      assistant: { select: ASSISTANT_AVATAR_SELECT },
+      assistant: { select: AVATAR_PROFILE_SELECT },
     },
   },
   priorityUpgradeRequests: {
@@ -220,43 +193,6 @@ function isAssistantRole(role: string | null): boolean {
 
 function uniqueIds(ids: Array<string | null | undefined>): string[] {
   return [...new Set(ids.filter((id): id is string => typeof id === "string" && id.length > 0))];
-}
-
-type AvatarProfileLike = { id: string; avatar: string | null; updatedAt?: Date | string | null };
-
-function avatarValueForJson(profile: AvatarProfileLike): string | null {
-  const avatar = profile.avatar?.trim();
-  if (!avatar) return null;
-  if (/^data:/i.test(avatar)) {
-    const updatedAtMs = profile.updatedAt
-      ? new Date(profile.updatedAt).getTime()
-      : 0;
-    const version = Number.isFinite(updatedAtMs) && updatedAtMs > 0
-      ? `?v=${updatedAtMs}`
-      : "";
-    return `/api/profiles/${encodeURIComponent(profile.id)}/avatar${version}`;
-  }
-  return avatar;
-}
-
-function withAvatarUrl<T extends AvatarProfileLike>(profile: T): T {
-  return {
-    ...profile,
-    avatar: avatarValueForJson(profile),
-  };
-}
-
-function withTaskAvatarUrls<T extends {
-  collaborators?: Array<{ assistant?: AvatarProfileLike | null }>;
-}>(task: T): T {
-  if (!Array.isArray(task.collaborators)) return task;
-  return {
-    ...task,
-    collaborators: task.collaborators.map((collaborator) => ({
-      ...collaborator,
-      assistant: collaborator.assistant ? withAvatarUrl(collaborator.assistant) : collaborator.assistant,
-    })),
-  };
 }
 
 function taskDeltaWhere(
@@ -346,7 +282,7 @@ async function relatedChangedTaskIdsSince(
 }
 
 type AssistantProfileRow = Prisma.ProfileGetPayload<{
-  select: typeof ASSISTANT_PROFILE_SELECT;
+  select: typeof PUBLIC_PROFILE_SELECT;
 }>;
 type QueueTask = Prisma.BookingTaskGetPayload<{ include: typeof QUEUE_TASK_INCLUDE }>;
 type QueueParticipant = QueueTask["collaborators"][number];
@@ -825,7 +761,7 @@ export async function GET(request: NextRequest) {
             { activeBuildingId: null, buildingId },
           ],
         },
-        select: ASSISTANT_PROFILE_SELECT,
+        select: PUBLIC_PROFILE_SELECT,
         orderBy: [{ role: "asc" }, { name: "asc" }],
       }),
       prisma.bookingTask.findMany({
@@ -935,11 +871,11 @@ export async function GET(request: NextRequest) {
       syncTruncated,
       nextPollMs: 3000,
       maintenance,
-      profiles: profiles.map(withAvatarUrl),
+      profiles: profiles.map(serializeProfileForJson),
       assistantStatus,
-      tasks: visibleTasks.map(withTaskAvatarUrls),
+      tasks: visibleTasks.map(serializeTaskAssistantAvatars),
       taskIds: visibleTaskIds.map((task) => task.id),
-      publicQueue: visibleAreaTasks.map(withTaskAvatarUrls),
+      publicQueue: visibleAreaTasks.map(serializeTaskAssistantAvatars),
       publicQueueIds: visibleAreaTaskIds.map((task) => task.id),
       publicQueueSummary: {
         total: visibleAreaTaskIds.length,
