@@ -120,3 +120,4 @@
 - 高频任务操作需要“同步 ref 拦截 + React state 反馈”双层 pending：ref 负责在同一事件循环内挡住重复点击，state 负责让按钮立即禁用并显示处理中；只做其中之一都会留下弱网重复提交或用户误点风险。
 - 弱网/轮询并发下，操作成功后的权威任务合并不能读取旧 React 闭包数组；应以同步维护的 refs 作为当前任务源，并用短 TTL recent patch 保护刚操作的任务，避免旧快照闪回。
 - 地图拖拽/缩放这类高频交互不要每个 pointer/wheel 事件都 `setState`；应把即时 pan/zoom 放进 ref，用 `requestAnimationFrame` 直接更新地图 transform，手势结束或滚轮停顿后再提交 React 状态。
+- Dock 这类密集头像 hover 不需要 React 状态驱动 tooltip 和阴影；用 CSS `group-hover` 处理显隐/层级/视觉反馈，鼠标移动曲线只用 rAF 合并坐标提交，能减少扫过多名助理时的无意义重渲染。

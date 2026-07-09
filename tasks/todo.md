@@ -6329,7 +6329,7 @@
 - [ ] 建立工作台本地 reducer/store：`tasksById + profilesById + optimisticPatches + pendingActions`，替代多组互相 setState 的任务源。
 - [ ] 按 action 级 pending UI 锁定：开始、完成、暂停、继续、发单、移交、提权 100ms 内给反馈，失败后回滚并提示。
 - [x] 全局 1 秒 `now` 降级为局部计时：只让当前任务秒表/吃饭计时每秒更新，列表、统计、排行按分钟或数据变更更新。
-- [ ] 地图拖拽/缩放、Dock hover 使用 `requestAnimationFrame + ref/CSS variable` 优化，避免 pointer move 触发整页 React 重渲染。
+- [x] 地图拖拽/缩放、Dock hover 使用 `requestAnimationFrame + ref/CSS variable` 优化，避免 pointer move 触发整页 React 重渲染。
 - [ ] 继续拆 `CurrentTaskPanel`、`TaskListPanel`、`MapWorkbench`、`AssistantDock` 数据适配层，每次拆分保持等价并单独验证。
 
 #### 阶段 D 第一批计划：局部计时与整页降频
@@ -6397,6 +6397,23 @@
 - 业务边界：本批只做前端地图交互性能优化，不改变派单、优先级、熨烫机、移交、同步接口、任务状态或数据库结构；长期业务文档无需新增业务规则。
 - 验证通过：`npx tsc --noEmit --pretty false --incremental false`、`git diff --check -- src/app/photographer/page.tsx tasks/todo.md tasks/lessons.md`、`DATABASE_URL=file:./prisma/loadtest.db npm run build`、本地隔离服务 `http://localhost:3100/photographer` 200、`/api/config` 200、`/api/workbench/sync?role=photographer&buildingId=1&full=1` 200。
 - 待后续：阶段 D 总项中的 Dock hover 和更完整的本地 reducer/store 尚未完成；下一批建议继续做 Dock hover ref/CSS 化或先收口备注/反馈/提权/移交后的任务源 helper。
+
+#### 阶段 D 第五批计划：AssistantDock hover CSS 化
+
+- [x] 移除 Dock 头像 hover 的 React `hoveredId` 状态，tooltip、z-index、阴影和轻微放大改为 CSS `group-hover` 驱动。
+- [x] `mousemove` 只更新 ref 并通过 `requestAnimationFrame` 合并为最多每帧一次 `mouseY` 状态提交；扫过不同助理头像时不再因为 tooltip 切换触发整条 Dock React 重渲染。
+- [x] 保持备注点击、皇冠排名、状态点、吃饭/离线/超时 tooltip 文案等现有交互等价。
+- [x] 本批只优化前端 Dock 高频 hover，不改变派单、状态、同步接口、评分或业务规则；长期业务文档无需更新。
+- [x] 验证 `tsc`、`git diff --check`、`DATABASE_URL=file:./prisma/loadtest.db npm run build`，并记录评审和经验。
+
+#### 阶段 D 第五批评审：AssistantDock hover CSS 化
+
+- 已完成：`AssistantDock` 移除 `hoveredId` React 状态；tooltip 显隐、头像 hover 阴影、轻微放大和 z-index 改为 CSS `group-hover` 驱动。
+- 已完成：Dock 放大曲线的 `mousemove` 不再每个事件立即 `setMouseY`；改为 ref 暂存最新坐标，`requestAnimationFrame` 合并到最多每帧一次状态提交，并在离开/卸载时取消 pending frame。
+- 已保持：备注点击入口、皇冠排名、状态点大小/颜色、离线/吃饭/超时/任务 tooltip 文案和排序口径不变。
+- 业务边界：本批只做前端 Dock 高频 hover 性能优化，不改变派单、任务状态、同步接口、评分规则或数据库结构；长期业务文档无需新增规则。
+- 验证通过：`npx tsc --noEmit --pretty false --incremental false`、`git diff --check -- src/app/photographer/AssistantDock.tsx tasks/todo.md tasks/lessons.md`、`DATABASE_URL=file:./prisma/loadtest.db npm run build`、本地隔离服务 `http://localhost:3100/photographer` 200、`/api/config` 200、`/api/workbench/sync?role=photographer&buildingId=1&full=1` 200。
+- 待后续：阶段 D 剩余重点转向本地 reducer/store 与任务源 helper 收口，减少备注、反馈、提权、移交协作等操作后的多组 `setState`。
 
 ### 阶段 E：验收与对抗审查
 

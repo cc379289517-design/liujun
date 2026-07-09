@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, useRef } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 
 function fmtMin(min: number): string {
   const m = Math.max(0, Math.round(Number(min) || 0));
@@ -175,20 +175,37 @@ export default function AssistantDock({
   rankingCrownByAssistantId?: Record<string, DockRankingCrown>;
 }) {
   const [mouseY, setMouseY] = useState(-1);
-  const [hoveredId, setHoveredId] = useState<string | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
+  const pendingMouseYRef = useRef(-1);
+  const mouseFrameRef = useRef<number | null>(null);
 
   const handleMouseMove = useCallback((e: React.MouseEvent) => {
     if (listRef.current) {
       const rect = listRef.current.getBoundingClientRect();
-      setMouseY(e.clientY - rect.top);
+      pendingMouseYRef.current = e.clientY - rect.top;
+      if (mouseFrameRef.current != null) return;
+      mouseFrameRef.current = window.requestAnimationFrame(() => {
+        mouseFrameRef.current = null;
+        const nextMouseY = pendingMouseYRef.current;
+        setMouseY((prev) => (Math.abs(prev - nextMouseY) < 0.5 ? prev : nextMouseY));
+      });
     }
   }, []);
 
   const handleMouseLeave = useCallback(() => {
+    pendingMouseYRef.current = -1;
+    if (mouseFrameRef.current != null) {
+      window.cancelAnimationFrame(mouseFrameRef.current);
+      mouseFrameRef.current = null;
+    }
     setMouseY(-1);
-    setHoveredId(null);
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (mouseFrameRef.current != null) window.cancelAnimationFrame(mouseFrameRef.current);
+    };
   }, []);
 
   const sorted = [...assistants].sort((a, b) => {
@@ -226,7 +243,6 @@ export default function AssistantDock({
             const size = sizes[i] ?? BASE;
             const effectiveStatus = a.status === "finishing" ? "executing" : a.status;
             const cfg = STATUS[effectiveStatus] || STATUS.idle;
-            const hovered = hoveredId === a.id;
             const dotSize = 8 + (size - BASE) / (MAX - BASE) * 4;
             const isOffline = a.onlineStatus === "offline" || a.onlineStatus === "on_break";
             const isEating = !isOffline && a.subStatus === "eating";
@@ -243,27 +259,19 @@ export default function AssistantDock({
             return (
               <div
                 key={a.id}
-                className="relative flex items-center justify-center shrink-0"
+                className="group/dock-avatar relative z-[1] flex shrink-0 items-center justify-center overflow-visible hover:z-20"
                 style={{
                   width: size,
                   height: size,
                   transition: active
                     ? "width 0.08s linear, height 0.08s linear"
                     : "all 0.3s cubic-bezier(0.34, 1.56, 0.64, 1)",
-                  zIndex: hovered ? 20 : 1,
                   overflow: "visible",
                 }}
-                onMouseEnter={() => setHoveredId(a.id)}
-                onMouseLeave={() => setHoveredId(null)}
               >
                 {/* Tooltip */}
                 <div
-                  className="absolute right-full mr-3 whitespace-nowrap pointer-events-none"
-                  style={{
-                    opacity: hovered ? 1 : 0,
-                    transform: hovered ? "translateX(0)" : "translateX(8px)",
-                    transition: "all 0.2s ease-out",
-                  }}
+                  className="pointer-events-none absolute right-full mr-3 translate-x-2 whitespace-nowrap opacity-0 transition-all duration-200 ease-out group-hover/dock-avatar:translate-x-0 group-hover/dock-avatar:opacity-100"
                 >
                   <div className="px-3 py-1.5 rounded-xl glass text-right">
                     {(() => {
@@ -338,13 +346,9 @@ export default function AssistantDock({
 
                 {/* Avatar（超时不在此做脉冲，仅状态点与 tooltip 用红色强调） */}
                 <div
-                  className="relative z-[1] h-full w-full rounded-full overflow-hidden"
+                  className="relative z-[1] h-full w-full overflow-hidden rounded-full shadow-[0_2px_8px_rgba(0,0,0,0.1),0_0_0_1.5px_rgba(255,255,255,0.5)] transition-[box-shadow,transform] duration-150 ease-out group-hover/dock-avatar:scale-[1.03] group-hover/dock-avatar:shadow-[0_6px_24px_rgba(0,0,0,0.18),0_0_0_2px_rgba(255,255,255,0.7)]"
                   style={{
                     filter: isOffline ? "grayscale(1)" : "none",
-                    boxShadow: hovered
-                      ? "0 6px 24px rgba(0,0,0,0.18), 0 0 0 2px rgba(255,255,255,0.7)"
-                      : "0 2px 8px rgba(0,0,0,0.1), 0 0 0 1.5px rgba(255,255,255,0.5)",
-                    transition: "box-shadow 0.15s ease-out",
                   }}
                   onClick={(e) => {
                     if (!a.currentTaskId || !onNoteEdit) return;
