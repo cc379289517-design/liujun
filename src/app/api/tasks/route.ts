@@ -139,6 +139,20 @@ const STATS_TASK_SELECT = {
   completionRegistration: TASK_INCLUDE.completionRegistration,
 } as const;
 
+const ADMIN_LIST_TASK_SELECT = {
+  id: true,
+  photographerId: true,
+  assistantId: true,
+  locationBuildingId: true,
+  roomNumber: true,
+  priority: true,
+  status: true,
+  createdAt: true,
+  photographer: { select: { id: true, name: true, currentRoom: true, buildingId: true } },
+  assistant: { select: { id: true, name: true, currentRoom: true } },
+  category: { select: { id: true, name: true, priorityLevel: true } },
+} as const;
+
 const TASK_QUERY_LIMIT_MAX = 500;
 
 function parsePositiveIntParam(value: string | null, name: string): { value?: number; error?: Response } {
@@ -273,8 +287,8 @@ export async function GET(request: NextRequest) {
     if ((view === "photographer" || view === "assistant") && !profileId && !photographerId && !assistantId) {
       return Response.json({ error: "profileId is required for photographer or assistant view" }, { status: 400 });
     }
-    if (payload && !["stats"].includes(payload)) {
-      return Response.json({ error: "payload must be stats" }, { status: 400 });
+    if (payload && !["stats", "adminList"].includes(payload)) {
+      return Response.json({ error: "payload must be stats or adminList" }, { status: 400 });
     }
 
     if (scopedPhotographerId) where.photographerId = scopedPhotographerId;
@@ -332,6 +346,17 @@ export async function GET(request: NextRequest) {
       const tasks = await prisma.bookingTask.findMany({
         where,
         select: STATS_TASK_SELECT,
+        orderBy: [{ priority: "asc" }, { createdAt: "asc" }],
+        take,
+      });
+
+      return Response.json(tasks);
+    }
+
+    if (payload === "adminList") {
+      const tasks = await prisma.bookingTask.findMany({
+        where,
+        select: ADMIN_LIST_TASK_SELECT,
         orderBy: [{ priority: "asc" }, { createdAt: "asc" }],
         take,
       });

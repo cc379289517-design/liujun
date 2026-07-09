@@ -263,9 +263,9 @@ function adminTasksEndpoint(profile: Profile): string {
   const params = new URLSearchParams({
     todayOnly: "true",
     view: "admin",
+    payload: "adminList",
     buildingId: String(profile.buildingId),
     limit: "300",
-    includeCollaborators: "false",
   });
   return `/api/tasks?${params.toString()}`;
 }

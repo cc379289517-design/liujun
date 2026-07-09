@@ -6871,6 +6871,20 @@
 - 统计样本：`/api/tasks?weekOnly=true&weekOffset=0` 为 442527 bytes，`payload=stats` 为 310139 bytes，`payload=stats&buildingId=1` 为 61910 bytes。
 - 验证通过：`git diff --check`、`npx prisma validate`、`npx tsc --noEmit --pretty false --incremental false`、`DATABASE_URL=file:./prisma/loadtest.db npm run build`、本地生产服务接口样本。
 
+#### 阶段 E 第五批计划：管理员巡检任务列表轻量 payload
+
+- [x] `/api/tasks` 新增 `payload=adminList`，只返回管理员列表/压测巡检需要的任务基础字段、摄影师/助理/类别摘要，默认深详情保持兼容。
+- [x] 压测脚本管理员只读巡检改用 `payload=adminList`，继续带 `todayOnly/buildingId/limit`，避免把移交、提权、完成登记等详情关系当作周期巡检大包。
+- [x] 用隔离 `prisma/loadtest.db` 对比 `includeCollaborators=false` 旧路径与 `payload=adminList` 响应体；验证 TypeScript、生产 build。
+
+#### 阶段 E 第五批评审：管理员巡检任务列表轻量 payload
+
+- 改动范围：`src/app/api/tasks/route.ts` 新增 `payload=adminList`；只返回任务基础列、摄影师/助理摘要、类别摘要，默认深详情接口不变。
+- 压测贴近目标：`scripts/loadtest/run.ts` 的管理员周期巡检改用 `payload=adminList`，继续保留 `todayOnly/buildingId/limit=300`，避免用深详情污染百人压测中的管理员读路径。
+- 本地样本：隔离 `prisma/loadtest.db`、115 人/360 任务，旧管理员巡检 `/api/tasks?todayOnly=true&view=admin&buildingId=1&limit=300&includeCollaborators=false` 为 73015 bytes；新 `payload=adminList` 为 29873 bytes，约减少 59%。
+- Smoke：`admin-list-smoke-60s`，9 会话 60 秒，254 请求，0 错误；`readonly-admin-list GET /api/tasks` 平均 30353 bytes，p95 30353 bytes；`/api/workbench/sync` delta p95 bytes 6524。
+- 验证通过：`git diff --check`、`npx prisma validate`、`npx tsc --noEmit --pretty false --incremental false`、`DATABASE_URL=file:./prisma/loadtest.db npm run build`、本地生产服务接口样本和 smoke。
+
 ### 阶段 A 评审
 
 - 已完成压测工具：新增 `scripts/loadtest/seed.ts`、`run.ts`、`report.ts`、`common.ts`，不引入 k6/artillery 等新依赖；使用 Node 内置 `fetch`、现有 `tsx` 和 Prisma/SQLite。
