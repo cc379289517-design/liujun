@@ -7170,6 +7170,25 @@
 - 不变量审查通过：同助理多个执行/暂停根任务 0、重复 current primary 等价风险 0、熨烫 `using` 槽位超容量 0。
 - 验证通过：`git diff --check`、`npx tsc --noEmit --pretty false --incremental false`、`DATABASE_URL=file:./prisma/loadtest.db npm run build`、隔离库 seed、115 会话 3 分钟混合压测、raw 精查和 SQL 不变量审查。
 
+#### 阶段 E 第二十一批计划：创建任务前维护按需触发
+
+- [x] `POST /api/tasks` 在检查摄影师发布上限前，先用轻量 `findFirst` 判断该摄影师是否存在今天以前的 active 任务。
+- [x] 只有存在跨天遗留 active 任务时才执行 `runTaskMaintenance({ force: true })`；正常同一天高频发单不再每次强制跑完整维护链。
+- [x] 保留跨天旧任务清理语义，避免昨天未完成任务继续挡住摄影师发布上限。
+- [x] 不改变摄影师发布上限、个人队列、指定助理、自动派单、插单、熨烫机业务规则；创建成功后的节流维护仍保留。
+- [x] 验证 TypeScript、生产 build、创建接口样本、115 会话混合短测、raw 异常审查和状态不变量。
+
+#### 阶段 E 第二十一批评审：创建任务前维护按需触发
+
+- 改动范围：`src/app/api/tasks/route.ts` 新增 `photographerHasStaleActiveTasks()`；`POST /api/tasks` 仅在该摄影师存在今天以前的 `waiting/executing/paused` 任务时，才在发布上限检查前强制执行维护。
+- 行为保持：跨天旧任务仍会在可能影响发布上限时触发强制清理；正常同一天发单不再每次强制跑完整维护链。创建成功后的 `createdTaskResponse()` 仍保留节流维护。
+- 接口样本：隔离 `loadtest.db` 本地 3100 服务下，正常创建任务返回 201 / 1059 bytes，任务保持 `waiting`，未出现 500。
+- 115 会话混合短测：`phase-e21-create-maintenance-gated-mixed-115-3min`，80 摄影师、30 助理、5 管理，7084 请求、2 个业务 409，均为熨烫机暂无空位；无 HTTP 500、无 SQLite locked/busy、无 timeout。
+- 创建延迟收益：对比第二十批混合短测，`mixed-create` p50 从 129.3ms 降到 5.9ms，p95 从 237.5ms 降到 121.9ms，p99 从 390.7ms 降到 241.8ms。
+- 同步观察：`/api/workbench/sync` p50 10.1ms、p95 88.8ms、p99 169.7ms；delta 平均 9494.1 bytes、p95 16310 bytes。
+- 不变量审查通过：同助理多个执行/暂停根任务 0、重复 current primary 等价风险 0、熨烫 `using` 槽位超容量 0。
+- 验证通过：`git diff --check`、`npx tsc --noEmit --pretty false --incremental false`、`DATABASE_URL=file:./prisma/loadtest.db npm run build`、隔离库 seed、创建接口样本、115 会话 3 分钟混合压测、raw 精查和 SQL 不变量审查。
+
 ### 阶段 A 评审
 
 - 已完成压测工具：新增 `scripts/loadtest/seed.ts`、`run.ts`、`report.ts`、`common.ts`，不引入 k6/artillery 等新依赖；使用 Node 内置 `fetch`、现有 `tsx` 和 Prisma/SQLite。

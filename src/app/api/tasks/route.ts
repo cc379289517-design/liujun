@@ -21,6 +21,7 @@ const VISIBLE_PRIORITY_UPGRADE_REQUEST_STATUSES: PriorityUpgradeRequestStatus[] 
   PriorityUpgradeRequestStatus.approved,
 ];
 const VISIBLE_ASSISTANT_TRANSFER_REQUEST_STATUSES = ["confirming", "pending", "pending_after_complete", "ready_to_takeover"];
+const ACTIVE_TASK_STATUSES = [TaskStatus.waiting, TaskStatus.executing, TaskStatus.paused] as const;
 
 const TASK_INCLUDE = {
   photographer: { select: { id: true, name: true, currentRoom: true, buildingId: true } },
@@ -185,6 +186,20 @@ function taskBuildingWhere(buildingId: number) {
 async function createdTaskResponse(task: unknown) {
   await runTaskMaintenance();
   return Response.json(task, { status: 201 });
+}
+
+async function photographerHasStaleActiveTasks(photographerId: string): Promise<boolean> {
+  const now = new Date();
+  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const task = await prisma.bookingTask.findFirst({
+    where: {
+      photographerId,
+      createdAt: { lt: startOfToday },
+      status: { in: [...ACTIVE_TASK_STATUSES] },
+    },
+    select: { id: true },
+  });
+  return task != null;
 }
 
 function specifiedAssistantError(error: string, code: string, status = 409) {
@@ -460,7 +475,9 @@ export async function POST(request: NextRequest) {
       return specifiedAssistantError("指定助理不能为空，请重新选择", "SPECIFIED_ASSISTANT_REQUIRED", 400);
     }
 
-    await runTaskMaintenance({ force: true });
+    if (await photographerHasStaleActiveTasks(photographerId)) {
+      await runTaskMaintenance({ force: true });
+    }
 
     const taskLimit = await checkPhotographerActiveTaskLimit(photographerId);
     const queuedByPhotographerLimit = !taskLimit.allowed;
