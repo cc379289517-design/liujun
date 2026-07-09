@@ -6592,6 +6592,22 @@
 - 验证备注：本地 dev 首启仍需按既有脚本清理 `.next` 中 macOS `._*` 伴生文件和 Turbopack 缓存；本轮清理 882 个伴生文件。`/api/workbench/sync` 维护日志只影响隔离 `loadtest.db`。
 - 待后续：可以继续把 `publicQueueRaw` 接入 store，或针对移交请求这类条件筛选建立派生索引，进一步减少每轮渲染扫描。
 
+#### 阶段 D 第十六批计划：publicQueueRaw reducer 接入
+
+- [x] 复用 `useWorkbenchTaskSourceStore` 接管 `publicQueueRaw`，让公共队列也具备 `tasksById + orderedIds + tasksRef`。
+- [x] 将局部更新 helper、删除/插入 helper、workbench sync 合并中的公共队列写入改走 store 方法。
+- [x] 保持公共队列读侧数组、排序、动画、状态文案、同步增量合并和后端状态命令口径不变。
+- [x] 验证 `tsc`、`git diff --check`、生产构建和本地轻量接口；本批只做前端公共队列状态源等价优化，不更新长期业务文档。
+
+#### 阶段 D 第十六批评审：publicQueueRaw reducer 接入
+
+- 已完成：`publicQueueRaw` 复用 `useWorkbenchTaskSourceStore()`，和 `taskListRaw`、`assistantRawTasks` 一样拥有同步 `tasksRef`、reducer 快照和 indexed store 写入能力。
+- 已完成：`updateLocalTaskSources()`、`removeLocalTaskSources()`、`upsertLocalTaskSource()`、workbench sync 合并中的公共队列写入统一改为 store 方法，移除旧的手写 `publicQueueRawRef.current = ...` 和 `setPublicQueueRaw(...)`。
+- 已保持：公共队列读侧数组、排序、动画、状态文案、增量同步裁剪、熨烫/待就位/暂停展示口径不变；本批不改派单、优先级、熨烫机或移交业务规则。
+- 验证通过：`npx tsc --noEmit --pretty false --incremental false`、`git diff --check -- src/app/photographer/page.tsx tasks/todo.md tasks/lessons.md`、`DATABASE_URL=file:./prisma/loadtest.db npm run build`、本地隔离服务 `http://localhost:3100/photographer` 200、`/api/config` 200、`/api/workbench/sync?role=photographer&buildingId=1&full=1` 200。
+- 验证备注：本地 dev 首启仍需清理 `.next` 中 macOS `._*` 伴生文件和 Turbopack 缓存；本轮清理 882 个伴生文件。`/api/workbench/sync` 在隔离 `loadtest.db` 触发熨烫队列维护日志，不影响 `prisma/dev.db` 或生产库。
+- 待后续：继续把公共队列派生展示从每轮数组扫描推进到摘要/索引层，或进入移交请求、可开始池这类条件筛选的派生索引，但必须继续保持业务规则不变。
+
 ### 阶段 E：验收与对抗审查
 
 - [ ] 基线压测完成后，先根据报告排序瓶颈，再决定是否进入 B/C/D 的第一批代码改动。

@@ -135,3 +135,4 @@
 - 多任务源 reducer 化不要一次迁完 `taskListRaw/assistantRawTasks/publicQueueRaw`；先迁主源、验证全量应用和局部补丁，再迁助理源和公共队列，能降低状态卡片、列表和地图同时闪动的风险。
 - 当 store 方法会同步更新 ref 时，分支判断必须先保存调用前状态；例如 `assistantRawTasksRef.current.length` 在 `upsert/replace` 后会立即变化，不能再用它判断操作前是否为空。
 - 替换数组 `find()` 时要区分 id 索引查找和业务条件筛选：`id -> task` 可以走 store，移交请求/开始候选池这类条件筛选先保留数组逻辑，避免性能优化夹带规则变化。
+- 公共队列这类跨角色共享任务源也要接入同一 reducer/store；否则局部补丁、同步合并和动画读侧会继续分散维护 `setState/ref`，后续做摘要化或索引化时容易漏掉一个写入口。

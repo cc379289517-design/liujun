@@ -33,7 +33,6 @@ import {
 import { useWorkbenchTaskOptimism } from "./useWorkbenchTaskOptimism";
 import { useWorkbenchTaskSourceStore } from "./useWorkbenchTaskSourceStore";
 import {
-  removeTaskFromList,
   replaceOrRemoveTaskInList,
   updateTaskInList,
   upsertTaskInList,
@@ -819,7 +818,14 @@ export default function PhotographerPage() {
     getTaskListRawById(taskId) ?? getAssistantRawTaskById(taskId) ?? undefined
   ), [getAssistantRawTaskById, getTaskListRawById]);
   /** 当前区域公共队列：供所有人查看未分配、待就位、暂停任务 */
-  const [publicQueueRaw, setPublicQueueRaw] = useState<TaskFromAPI[]>([]);
+  const {
+    replaceTasks: replacePublicQueueRaw,
+    removeTask: removePublicQueueRawTask,
+    tasks: publicQueueRaw,
+    tasksRef: publicQueueRawRef,
+    updateTask: updatePublicQueueRawTask,
+    upsertTask: upsertPublicQueueRawTask,
+  } = useWorkbenchTaskSourceStore();
   const [publicQueueOpen, setPublicQueueOpen] = useState(false);
   const [mobileTab, setMobileTab] = useState<MobileWorkbenchTab>("current");
   const [mobileQuickBookCategory, setMobileQuickBookCategory] = useState<string | null>(null);
@@ -840,7 +846,6 @@ export default function PhotographerPage() {
   const publicQueuePromotionSignatureRef = useRef("");
   const publicQueuePromotionRunningRef = useRef(false);
   const pendingRawTaskRef = useRef<TaskFromAPI | null>(null);
-  const publicQueueRawRef = useRef<TaskFromAPI[]>([]);
   const workbenchSyncTokenRef = useRef<string | null>(null);
   const workbenchLastFullSyncAtRef = useRef(0);
   const pollingProfileId = profile?.id ?? null;
@@ -856,9 +861,6 @@ export default function PhotographerPage() {
   useEffect(() => {
     pendingRawTaskRef.current = pendingRawTask;
   }, [pendingRawTask]);
-  useEffect(() => {
-    publicQueueRawRef.current = publicQueueRaw;
-  }, [publicQueueRaw]);
   const assistantDockById = useMemo(
     () => new Map(assistants.map((assistant) => [assistant.id, assistant])),
     [assistants],
@@ -1366,12 +1368,7 @@ export default function PhotographerPage() {
     const nextTaskList = updateTaskListRaw(taskId, updateRawTask);
 
     updateAssistantRawTask(taskId, updateRawTask);
-
-    const nextPublicQueue = updateList(publicQueueRawRef.current);
-    if (nextPublicQueue !== publicQueueRawRef.current) {
-      publicQueueRawRef.current = nextPublicQueue;
-      setPublicQueueRaw(nextPublicQueue);
-    }
+    updatePublicQueueRawTask(taskId, updateRawTask);
 
     setCurrentRawTask((prev) => updateNullable(prev));
     setPausedRawTask((prev) => updateNullable(prev));
@@ -1396,7 +1393,7 @@ export default function PhotographerPage() {
       const updateDisplayTask = options.updateDisplay;
       setTasks((prev) => prev.map((task) => task.id === taskId ? updateDisplayTask(task) : task));
     }
-  }, [profile?.id, profile?.role, updateAssistantRawTask, updateTaskListRaw]);
+  }, [profile?.id, profile?.role, updateAssistantRawTask, updatePublicQueueRawTask, updateTaskListRaw]);
 
   const removeLocalTaskSources = useCallback((
     taskId: string,
@@ -1405,18 +1402,12 @@ export default function PhotographerPage() {
       updatePublicQueue?: boolean;
     },
   ) => {
-    const removeFromList = (list: TaskFromAPI[]) => removeTaskFromList(list, taskId);
-
     const nextTaskList = removeTaskListRaw(taskId);
 
     removeAssistantRawTask(taskId);
 
     if (options?.updatePublicQueue) {
-      const nextPublicQueue = removeFromList(publicQueueRawRef.current);
-      if (nextPublicQueue !== publicQueueRawRef.current) {
-        publicQueueRawRef.current = nextPublicQueue;
-        setPublicQueueRaw(nextPublicQueue);
-      }
+      removePublicQueueRawTask(taskId);
     }
 
     const clearIfTarget = (task: TaskFromAPI | null) => task?.id === taskId ? null : task;
@@ -1432,7 +1423,7 @@ export default function PhotographerPage() {
     if (options?.updateDisplay) {
       setTasks((prev) => prev.filter((task) => task.id !== taskId));
     }
-  }, [removeAssistantRawTask, removeTaskListRaw]);
+  }, [removeAssistantRawTask, removePublicQueueRawTask, removeTaskListRaw]);
 
   const upsertLocalTaskSource = useCallback((
     task: TaskFromAPI,
@@ -1441,7 +1432,6 @@ export default function PhotographerPage() {
       updatePublicQueue?: boolean;
     },
   ) => {
-    const upsertList = (list: TaskFromAPI[]) => upsertTaskInList(list, task, { moveExisting: true });
     const nextTaskList = upsertTaskListRaw(task, { moveExisting: true });
 
     if (assistantRawTasksRef.current.some((item) => item.id === task.id)) {
@@ -1449,9 +1439,7 @@ export default function PhotographerPage() {
     }
 
     if (options?.updatePublicQueue) {
-      const nextPublicQueue = upsertList(publicQueueRawRef.current);
-      publicQueueRawRef.current = nextPublicQueue;
-      setPublicQueueRaw(nextPublicQueue);
+      upsertPublicQueueRawTask(task, { moveExisting: true });
     }
 
     setTasks((prev) => {
@@ -1463,7 +1451,7 @@ export default function PhotographerPage() {
         : [display, ...withoutTask];
       return sortTasksByStatus(replaced);
     });
-  }, [profile?.id, profile?.role, upsertAssistantRawTask, upsertTaskListRaw]);
+  }, [profile?.id, profile?.role, upsertAssistantRawTask, upsertPublicQueueRawTask, upsertTaskListRaw]);
 
   const mergeAuthoritativeTaskForProfile = useCallback((
     updatedTask: TaskFromAPI,
@@ -2531,8 +2519,7 @@ export default function PhotographerPage() {
           workbenchLastFullSyncAtRef.current = Date.now();
         }
         startTransition(() => {
-          publicQueueRawRef.current = mergedPublicQueue;
-          setPublicQueueRaw(mergedPublicQueue);
+          replacePublicQueueRaw(mergedPublicQueue);
           setReassignmentNotices(isAssistantRole(pollingProfile.role) ? noticeData : []);
           applyTaskDataForProfile(mergedTaskData, pollingProfile, buildingId);
         });
@@ -2561,7 +2548,7 @@ export default function PhotographerPage() {
       if (timer) clearTimeout(timer);
       document.removeEventListener("visibilitychange", onVisibilityChange);
     };
-  }, [activeBuildingId, applyTaskDataForProfile, pollingProfile, refreshAssistants]);
+  }, [activeBuildingId, applyTaskDataForProfile, pollingProfile, refreshAssistants, replacePublicQueueRaw]);
 
   // Map pan handlers
   const handleMapPanDown = useCallback(
