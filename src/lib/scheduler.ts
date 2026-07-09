@@ -3631,6 +3631,8 @@ type TaskMaintenanceResult = {
   escalated: number;
   assigned: number;
   skipped: boolean;
+  scheduled?: boolean;
+  running?: boolean;
 };
 
 let _maintenanceRunning: Promise<TaskMaintenanceResult> | null = null;
@@ -3672,6 +3674,21 @@ export async function runTaskMaintenance(
 
 export async function runWorkbenchSyncMaintenance(): Promise<TaskMaintenanceResult> {
   return runTaskMaintenance({ minIntervalMs: WORKBENCH_SYNC_MAINTENANCE_THROTTLE_MS });
+}
+
+export function scheduleWorkbenchSyncMaintenance(): TaskMaintenanceResult {
+  if (_maintenanceRunning) {
+    return { cleaned: 0, escalated: 0, assigned: 0, skipped: true, running: true };
+  }
+  const now = Date.now();
+  if (now - _lastMaintenanceAt < WORKBENCH_SYNC_MAINTENANCE_THROTTLE_MS) {
+    return { cleaned: 0, escalated: 0, assigned: 0, skipped: true };
+  }
+
+  void runWorkbenchSyncMaintenance().catch((error) => {
+    console.error("[scheduleWorkbenchSyncMaintenance]", error);
+  });
+  return { cleaned: 0, escalated: 0, assigned: 0, skipped: false, scheduled: true };
 }
 
 /**

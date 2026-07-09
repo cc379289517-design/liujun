@@ -1,6 +1,6 @@
 import { NextRequest } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { runWorkbenchSyncMaintenance } from "@/lib/scheduler";
+import { scheduleWorkbenchSyncMaintenance } from "@/lib/scheduler";
 import { Prisma, PriorityUpgradeRequestStatus } from "@/generated/prisma/client";
 import {
   ASSISTANT_EATING_SUB_STATUS,
@@ -686,7 +686,7 @@ export async function GET(request: NextRequest) {
       return Response.json({ error: "buildingId is required" }, { status: 400 });
     }
 
-    const maintenance = await runWorkbenchSyncMaintenance();
+    const maintenance = scheduleWorkbenchSyncMaintenance();
     const createdAt = todayRange();
     const areaWhere = taskBuildingWhere(buildingId);
 

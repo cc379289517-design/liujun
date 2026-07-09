@@ -6885,6 +6885,24 @@
 - Smoke：`admin-list-smoke-60s`，9 会话 60 秒，254 请求，0 错误；`readonly-admin-list GET /api/tasks` 平均 30353 bytes，p95 30353 bytes；`/api/workbench/sync` delta p95 bytes 6524。
 - 验证通过：`git diff --check`、`npx prisma validate`、`npx tsc --noEmit --pretty false --incremental false`、`DATABASE_URL=file:./prisma/loadtest.db npm run build`、本地生产服务接口样本和 smoke。
 
+#### 阶段 E 第六批计划：工作台同步维护非阻塞化
+
+- [x] 将 `/api/workbench/sync` 的服务端维护从 `await runWorkbenchSyncMaintenance()` 改为后台调度：同步请求只触发维护，不等待全局 sweep/状态修复完成。
+- [x] 写操作和显式 `/api/tasks/sweep` 仍保留现有 `runTaskMaintenance({ force })` 行为，保证开始/完成/取消/移交后的后端权威状态维护不削弱。
+- [x] 维护调度继续复用单进程 `_maintenanceRunning` 和 15 秒节流，避免 150 人 2-3 秒轮询放大成维护风暴。
+- [x] 验证 TypeScript、生产 build、smoke；观察 `/api/workbench/sync` p95 是否不再被维护等待拖高。
+
+#### 阶段 E 第六批评审：工作台同步维护非阻塞化
+
+- 改动范围：`src/lib/scheduler.ts` 新增 `scheduleWorkbenchSyncMaintenance()`，沿用 `_maintenanceRunning` 和 15 秒节流；`src/app/api/workbench/sync/route.ts` 改为触发后台维护后立即继续组装同步响应。
+- 行为保持：写操作和显式 `/api/tasks/sweep` 仍走原维护链路；状态命令、优先级、摄影师上限、熨烫机槽位、移交规则均未变化，本批只减少读同步等待全局维护的时间。
+- Smoke：`nonblocking-maintenance-smoke-60s`，9 会话 60 秒，254 请求，0 错误；`/api/workbench/sync` p50 17.1ms、p95 29ms、p99 199.4ms、max 315ms，delta p95 bytes 6505，维护响应 observed 4 次。
+- 混合短测：`nonblocking-maintenance-mixed-115-3min`，80 摄影师、30 助理、5 管理，7255 请求；358 个错误全部为预期业务 409；`/api/workbench/sync` p50 9.5ms、p95 151ms、p99 327.1ms、max 1701.9ms，sync 0 错误。
+- 体积观察：混合短测 admin list 平均 34517 bytes、p95 37081 bytes；full 110 次共 10.93MB、平均 104207 bytes；delta 6482 次共 53.22MB、平均 8608.8 bytes、p95 14776 bytes。
+- 409 分类：`mixed-start` 257 次，其中 228 次为“当前助理已有执行中或暂停中的任务，不能开始熨烫任务”，29 次为“当前有更高优先级任务可开始”；`mixed-create` 101 次为摄影师发布上限队列满。
+- 不变量审查通过：无同助理多个活跃真实主任务、无重复 current primary、无熨烫 `using` 槽位超容量；raw 日志未见 500、timeout、SQLite locked/busy。
+- 结论：读同步不再被服务端维护硬等待拖住，smoke p95 从上一轮约 45ms 降到 29ms；混合场景主要剩余压力来自写入期间 SQLite 读排队和无效 start 尝试。下一批优先减少前端/压测对“已有执行/暂停任务助理”的无效熨烫开始请求，并继续观察混合写下 sync p95。
+
 ### 阶段 A 评审
 
 - 已完成压测工具：新增 `scripts/loadtest/seed.ts`、`run.ts`、`report.ts`、`common.ts`，不引入 k6/artillery 等新依赖；使用 Node 内置 `fetch`、现有 `tsx` 和 Prisma/SQLite。
