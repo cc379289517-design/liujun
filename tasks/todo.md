@@ -6415,6 +6415,23 @@
 - 验证通过：`npx tsc --noEmit --pretty false --incremental false`、`git diff --check -- src/app/photographer/AssistantDock.tsx tasks/todo.md tasks/lessons.md`、`DATABASE_URL=file:./prisma/loadtest.db npm run build`、本地隔离服务 `http://localhost:3100/photographer` 200、`/api/config` 200、`/api/workbench/sync?role=photographer&buildingId=1&full=1` 200。
 - 待后续：阶段 D 剩余重点转向本地 reducer/store 与任务源 helper 收口，减少备注、反馈、提权、移交协作等操作后的多组 `setState`。
 
+#### 阶段 D 第六批计划：单任务局部更新 helper 收口
+
+- [x] 新增一个工作台单任务局部更新 helper：按 `taskId + updater` 同步更新 `taskListRaw`、`assistantRawTasks`、`publicQueueRaw`、当前/暂停/pending/让行任务卡、周统计相关任务和展示 `tasks`。
+- [x] 第一批替换低风险等价路径：取消指定助理、备注保存、摄影师反馈、提权申请、完工登记、协作保存，减少每处手写 6-9 组 `setState`。
+- [x] helper 内同步维护 `taskListRawRef/assistantRawTasksRef/publicQueueRawRef`，避免操作后下一次合并又读到旧 ref。
+- [x] 本批不改变任何后端状态命令、派单规则、优先级、熨烫机、移交或评分规则；长期业务文档无需更新。
+- [x] 验证 `tsc`、`git diff --check`、`DATABASE_URL=file:./prisma/loadtest.db npm run build`，并记录评审与经验。
+
+#### 阶段 D 第六批评审：单任务局部更新 helper 收口
+
+- 已完成：新增 `updateLocalTaskSources(taskId, updater, options)`，统一把单任务补丁同步到 `taskListRaw`、`assistantRawTasks`、`publicQueueRaw`、当前/暂停/pending/让行任务卡、周统计任务和展示任务列表。
+- 已完成：helper 会同步更新 `taskListRawRef/assistantRawTasksRef/publicQueueRawRef`，并在 pending 任务卡更新时同步 `pendingRawTaskRef`，减少后续合并读取旧 ref 的风险。
+- 已替换：取消指定助理、备注保存、摄影师反馈、提权申请、完工登记、协作保存六条低风险路径；其中备注保存顺带补齐了原本未同步 `deferredWaitingRawTask/publicQueueRaw` 的本地一致性缺口。
+- 业务边界：本批只做前端本地任务源收口，不改变 API、后端状态命令、派单规则、优先级、熨烫机、移交、评分或数据库结构；长期业务文档无需新增规则。
+- 验证通过：`npx tsc --noEmit --pretty false --incremental false`、`git diff --check -- src/app/photographer/page.tsx tasks/todo.md tasks/lessons.md`、`DATABASE_URL=file:./prisma/loadtest.db npm run build`、本地隔离服务 `http://localhost:3100/photographer` 200、`/api/config` 200、`/api/workbench/sync?role=photographer&buildingId=1&full=1` 200。
+- 待后续：继续把插入/删除类路径、移交响应这类带可见性变化的任务源更新分批收口；完整 reducer/store 仍未完成。
+
 ### 阶段 E：验收与对抗审查
 
 - [ ] 基线压测完成后，先根据报告排序瓶颈，再决定是否进入 B/C/D 的第一批代码改动。

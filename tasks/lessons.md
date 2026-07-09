@@ -121,3 +121,4 @@
 - 弱网/轮询并发下，操作成功后的权威任务合并不能读取旧 React 闭包数组；应以同步维护的 refs 作为当前任务源，并用短 TTL recent patch 保护刚操作的任务，避免旧快照闪回。
 - 地图拖拽/缩放这类高频交互不要每个 pointer/wheel 事件都 `setState`；应把即时 pan/zoom 放进 ref，用 `requestAnimationFrame` 直接更新地图 transform，手势结束或滚轮停顿后再提交 React 状态。
 - Dock 这类密集头像 hover 不需要 React 状态驱动 tooltip 和阴影；用 CSS `group-hover` 处理显隐/层级/视觉反馈，鼠标移动曲线只用 rAF 合并坐标提交，能减少扫过多名助理时的无意义重渲染。
+- 工作台单任务局部补丁不要在每个操作里手写多组 `setTaskListRaw/setCurrentRawTask/setPublicQueueRaw`；应统一 helper 同步 raw refs、当前卡片、公共队列和展示列表，否则很容易漏掉让行任务或公共队列导致局部 UI 不一致。

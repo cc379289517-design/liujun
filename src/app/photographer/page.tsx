@@ -1358,6 +1358,70 @@ export default function PhotographerPage() {
     }
   }, []);
 
+  const updateLocalTaskSources = useCallback((
+    taskId: string,
+    updateRawTask: (task: TaskFromAPI) => TaskFromAPI,
+    options?: {
+      updateDisplay?: boolean | ((task: DisplayTask) => DisplayTask);
+      updateWeekly?: boolean;
+      updateAreaCompletedWeekly?: boolean;
+    },
+  ) => {
+    const updateList = (list: TaskFromAPI[]): TaskFromAPI[] => {
+      let changed = false;
+      const next = list.map((task) => {
+        if (task.id !== taskId) return task;
+        changed = true;
+        return updateRawTask(task);
+      });
+      return changed ? next : list;
+    };
+    const updateNullable = (task: TaskFromAPI | null): TaskFromAPI | null =>
+      task?.id === taskId ? updateRawTask(task) : task;
+
+    const nextTaskList = updateList(taskListRawRef.current);
+    if (nextTaskList !== taskListRawRef.current) {
+      taskListRawRef.current = nextTaskList;
+      setTaskListRaw(nextTaskList);
+    }
+
+    const nextAssistantTasks = updateList(assistantRawTasksRef.current);
+    if (nextAssistantTasks !== assistantRawTasksRef.current) {
+      assistantRawTasksRef.current = nextAssistantTasks;
+      setAssistantRawTasks(nextAssistantTasks);
+    }
+
+    const nextPublicQueue = updateList(publicQueueRawRef.current);
+    if (nextPublicQueue !== publicQueueRawRef.current) {
+      publicQueueRawRef.current = nextPublicQueue;
+      setPublicQueueRaw(nextPublicQueue);
+    }
+
+    setCurrentRawTask((prev) => updateNullable(prev));
+    setPausedRawTask((prev) => updateNullable(prev));
+    setPendingRawTask((prev) => {
+      const next = updateNullable(prev);
+      pendingRawTaskRef.current = next;
+      return next;
+    });
+    setDeferredWaitingRawTask((prev) => updateNullable(prev));
+
+    if (options?.updateWeekly) {
+      setWeeklyTasks((prev) => updateList(prev));
+    }
+    if (options?.updateAreaCompletedWeekly) {
+      setAreaCompletedWeeklyTasks((prev) => updateList(prev));
+    }
+
+    if (options?.updateDisplay === true) {
+      const assistantViewProfileId = isAssistantRole(profile?.role) ? profile?.id : undefined;
+      setTasks(sortTasksByStatus(nextTaskList.map((task) => apiTaskToDisplay(task, assistantViewProfileId))));
+    } else if (typeof options?.updateDisplay === "function") {
+      const updateDisplayTask = options.updateDisplay;
+      setTasks((prev) => prev.map((task) => task.id === taskId ? updateDisplayTask(task) : task));
+    }
+  }, [profile?.id, profile?.role]);
+
   const mergeAuthoritativeTaskForProfile = useCallback((
     updatedTask: TaskFromAPI,
     targetProfile = profile,
@@ -2964,19 +3028,7 @@ export default function PhotographerPage() {
       }
       const updated = await response.json() as TaskFromAPI | null;
       if (updated) {
-        const updateRaw = (item: TaskFromAPI): TaskFromAPI => item.id === updated.id ? updated : item;
-        setTaskListRaw((prev) => prev.map(updateRaw));
-        setAssistantRawTasks((prev) => prev.map(updateRaw));
-        setWeeklyTasks((prev) => prev.map(updateRaw));
-        setPublicQueueRaw((prev) => prev.map(updateRaw));
-        setCurrentRawTask((prev) => prev?.id === updated.id ? updated : prev);
-        setPausedRawTask((prev) => prev?.id === updated.id ? updated : prev);
-        setPendingRawTask((prev) => prev?.id === updated.id ? updated : prev);
-        setDeferredWaitingRawTask((prev) => prev?.id === updated.id ? updated : prev);
-        setTasks((prev) => prev.map((item) => item.id === updated.id
-          ? apiTaskToDisplay(updated, isAssistantRole(profile?.role) ? profile?.id : undefined)
-          : item
-        ));
+        updateLocalTaskSources(updated.id, () => updated, { updateDisplay: true, updateWeekly: true });
       }
       setHoveredSpecifiedTaskId(null);
       refreshAssistants();
@@ -2986,7 +3038,7 @@ export default function PhotographerPage() {
     } finally {
       setCancelingSpecifiedTaskId(null);
     }
-  }, [canCancelSpecifiedAssistant, cancelingSpecifiedTaskId, profile?.id, profile?.role, refreshAssistants, showTaskCreateError]);
+  }, [canCancelSpecifiedAssistant, cancelingSpecifiedTaskId, profile?.id, refreshAssistants, showTaskCreateError, updateLocalTaskSources]);
 
   const switchIdentity = useCallback((p: typeof allProfiles[0]) => {
     safeLocalStorageSet("currentProfileId", p.id);
@@ -3380,16 +3432,12 @@ export default function PhotographerPage() {
         showTaskCreateError(data?.error || "备注保存失败，请稍后重试");
         return;
       }
-      // 更新本地 taskListRaw 和 assistantRawTasks 中的 note
-      setTaskListRaw((prev) => prev.map((t) => t.id === taskId ? { ...t, note: note.trim() || null } : t));
-      setAssistantRawTasks((prev) => prev.map((t) => t.id === taskId ? { ...t, note: note.trim() || null } : t));
-      setCurrentRawTask((prev) => prev?.id === taskId ? { ...prev, note: note.trim() || null } : prev);
-      setPausedRawTask((prev) => prev?.id === taskId ? { ...prev, note: note.trim() || null } : prev);
-      setPendingRawTask((prev) => prev?.id === taskId ? { ...prev, note: note.trim() || null } : prev);
+      const nextNote = note.trim() || null;
+      updateLocalTaskSources(taskId, (task) => ({ ...task, note: nextNote }), { updateDisplay: true });
     } finally {
       setNoteSaving(false);
     }
-  }, [noteTaskIsExecuting, profile, showTaskCreateError]);
+  }, [noteTaskIsExecuting, profile, showTaskCreateError, updateLocalTaskSources]);
 
   const handlePublisherFeedback = useCallback(async (
     task: DisplayTask,
@@ -3409,22 +3457,11 @@ export default function PhotographerPage() {
 
       const updateRawFeedback = (item: TaskFromAPI): TaskFromAPI =>
         item.id === task.id ? { ...item, publisherFeedback: nextFeedback } : item;
-      const updateDisplayFeedback = (item: DisplayTask): DisplayTask =>
-        item.id === task.id ? { ...item, publisherFeedback: nextFeedback } : item;
-
-      setTasks((prev) => prev.map(updateDisplayFeedback));
-      setTaskListRaw((prev) => prev.map(updateRawFeedback));
-      setWeeklyTasks((prev) => prev.map(updateRawFeedback));
-      setPublicQueueRaw((prev) => prev.map(updateRawFeedback));
-      setAssistantRawTasks((prev) => prev.map(updateRawFeedback));
-      setCurrentRawTask((prev) => prev?.id === task.id ? { ...prev, publisherFeedback: nextFeedback } : prev);
-      setPausedRawTask((prev) => prev?.id === task.id ? { ...prev, publisherFeedback: nextFeedback } : prev);
-      setPendingRawTask((prev) => prev?.id === task.id ? { ...prev, publisherFeedback: nextFeedback } : prev);
-      setDeferredWaitingRawTask((prev) => prev?.id === task.id ? { ...prev, publisherFeedback: nextFeedback } : prev);
+      updateLocalTaskSources(task.id, updateRawFeedback, { updateDisplay: true, updateWeekly: true });
     } finally {
       setPublisherFeedbackSavingId(null);
     }
-  }, [profile, publisherFeedbackSavingId]);
+  }, [profile, publisherFeedbackSavingId, updateLocalTaskSources]);
 
   const pendingPriorityUpgradeForTask = useCallback((task: TaskFromAPI | null | undefined) => (
     task?.priorityUpgradeRequests?.find((request) => request.status === "pending") ?? null
@@ -3516,14 +3553,7 @@ export default function PhotographerPage() {
         task.id === priorityUpgradeTask.id
           ? { ...task, priorityUpgradeRequests: [pendingRequest] }
           : task;
-      setTaskListRaw((prev) => prev.map(markPending));
-      setWeeklyTasks((prev) => prev.map(markPending));
-      setPublicQueueRaw((prev) => prev.map(markPending));
-      setAssistantRawTasks((prev) => prev.map(markPending));
-      setCurrentRawTask((prev) => prev?.id === priorityUpgradeTask.id ? markPending(prev) : prev);
-      setPausedRawTask((prev) => prev?.id === priorityUpgradeTask.id ? markPending(prev) : prev);
-      setPendingRawTask((prev) => prev?.id === priorityUpgradeTask.id ? markPending(prev) : prev);
-      setDeferredWaitingRawTask((prev) => prev?.id === priorityUpgradeTask.id ? markPending(prev) : prev);
+      updateLocalTaskSources(priorityUpgradeTask.id, markPending, { updateDisplay: true, updateWeekly: true });
       setPriorityUpgradeTask(null);
       setPriorityUpgradeSku("");
       setPriorityUpgradeReason("");
@@ -3532,7 +3562,7 @@ export default function PhotographerPage() {
     } finally {
       setPriorityUpgradeSaving(false);
     }
-  }, [priorityUpgradeReason, priorityUpgradeSaving, priorityUpgradeSku, priorityUpgradeTask, profile]);
+  }, [priorityUpgradeReason, priorityUpgradeSaving, priorityUpgradeSku, priorityUpgradeTask, profile, updateLocalTaskSources]);
 
   const openCompletionRegistrationModal = useCallback((task: TaskFromAPI) => {
     const registration = task.completionRegistration;
@@ -3562,16 +3592,12 @@ export default function PhotographerPage() {
   const applyCompletionRegistration = useCallback((taskId: string, registration: TaskCompletionRegistration) => {
     const updateTask = (task: TaskFromAPI): TaskFromAPI =>
       task.id === taskId ? { ...task, completionRegistration: registration } : task;
-    setTaskListRaw((prev) => prev.map(updateTask));
-    setAssistantRawTasks((prev) => prev.map(updateTask));
-    setWeeklyTasks((prev) => prev.map(updateTask));
-    setAreaCompletedWeeklyTasks((prev) => prev.map(updateTask));
-    setPublicQueueRaw((prev) => prev.map(updateTask));
-    setCurrentRawTask((prev) => prev?.id === taskId ? updateTask(prev) : prev);
-    setPausedRawTask((prev) => prev?.id === taskId ? updateTask(prev) : prev);
-    setPendingRawTask((prev) => prev?.id === taskId ? updateTask(prev) : prev);
-    setDeferredWaitingRawTask((prev) => prev?.id === taskId ? updateTask(prev) : prev);
-  }, []);
+    updateLocalTaskSources(taskId, updateTask, {
+      updateDisplay: true,
+      updateWeekly: true,
+      updateAreaCompletedWeekly: true,
+    });
+  }, [updateLocalTaskSources]);
 
   const handleCompletionRegistrationFiles = useCallback((files: FileList | null) => {
     if (!files) return;
@@ -3751,11 +3777,7 @@ export default function PhotographerPage() {
         return;
       }
       const updated = await res.json() as TaskFromAPI;
-      setTaskListRaw((prev) => prev.map((t) => t.id === updated.id ? updated : t));
-      setAssistantRawTasks((prev) => prev.map((t) => t.id === updated.id ? updated : t));
-      setCurrentRawTask((prev) => prev?.id === updated.id ? updated : prev);
-      setPausedRawTask((prev) => prev?.id === updated.id ? updated : prev);
-      setPendingRawTask((prev) => prev?.id === updated.id ? updated : prev);
+      updateLocalTaskSources(updated.id, () => updated, { updateDisplay: true });
       refreshAssistants();
       setCollabTaskId(null);
       setCollabSelectedIds([]);
@@ -3763,7 +3785,7 @@ export default function PhotographerPage() {
     } finally {
       setCollabSaving(false);
     }
-  }, [collabSelectedIds, collabTaskId, collaborationEnabledByBuilding, collaborationMaxByBuilding, collaborationQueueAutoCloseLimit, profile?.id, profile?.role, publicQueueCountByBuilding, refreshAssistants, taskListRaw]);
+  }, [collabSelectedIds, collabTaskId, collaborationEnabledByBuilding, collaborationMaxByBuilding, collaborationQueueAutoCloseLimit, profile?.id, profile?.role, publicQueueCountByBuilding, refreshAssistants, taskListRaw, updateLocalTaskSources]);
 
   // 助理：手动暂停当前任务（插单场景）
   const handlePauseCurrentTask = useCallback(async () => {
