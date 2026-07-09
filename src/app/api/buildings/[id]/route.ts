@@ -2,6 +2,7 @@ import { NextRequest } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { writeFile } from "fs/promises";
 import path from "path";
+import { serializeBuildingForJson } from "@/lib/buildingPayload";
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -42,7 +43,7 @@ export async function PATCH(request: NextRequest, { params }: RouteContext) {
       where: { id: parseInt(id) },
       data,
     });
-    return Response.json(building);
+    return Response.json(serializeBuildingForJson(building));
   } catch (error) {
     console.error("[PATCH /api/buildings/[id]]", error);
     return Response.json({ error: "Failed to update building" }, { status: 500 });

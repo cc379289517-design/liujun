@@ -1,5 +1,6 @@
 import { NextRequest } from "next/server";
 import { prisma } from "@/lib/prisma";
+import { serializeBuildingForJson } from "@/lib/buildingPayload";
 
 /**
  * GET /api/buildings - 获取所有楼座及房间
@@ -32,7 +33,7 @@ export async function GET(request: NextRequest) {
       orderBy: { id: "asc" },
     });
 
-    return Response.json(buildings);
+    return Response.json(buildings.map(serializeBuildingForJson));
   } catch (error) {
     console.error("[GET /api/buildings]", error);
     return Response.json({ error: "Failed to fetch buildings" }, { status: 500 });
@@ -56,7 +57,7 @@ export async function POST(request: NextRequest) {
       include: { rooms: true, ironingMachines: true },
     });
 
-    return Response.json(building, { status: 201 });
+    return Response.json(serializeBuildingForJson(building), { status: 201 });
   } catch (error) {
     console.error("[POST /api/buildings]", error);
     return Response.json({ error: "Failed to create building" }, { status: 500 });

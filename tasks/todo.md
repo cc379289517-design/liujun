@@ -6786,6 +6786,26 @@
 - 页面冒烟：隔离 `loadtest.db` 下 `/admin` 200 / 13165 bytes，`/stats` 200 / 9926 bytes，`/photographer` 200 / 37866 bytes。
 - 待后续：继续查 `/api/categories`、后台配置读取和统计明细聚合；如果后台首屏仍慢，下一刀应优先看客户端执行时的 API waterfall，而不是再改已经很小的 summary 楼座数据。
 
+#### 阶段 D 第二十六批计划：楼座平面图大字段图片路由
+
+- [x] 新增 building payload helper：当楼座 `floorPlanUrl` 是 `data:image/...;base64` 时，API 响应改成 `/api/buildings/:id/floor-plan` 短 URL；普通 `/uploads/...` 或外链保持原值。
+- [x] 新增 `/api/buildings/:id/floor-plan` 图片路由：兼容 data URL 输出真实图片，支持 ETag/304；普通路径或外链走重定向。
+- [x] `/api/buildings` 的 full 默认路径和 `view=full` 继续返回完整结构，但不再把 base64 平面图塞进 JSON；POST/PATCH 返回同口径短 URL，上传和保存能力不变。
+- [x] 摄影师工作台、空间管理、地图编辑器继续把 `floorPlanUrl` 当 `<img src>` 使用，不改地图交互、房间坐标、裁剪、熨烫机或派单业务规则。
+- [x] 验证生产同类数据下 full buildings 体积显著下降，图片路由可取图且缓存命中；跑 `tsc`、`git diff --check`、生产构建和页面冒烟。
+
+#### 阶段 D 第二十六批评审：楼座平面图大字段图片路由
+
+- 已完成：新增 `src/lib/buildingPayload.ts`，统一把 data URL 平面图序列化为 `/api/buildings/:id/floor-plan`；`/uploads/...` 和外链保持原值，避免破坏已有文件上传路径。
+- 已完成：新增 `/api/buildings/:id/floor-plan`，data URL 返回真实图片 `Content-Type/Content-Length/ETag`，命中 `If-None-Match` 返回 304；普通路径或外链走 307 重定向。
+- 已完成：`GET /api/buildings` full、`POST /api/buildings`、`PATCH /api/buildings/:id` 返回同口径短 URL；数据库写入格式和空间管理上传能力不变。
+- 已保持：摄影师工作台、空间管理和地图编辑器继续把 `floorPlanUrl` 当图片地址使用；地图拖拽、裁剪、房间坐标、熨烫机、状态命令、派单和业务规则均未改变。
+- 验证通过：`npx prisma validate`、`npx tsc --noEmit --pretty false --incremental false`、`git diff --check`、`DATABASE_URL=file:./prisma/loadtest.db npm run build`。
+- 本地隔离服务验证：给 1 号楼写入测试 data URL 后，`/api/buildings` 200 / 22381 bytes，首项 `floorPlanUrl=/api/buildings/1/floor-plan` 且不以 `data:` 开头；`/api/buildings/1/floor-plan` 200 / 68 bytes / image，带 ETag 后 304 / 0 bytes。
+- 页面冒烟：隔离 `loadtest.db` 下 `/admin` 200 / 13165 bytes，`/stats` 200 / 9926 bytes，`/photographer` 200 / 37866 bytes。
+- 生产证据：第二十五批发布后 Mac mini `/api/buildings` full 为 19813561 bytes、summary 为 134 bytes，说明生产平面图大字段是当前工作台首屏主要 JSON 负担；本批发布后应复核 full 是否降到 KB 级，平面图改由图片缓存承担。
+- 待后续：如果楼座平面图仍长期存在 SQLite 文本中，下一阶段可考虑把图片迁到 `public/uploads` 或对象存储；本批先解决高频 JSON 传输和解析压力。
+
 ### 阶段 A 评审
 
 - 已完成压测工具：新增 `scripts/loadtest/seed.ts`、`run.ts`、`report.ts`、`common.ts`，不引入 k6/artillery 等新依赖；使用 Node 内置 `fetch`、现有 `tsx` 和 Prisma/SQLite。
