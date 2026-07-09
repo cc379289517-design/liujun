@@ -10,6 +10,7 @@ import {
   runTaskMaintenance,
   requestPrimaryAssistantTransfer,
   syncProfileStatus,
+  scheduleTaskMaintenance,
   updateTaskParticipantStatus,
 } from "@/lib/scheduler";
 import { TaskStatus, ProfileStatus, Role } from "@/generated/prisma/client";
@@ -304,7 +305,7 @@ export async function PATCH(request: NextRequest, { params }: RouteContext) {
         }
         await updateTaskParticipantStatus(id, actorId, "completed");
         const updated = await loadTaskDetail(id);
-        await runTaskMaintenance({ force: true });
+        scheduleTaskMaintenance();
         return Response.json(updated);
       }
 
@@ -338,7 +339,7 @@ export async function PATCH(request: NextRequest, { params }: RouteContext) {
         if (newStatus === "completed") {
           await completeTask(id);
           const updated = await loadTaskDetail(id);
-          await runTaskMaintenance({ force: true });
+          scheduleTaskMaintenance();
           return Response.json(updated);
         }
 

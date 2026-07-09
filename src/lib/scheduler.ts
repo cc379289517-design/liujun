@@ -3683,6 +3683,21 @@ export async function runWorkbenchSyncMaintenance(): Promise<TaskMaintenanceResu
   return runTaskMaintenance({ minIntervalMs: WORKBENCH_SYNC_MAINTENANCE_THROTTLE_MS });
 }
 
+export function scheduleTaskMaintenance(): TaskMaintenanceResult {
+  if (_maintenanceRunning) {
+    return { cleaned: 0, escalated: 0, assigned: 0, skipped: true, running: true };
+  }
+  const now = Date.now();
+  if (now - _lastMaintenanceAt < TASK_MAINTENANCE_THROTTLE_MS) {
+    return { cleaned: 0, escalated: 0, assigned: 0, skipped: true };
+  }
+
+  void runTaskMaintenance().catch((error) => {
+    console.error("[scheduleTaskMaintenance]", error);
+  });
+  return { cleaned: 0, escalated: 0, assigned: 0, skipped: false, scheduled: true };
+}
+
 export function scheduleWorkbenchSyncMaintenance(): TaskMaintenanceResult {
   if (_maintenanceRunning) {
     return { cleaned: 0, escalated: 0, assigned: 0, skipped: true, running: true };

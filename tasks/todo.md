@@ -7234,3 +7234,21 @@
 - 混合体积：`/api/workbench/sync` 平均约 12.9KB；full 330 次共 35.81MB，delta 6,266 次共 45.58MB，delta 平均约 7.6KB、p95 约 12.7KB。对比上一批 116KB/次，3 秒轮询下前端 JSON 解析和网络压力已明显下降。
 - 对抗性审查：数据库查询确认无重复 active primary、无同助理多个执行/暂停根任务、无熨烫 `using` 超正常机器容量；压测 raw 日志确认无 HTTP 500 和 locked/busy。
 - 残余风险：混合写下 sync p95 仍到约 220.5ms、p99 约 1494.5ms，主要来自 SQLite 单进程写入期间读请求排队和 full 校准大包；下一步继续推进服务端 `assistantStatus` 摘要、公共队列首屏摘要/详情按需、管理端 `/api/tasks` 降载。
+
+#### 阶段 E 第二十二批计划：完成任务写操作维护降载
+
+- [x] `src/lib/scheduler.ts`：新增普通任务维护的异步触发入口，复用现有 `runTaskMaintenance()` 节流、运行中去重和错误日志兜底。
+- [x] `src/app/api/tasks/[id]/route.ts`：`complete` 和管理 `setStatus -> completed` 在完成原子状态结算、加载权威任务详情后，不再等待 `runTaskMaintenance({ force: true })`；改为异步触发普通维护。
+- [x] 保持业务规则不变：完成动作仍同步写参与记录、任务聚合状态、完成时间、工时、熨烫阶段释放、插单父任务恢复和人员状态校准。
+- [x] 验证 TypeScript、生产 build、隔离库 115 会话混合短测、raw 异常审查和状态不变量。
+- [x] 对比第二十一批基线，重点观察 `mixed-complete` p95/p99、`/api/workbench/sync` p95、HTTP 500、SQLite locked/busy、重复 active primary 和熨烫 using 超容量。
+
+#### 阶段 E 第二十二批评审：完成任务写操作维护降载
+
+- 改动范围：`src/lib/scheduler.ts` 新增 `scheduleTaskMaintenance()`，使用现有普通维护节流和运行中去重，后台执行失败时记录 `[scheduleTaskMaintenance]`；`src/app/api/tasks/[id]/route.ts` 的助理 `complete` 与管理 `setStatus -> completed` 改为返回权威任务详情后异步触发普通维护。
+- 行为保持：完成动作仍同步执行 `updateTaskParticipantStatus()` / `completeTask()`、`syncTaskAggregateFromParticipants()`、`syncProfileStatus()`、完成时间/工时结算、熨烫阶段释放和插单父任务恢复；本批只取消每次完成后等待强制完整维护链。
+- 115 会话混合短测：`phase-e22-complete-maintenance-scheduled-mixed-115-3min`，80 摄影师、30 助理、5 管理，7139 请求、5 个业务 409，均为熨烫机暂无空位；无 HTTP 500、无 SQLite locked/busy、无 timeout。
+- 完成延迟收益：对比第二十一批混合短测，`mixed-complete` p50 从 123.9ms 降到 9.5ms，p95 从 215.9ms 降到 23.5ms，p99 从 243.2ms 降到 73.3ms。
+- 同步观察：`/api/workbench/sync` p50 9.6ms、p95 32.2ms、p99 119.6ms；delta 平均 10280.2 bytes、p95 17096 bytes，仍处于可接受区间。
+- 不变量审查通过：同助理多个执行/暂停根任务 0、重复 current primary 等价风险 0、熨烫 `using` 槽位超容量 0。
+- 验证通过：`git diff --check`、`npx tsc --noEmit --pretty false --incremental false`、`DATABASE_URL=file:./prisma/loadtest.db npm run build`、隔离库 seed、115 会话 3 分钟混合压测、raw 精查和 SQL 不变量审查。
