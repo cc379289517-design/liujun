@@ -101,7 +101,21 @@ const TASK_INCLUDE_WITHOUT_COLLABORATORS = {
   assistantTransferRequests: TASK_INCLUDE.assistantTransferRequests,
 } as const;
 
-const STATS_TASK_INCLUDE = {
+const STATS_TASK_SELECT = {
+  id: true,
+  photographerId: true,
+  assistantId: true,
+  locationBuildingId: true,
+  roomNumber: true,
+  priority: true,
+  status: true,
+  publisherFeedback: true,
+  createdAt: true,
+  startedAt: true,
+  completedAt: true,
+  estEndTime: true,
+  effectiveWorkSeconds: true,
+  workSegmentStartedAt: true,
   photographer: { select: { id: true, name: true, currentRoom: true, buildingId: true } },
   assistant: { select: { id: true, name: true, currentRoom: true } },
   category: TASK_INCLUDE.category,
@@ -314,12 +328,18 @@ export async function GET(request: NextRequest) {
       where.AND = [...(Array.isArray(where.AND) ? where.AND : []), ...andFilters];
     }
 
-    const include =
-      payload === "stats"
-        ? STATS_TASK_INCLUDE
-        : includeCollaborators
-          ? TASK_INCLUDE
-          : TASK_INCLUDE_WITHOUT_COLLABORATORS;
+    if (payload === "stats") {
+      const tasks = await prisma.bookingTask.findMany({
+        where,
+        select: STATS_TASK_SELECT,
+        orderBy: [{ priority: "asc" }, { createdAt: "asc" }],
+        take,
+      });
+
+      return Response.json(tasks);
+    }
+
+    const include = includeCollaborators ? TASK_INCLUDE : TASK_INCLUDE_WITHOUT_COLLABORATORS;
 
     const tasks = await prisma.bookingTask.findMany({
       where,

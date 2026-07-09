@@ -6677,6 +6677,24 @@
 - 验证备注：本地 dev 首启仍需清理 `.next` 中 macOS `._*` 伴生文件和 Turbopack 缓存；本轮清理 896 个伴生文件。
 - 待后续：统计页若要支持跨月/跨年大范围分析，应继续推进后端聚合接口或分页明细，避免自定义超长日期范围一次性拉取过多明细。
 
+#### 阶段 D 第二十一批计划：统计 payload 字段级瘦身
+
+- [x] 将 `/api/tasks?payload=stats` 从关系 `include` 改为字段 `select`，只返回统计页实际使用的任务标量字段和必要关系。
+- [x] 保留默认 `/api/tasks` 深对象兼容路径，确保工作台、任务操作和旧调用不受影响。
+- [x] 验证同一日期窗口下 stats payload 响应体继续下降，同时统计页异常登记、协作贡献、用时、类型、反馈等口径不变。
+- [x] 跑 `tsc`、`git diff --check`、生产构建、本地接口和页面冒烟；本批不更新长期业务文档。
+
+#### 阶段 D 第二十一批评审：统计 payload 字段级瘦身
+
+- 已完成：`/api/tasks?payload=stats` 改为独立 `select` 查询，只返回 `StatsTab` 需要的任务标量、摄影师、助理、任务类型、协作参与者和完成登记字段。
+- 已保持：默认 `/api/tasks` 仍走原深对象 include；工作台、任务操作、旧管理端列表和不带 `payload=stats` 的调用不受影响。
+- 已保持：统计页异常登记、协作贡献、实际用时、任务类型、摄影师发布、助理排行、反馈统计口径不变；本批不改业务状态和派单规则，不更新长期业务文档。
+- 验证通过：`npx prisma validate`、`npx tsc --noEmit --pretty false --incremental false`、`git diff --check -- src/app/api/tasks/route.ts tasks/todo.md tasks/lessons.md`、`DATABASE_URL=file:./prisma/loadtest.db npm run build`。
+- 体积验证：隔离 `loadtest.db` 同一周窗口 511 条任务下，默认深对象 673957 bytes；第二十批 stats include 为 643297 bytes；本批 stats select 为 481317 bytes，较默认深对象减少约 29%，较上一批 stats include 再减少约 25%。
+- 本地冒烟：`/admin` 200 / 18225 bytes，`/stats` 200 / 14624 bytes，`/api/tasks?payload=stats&...&limit=5` 200 / 5996 bytes，非法 `payload=thin` 400 / 33 bytes。
+- 验证备注：本地 dev 首启仍需清理 `.next` 中 macOS `._*` 伴生文件和 Turbopack 缓存；本轮清理 911 个伴生文件。
+- 待后续：统计页如果继续变大，下一步应做后端聚合接口，把顶部指标和排行从明细传输进一步降成聚合结果；明细表再分页按需加载。
+
 ### 阶段 E：验收与对抗审查
 
 - [ ] 基线压测完成后，先根据报告排序瓶颈，再决定是否进入 B/C/D 的第一批代码改动。
