@@ -794,6 +794,7 @@ export default function PhotographerPage() {
   const [deferredWaitingRawTask, setDeferredWaitingRawTask] = useState<TaskFromAPI | null>(null);
   /** 助理视角下最近一次拉取到的原始任务列表（用于列表点击「待就位」与目标任务对齐） */
   const {
+    getTask: getAssistantRawTaskById,
     replaceOrRemoveTask: replaceOrRemoveAssistantRawTask,
     replaceTasks: replaceAssistantRawTasks,
     removeTask: removeAssistantRawTask,
@@ -814,6 +815,9 @@ export default function PhotographerPage() {
     updateTask: updateTaskListRaw,
     upsertTask: upsertTaskListRaw,
   } = useWorkbenchTaskSourceStore();
+  const getVisibleRawTaskById = useCallback((taskId: string): TaskFromAPI | undefined => (
+    getTaskListRawById(taskId) ?? getAssistantRawTaskById(taskId) ?? undefined
+  ), [getAssistantRawTaskById, getTaskListRawById]);
   /** 当前区域公共队列：供所有人查看未分配、待就位、暂停任务 */
   const [publicQueueRaw, setPublicQueueRaw] = useState<TaskFromAPI[]>([]);
   const [publicQueueOpen, setPublicQueueOpen] = useState(false);
@@ -3471,8 +3475,7 @@ export default function PhotographerPage() {
         : pendingRawTask?.id === taskId ? pendingRawTask
           : pausedRawTask?.id === taskId ? pausedRawTask
             : deferredWaitingRawTask?.id === taskId ? deferredWaitingRawTask
-              : getTaskListRawById(taskId)
-                ?? assistantRawTasks.find((t) => t.id === taskId)
+              : getVisibleRawTaskById(taskId)
                 ?? null;
     if (!task) return false;
     const actorId = isAssistantRole(profile?.role) ? profile?.id : undefined;
@@ -3485,7 +3488,7 @@ export default function PhotographerPage() {
     pausedRawTask,
     profile?.id,
     profile?.role,
-    getTaskListRawById,
+    getVisibleRawTaskById,
   ]);
 
   const handleSaveNote = useCallback(async (taskId: string, note: string) => {
@@ -3808,7 +3811,7 @@ export default function PhotographerPage() {
 
   const saveCollaborators = useCallback(async () => {
     if (!collabTaskId) return;
-    const task = taskListRaw.find((t) => t.id === collabTaskId);
+    const task = getVisibleRawTaskById(collabTaskId);
     const taskBuildingId = taskLocationBuildingId(task);
     const currentHelperIds = helperParticipants(task).map((c) => c.assistantId);
     const addedIds = collabSelectedIds.filter((assistantId) => !currentHelperIds.includes(assistantId));
@@ -3856,7 +3859,7 @@ export default function PhotographerPage() {
     } finally {
       setCollabSaving(false);
     }
-  }, [collabSelectedIds, collabTaskId, collaborationEnabledByBuilding, collaborationMaxByBuilding, collaborationQueueAutoCloseLimit, profile?.id, profile?.role, publicQueueCountByBuilding, refreshAssistants, taskListRaw, updateLocalTaskSources]);
+  }, [collabSelectedIds, collabTaskId, collaborationEnabledByBuilding, collaborationMaxByBuilding, collaborationQueueAutoCloseLimit, getVisibleRawTaskById, profile?.id, profile?.role, publicQueueCountByBuilding, refreshAssistants, updateLocalTaskSources]);
 
   // 助理：手动暂停当前任务（插单场景）
   const handlePauseCurrentTask = useCallback(async () => {
@@ -4277,7 +4280,7 @@ export default function PhotographerPage() {
       ? buildings.filter((b) => b.id !== profileDisplayBuildingId)
       : [];
   const publicQueueBuildingId = activeBuildingId ?? profile?.buildingId ?? null;
-  const collabTask = collabTaskId ? taskListRaw.find((task) => task.id === collabTaskId) ?? null : null;
+  const collabTask = collabTaskId ? getVisibleRawTaskById(collabTaskId) : null;
   const collabTaskBuildingId = taskLocationBuildingId(collabTask);
   const collabQueueCount =
     collabTaskBuildingId != null ? publicQueueCountByBuilding[collabTaskBuildingId] ?? 0 : 0;
@@ -10042,7 +10045,7 @@ export default function PhotographerPage() {
 	                  const isRemoving = removingTaskId === task.id;
                   const cancelPending = isWorkbenchPendingAction(workbenchTaskActionKey("cancel", task.id, profile?.id));
                   const cancelInFlight = isRemoving || cancelPending;
-	                  const rawForTask = taskListRaw.find((x) => x.id === task.id);
+                  const rawForTask = getVisibleRawTaskById(task.id);
                   const isPhotographerQueueTask = rawForTask != null && isPhotographerLimitQueuedTask(rawForTask);
                   const isAssistantTaskList = isAssistantRole(profile?.role);
                   const isCancellable = !isAssistantTaskList && (canCancelRawTask(rawForTask) || isPhotographerQueueTask);
@@ -10297,7 +10300,7 @@ export default function PhotographerPage() {
                           )}
                         </span>
                         {(() => {
-                          const raw = taskListRaw.find((x) => x.id === task.id);
+                          const raw = getVisibleRawTaskById(task.id);
                           const line = taskListActualLine(task, raw, now.getTime(), true, isAssistantRole(profile?.role) ? profile?.id : undefined);
                           const overtimeWarn =
                             raw != null && overtimeMinutesBeyondSlot({
@@ -10381,7 +10384,7 @@ export default function PhotographerPage() {
                       ) : (() => {
                         const rawNote = isPhotographerQueueTask
                           ? photographerLimitQueuePrompt(photographerMaxActiveTasks)
-                          : taskListRaw.find((x) => x.id === task.id)?.note;
+                          : getVisibleRawTaskById(task.id)?.note;
                         const isPhotographer = !isAssistantRole(profile?.role);
                         const canShowNote = task.statusLabel !== "已完成";
                         const canEditNote = isPhotographer && canShowNote && task.statusLabel !== "进行中" && !isPhotographerQueueTask;

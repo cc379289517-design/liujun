@@ -6576,6 +6576,22 @@
 - 验证备注：本地 dev 首启仍需按既有脚本清理 `.next` 中 macOS `._*` 伴生文件和 Turbopack 缓存；本轮清理 882 个伴生文件。`/api/workbench/sync` 维护日志只影响隔离 `loadtest.db`。
 - 待后续：继续把协作、移交、任务列表中的 `taskListRaw.find()` / `assistantRawTasks.find()` 高频查找替换为 store `getTask()` / `tasksByIdRef`；再考虑 `publicQueueRaw` 是否也适合接入同一 store。
 
+#### 阶段 D 第十五批计划：按 id 查找走 store 索引
+
+- [x] 新增页面内统一 `getVisibleRawTaskById()`：优先查 `taskListRaw` store，再查 `assistantRawTasks` store。
+- [x] 替换备注保存、协作弹窗、任务列表 raw 详情、移动端/桌面任务卡中明确按任务 id 的 `taskListRaw.find()` / `assistantRawTasks.find()`。
+- [x] 保留移交请求、开始候选池、列表渲染等按复杂条件筛选的数组遍历，不改变业务判断。
+- [x] 验证 `tsc`、`git diff --check`、生产构建和本地轻量接口；本批只做前端查找路径等价优化，不更新长期业务文档。
+
+#### 阶段 D 第十五批评审：按 id 查找走 store 索引
+
+- 已完成：新增 `getVisibleRawTaskById()`，统一按 id 从 `taskListRaw` store 和 `assistantRawTasks` store 读取当前可见 raw task。
+- 已完成：备注保存执行中判断、协作保存/协作弹窗、任务列表 raw 详情、任务时长行、备注展示等 id 型查找改走 store 索引。
+- 已保持：按移交请求状态筛选、开始候选池、列表渲染和公共队列遍历继续使用数组逻辑，不改变移交、协作、取消、备注、熨烫或优先级业务口径。
+- 验证通过：`npx tsc --noEmit --pretty false --incremental false`、`git diff --check -- src/app/photographer/page.tsx tasks/todo.md tasks/lessons.md`、`DATABASE_URL=file:./prisma/loadtest.db npm run build`、本地隔离服务 `http://localhost:3100/photographer` 200、`/api/config` 200、`/api/workbench/sync?role=photographer&buildingId=1&full=1` 200。
+- 验证备注：本地 dev 首启仍需按既有脚本清理 `.next` 中 macOS `._*` 伴生文件和 Turbopack 缓存；本轮清理 882 个伴生文件。`/api/workbench/sync` 维护日志只影响隔离 `loadtest.db`。
+- 待后续：可以继续把 `publicQueueRaw` 接入 store，或针对移交请求这类条件筛选建立派生索引，进一步减少每轮渲染扫描。
+
 ### 阶段 E：验收与对抗审查
 
 - [ ] 基线压测完成后，先根据报告排序瓶颈，再决定是否进入 B/C/D 的第一批代码改动。

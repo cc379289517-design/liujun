@@ -134,3 +134,4 @@
 - 工作台 `tasksById` store 第一批应先接管一个主任务源，并保留同步 ref；弱网连续操作、轮询乱序合并和乐观补丁路径需要先读 ref 再等 React state 更新。
 - 多任务源 reducer 化不要一次迁完 `taskListRaw/assistantRawTasks/publicQueueRaw`；先迁主源、验证全量应用和局部补丁，再迁助理源和公共队列，能降低状态卡片、列表和地图同时闪动的风险。
 - 当 store 方法会同步更新 ref 时，分支判断必须先保存调用前状态；例如 `assistantRawTasksRef.current.length` 在 `upsert/replace` 后会立即变化，不能再用它判断操作前是否为空。
+- 替换数组 `find()` 时要区分 id 索引查找和业务条件筛选：`id -> task` 可以走 store，移交请求/开始候选池这类条件筛选先保留数组逻辑，避免性能优化夹带规则变化。
