@@ -15,6 +15,7 @@ import {
   PHOTOGRAPHER_LIMIT_QUEUE_LOCK_REASON,
   photographerLimitQueueFullPrompt,
 } from "@/lib/photographerTaskLimit";
+import { AVATAR_PROFILE_SELECT, serializeTaskAssistantAvatars } from "@/lib/profilePayload";
 
 const VISIBLE_PRIORITY_UPGRADE_REQUEST_STATUSES: PriorityUpgradeRequestStatus[] = [
   PriorityUpgradeRequestStatus.pending,
@@ -138,6 +139,124 @@ const STATS_TASK_SELECT = {
     },
   },
   completionRegistration: TASK_INCLUDE.completionRegistration,
+} as const;
+
+const WORKBENCH_LIST_TASK_SELECT = {
+  id: true,
+  photographerId: true,
+  assistantId: true,
+  locationBuildingId: true,
+  roomNumber: true,
+  categoryId: true,
+  priority: true,
+  status: true,
+  isSpecified: true,
+  ironingStage: true,
+  ironingQueuedAt: true,
+  ironingNotifiedAt: true,
+  ironingStartedAt: true,
+  note: true,
+  publisherFeedback: true,
+  createdAt: true,
+  startedAt: true,
+  completedAt: true,
+  pausedAt: true,
+  escalatedAt: true,
+  escalatedFromPriority: true,
+  estEndTime: true,
+  effectiveWorkSeconds: true,
+  workSegmentStartedAt: true,
+  isLocked: true,
+  lockReason: true,
+  parentTaskId: true,
+  photographer: TASK_INCLUDE.photographer,
+  assistant: TASK_INCLUDE.assistant,
+  category: TASK_INCLUDE.category,
+  collaborators: {
+    where: { status: { not: "left" } },
+    select: {
+      id: true,
+      taskId: true,
+      assistantId: true,
+      role: true,
+      status: true,
+      joinedAt: true,
+      leftAt: true,
+      startedAt: true,
+      completedAt: true,
+      effectiveWorkSeconds: true,
+      workSegmentStartedAt: true,
+      assistant: { select: AVATAR_PROFILE_SELECT },
+    },
+  },
+  priorityUpgradeRequests: TASK_INCLUDE.priorityUpgradeRequests,
+  completionRegistration: TASK_INCLUDE.completionRegistration,
+  assistantTransferRequests: TASK_INCLUDE.assistantTransferRequests,
+} as const;
+
+const WORKBENCH_STATUS_TASK_SELECT = {
+  id: true,
+  assistantId: true,
+  locationBuildingId: true,
+  roomNumber: true,
+  priority: true,
+  status: true,
+  ironingStage: true,
+  note: true,
+  createdAt: true,
+  startedAt: true,
+  completedAt: true,
+  pausedAt: true,
+  estEndTime: true,
+  effectiveWorkSeconds: true,
+  workSegmentStartedAt: true,
+  parentTaskId: true,
+  category: {
+    select: {
+      id: true,
+      name: true,
+      estDuration: true,
+      minDuration: true,
+      maxDuration: true,
+    },
+  },
+  collaborators: {
+    where: { status: { not: "left" } },
+    select: {
+      id: true,
+      taskId: true,
+      assistantId: true,
+      role: true,
+      status: true,
+      joinedAt: true,
+      leftAt: true,
+      startedAt: true,
+      completedAt: true,
+      effectiveWorkSeconds: true,
+      workSegmentStartedAt: true,
+      assistant: { select: { id: true, name: true, currentRoom: true, buildingId: true } },
+    },
+  },
+  assistantTransferRequests: {
+    where: { status: { in: VISIBLE_ASSISTANT_TRANSFER_REQUEST_STATUSES } },
+    orderBy: { requestedAt: "desc" },
+    take: 1,
+    select: {
+      id: true,
+      taskId: true,
+      fromAssistantId: true,
+      targetAssistantId: true,
+      counterpartTaskId: true,
+      kind: true,
+      responseMode: true,
+      status: true,
+      reason: true,
+      requestedAt: true,
+      targetConfirmedAt: true,
+      completedAt: true,
+      canceledAt: true,
+    },
+  },
 } as const;
 
 const ADMIN_LIST_TASK_SELECT = {
@@ -302,8 +421,8 @@ export async function GET(request: NextRequest) {
     if ((view === "photographer" || view === "assistant") && !profileId && !photographerId && !assistantId) {
       return Response.json({ error: "profileId is required for photographer or assistant view" }, { status: 400 });
     }
-    if (payload && !["stats", "adminList"].includes(payload)) {
-      return Response.json({ error: "payload must be stats or adminList" }, { status: 400 });
+    if (payload && !["stats", "adminList", "workbenchList", "workbenchStatus"].includes(payload)) {
+      return Response.json({ error: "payload must be stats, adminList, workbenchList, or workbenchStatus" }, { status: 400 });
     }
 
     if (scopedPhotographerId) where.photographerId = scopedPhotographerId;
@@ -372,6 +491,28 @@ export async function GET(request: NextRequest) {
       const tasks = await prisma.bookingTask.findMany({
         where,
         select: ADMIN_LIST_TASK_SELECT,
+        orderBy: [{ priority: "asc" }, { createdAt: "asc" }],
+        take,
+      });
+
+      return Response.json(tasks);
+    }
+
+    if (payload === "workbenchList") {
+      const tasks = await prisma.bookingTask.findMany({
+        where,
+        select: WORKBENCH_LIST_TASK_SELECT,
+        orderBy: [{ priority: "asc" }, { createdAt: "asc" }],
+        take,
+      });
+
+      return Response.json(tasks.map(serializeTaskAssistantAvatars));
+    }
+
+    if (payload === "workbenchStatus") {
+      const tasks = await prisma.bookingTask.findMany({
+        where,
+        select: WORKBENCH_STATUS_TASK_SELECT,
         orderBy: [{ priority: "asc" }, { createdAt: "asc" }],
         take,
       });

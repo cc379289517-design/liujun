@@ -507,7 +507,7 @@ function taskAllowsCollaboration(task: TaskFromAPI | undefined, collaborationEna
 }
 
 function taskListUrlForProfile(profile: { id: string; role: string }, buildingId?: number | null): string {
-  const params = new URLSearchParams({ todayOnly: "true" });
+  const params = new URLSearchParams({ todayOnly: "true", payload: "workbenchList" });
   if (isAssistantRole(profile.role)) {
     params.set("assistantId", profile.id);
   } else if (profile.role === "photographer") {
@@ -520,7 +520,7 @@ function taskListUrlForProfile(profile: { id: string; role: string }, buildingId
 }
 
 function taskListUrlForAssistant(assistantId: string, buildingId?: number | null): string {
-  const params = new URLSearchParams({ todayOnly: "true", assistantId });
+  const params = new URLSearchParams({ todayOnly: "true", assistantId, payload: "workbenchList" });
   if (buildingId != null) {
     params.set("buildingId", String(buildingId));
   }
@@ -2060,7 +2060,7 @@ export default function PhotographerPage() {
       ? Promise.resolve([snapshot.profiles, snapshot.tasks])
       : Promise.all([
         fetch(`/api/profiles?role=assistant&buildingId=${activeBuildingId}&view=identity`, { cache: "no-store" }).then((r) => r.json()),
-        fetch(`/api/tasks?todayOnly=true&buildingId=${activeBuildingId}`, { cache: "no-store" }).then((r) => r.json()).catch(() => []),
+        fetch(`/api/tasks?todayOnly=true&buildingId=${activeBuildingId}&payload=workbenchStatus`, { cache: "no-store" }).then((r) => r.json()).catch(() => []),
       ]);
     return source.then(async ([profilesData, tasksData]) => {
       const nowMs = Date.now();

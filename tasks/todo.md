@@ -7170,6 +7170,25 @@
 - 不变量审查通过：同助理多个执行/暂停根任务 0、重复 current primary 等价风险 0、熨烫 `using` 槽位超容量 0。
 - 验证通过：`git diff --check`、`npx tsc --noEmit --pretty false --incremental false`、`DATABASE_URL=file:./prisma/loadtest.db npm run build`、隔离库 seed、115 会话 3 分钟混合压测、raw 精查和 SQL 不变量审查。
 
+#### 阶段 E 第二十四批计划：工作台兜底任务列表轻量 payload
+
+- [x] `src/app/api/tasks/route.ts` 新增 `payload=workbenchList`，使用字段级 `select` 返回工作台任务列表实际需要的任务标量、摄影师/助理/分类、协作、提权、移交和完成登记摘要；默认深详情保持兼容。
+- [x] `src/app/api/tasks/route.ts` 新增 `payload=workbenchStatus`，只返回地图/Dock 状态计算需要的任务、分类、协作和移交字段，不带完成登记、提权、头像图片等列表详情。
+- [x] `src/app/photographer/page.tsx` 的 `taskListUrlForProfile()`、`taskListUrlForAssistant()` 改用 `payload=workbenchList`；楼座助理刷新兜底请求改用 `payload=workbenchStatus`，避免主增量同步之外的兜底刷新拉默认深对象。
+- [x] 保持业务规则不变：不改变派单、状态切换、统计、完成登记、提权、移交逻辑；只降低兜底读接口响应体和 JSON 解析成本。
+- [x] 验证 TypeScript、生产 build、接口体积样本、页面健康检查、115 会话混合短测、raw 异常审查和状态不变量。
+
+#### 阶段 E 第二十四批评审：工作台兜底任务列表轻量 payload
+
+- 改动范围：`src/app/api/tasks/route.ts` 增加 `payload=workbenchList` 和 `payload=workbenchStatus`；`src/app/photographer/page.tsx` 的个人/助理任务兜底列表改用 `workbenchList`，地图/Dock 助理状态刷新改用 `workbenchStatus`。
+- 行为保持：默认 `/api/tasks` 深详情兼容旧调用；工作台个人任务兜底仍保留完成登记、提权、移交、协作和必要计时字段；地图/Dock 状态兜底只裁掉该路径不使用的详情对象和头像图片。
+- 体积样本：隔离 `loadtest.db` 115 人/360 初始任务下，`/api/tasks?todayOnly=true&buildingId=1` 为 88385 bytes；`payload=workbenchList` 为 86786 bytes；`payload=workbenchStatus` 为 49982 bytes，较默认减少约 43.5%。
+- 个人兜底样本：`payload=workbenchList&assistantId=lt-assistant-001` 为 1466 bytes；`payload=workbenchList&photographerId=lt-photographer-001` 为 6491 bytes；任务数量与默认同楼座列表一致。
+- 115 会话混合短测：`phase-e24-workbench-fallback-payload-final-mixed-115-3min`，80 摄影师、30 助理、5 管理，7098 请求、3 个业务 409，均为熨烫机暂无空位；无 HTTP 500、无 SQLite locked/busy、无 timeout。
+- 延迟观察：`mixed-start` p95 23ms、`mixed-complete` p95 26.3ms、`mixed-pause` p95 23.4ms、`/api/workbench/sync` p95 38.9ms；状态切换仍保持上一批低延迟水平。
+- 不变量审查通过：同助理多个执行/暂停根任务 0、重复 current primary 等价风险 0、熨烫 `using` 槽位超容量 0。
+- 验证通过：`git diff --check`、`npx tsc --noEmit --pretty false --incremental false`、`DATABASE_URL=file:./prisma/loadtest.db npm run build`、本地 `/photographer` 200、接口体积样本、115 会话 3 分钟混合压测、raw 精查和 SQL 不变量审查。
+
 #### 阶段 E 第二十三批计划：开始/暂停状态切换维护降载
 
 - [x] `src/app/api/tasks/[id]/route.ts`：助理 `start` 和 `pause` 在完成原子状态写入、加载权威任务详情后，不再等待 `runTaskMaintenance()`；改为复用 `scheduleTaskMaintenance()` 异步触发普通维护。
