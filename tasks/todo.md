@@ -7093,6 +7093,25 @@
 - 不变量审查通过：同助理多个执行/暂停根任务 0、重复 current primary 0、熨烫 `using` 槽位超容量 0。
 - 验证通过：`git diff --check`、`npx prisma validate`、`npx tsc --noEmit --pretty false --incremental false`、`DATABASE_URL=file:./prisma/loadtest.db npm run build`。
 
+#### 阶段 E 第十七批计划：无变化 delta 省略 publicQueueIds
+
+- [x] `/api/workbench/sync` 的 delta 只有在区域任务/关联记录变化、区域 id 截断或 full 时才返回 `publicQueueIds`；纯无变化 delta 省略公共队列 ID 列表。
+- [x] 前端增量合并兼容缺失 `publicQueueIds`：缺失且没有公共队列变更时保留上一份公共队列；缺失但有公共队列变更时触发 full 重拉，避免状态不明。
+- [x] 个人 `taskIds` 暂时保持每轮返回，避免助理任务归属/移交边界下出现“我的任务”残留；本批只优化公共队列 ID 固定包。
+- [x] 不改变任务详情、公共队列排序、区域统计、派单和状态命令。
+- [x] 验证 TypeScript、生产 build、full/delta 样本、115 会话只读短测和状态不变量。
+
+#### 阶段 E 第十七批评审：无变化 delta 省略 publicQueueIds
+
+- 改动范围：`/api/workbench/sync` 在 full、区域任务更新、关联记录变化或截断时继续返回 `publicQueueIds`；纯无变化 delta 省略公共队列 ID 列表。个人 `taskIds` 继续保守每轮返回。
+- 前端兼容：如果 delta 没有 `publicQueueIds` 且没有公共队列变更，保留上一份公共队列；如果没有 `publicQueueIds` 却带了公共队列变更，则触发 full 重拉，避免不明确状态。
+- 样本验证：`full -> delta -> delta` 中纯无变化 delta 为 571 bytes，不带 `publicQueueIds`、`assistantStatus` 和 `areaSummary`；第一轮有维护变化的 delta 仍带 `publicQueueIds`。
+- 115 会话只读短测：`phase-e17-public-queue-ids-gated-readonly-115-3min`，80 摄影师、30 助理、5 管理，6675 请求，0 错误；`/api/workbench/sync` p50 9.1ms、p95 19.8ms、p99 33.5ms。
+- 体积收益：full 平均 45225.9 bytes；delta 平均 1330.2 bytes、p95 4364 bytes。对比第十六批只读短测 delta 平均 2171.4 bytes，本批继续下降约 38.7%。
+- 异常审查：raw 6711 行精确解析，未发现 HTTP 500、SQLite locked/busy 或 timeout。
+- 不变量审查通过：同助理多个执行/暂停根任务 0、重复 current primary 0、熨烫 `using` 槽位超容量 0。
+- 验证通过：`git diff --check`、`npx prisma validate`、`npx tsc --noEmit --pretty false --incremental false`、`DATABASE_URL=file:./prisma/loadtest.db npm run build`。
+
 ### 阶段 A 评审
 
 - 已完成压测工具：新增 `scripts/loadtest/seed.ts`、`run.ts`、`report.ts`、`common.ts`，不引入 k6/artillery 等新依赖；使用 Node 内置 `fetch`、现有 `tsx` 和 Prisma/SQLite。

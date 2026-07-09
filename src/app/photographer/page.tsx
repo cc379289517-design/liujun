@@ -2562,7 +2562,8 @@ export default function PhotographerPage() {
         const taskIds = Array.isArray(syncData.taskIds)
           ? syncData.taskIds.filter((id): id is string => typeof id === "string")
           : null;
-        const publicQueueIds = Array.isArray(syncData.publicQueueIds)
+        const hasPublicQueueIdsPayload = Object.prototype.hasOwnProperty.call(syncData, "publicQueueIds");
+        const publicQueueIds = hasPublicQueueIdsPayload && Array.isArray(syncData.publicQueueIds)
           ? syncData.publicQueueIds.filter((id): id is string => typeof id === "string")
           : null;
         const personalBase = isAssistantRole(pollingProfile.role) && assistantRawTasksRef.current.length > 0
@@ -2571,9 +2572,10 @@ export default function PhotographerPage() {
         const deltaNeedsFullRetry = serverSyncMode === "delta" && (
           syncData.syncTruncated === true ||
           !taskIds ||
-          !publicQueueIds ||
+          (hasPublicQueueIdsPayload && !publicQueueIds) ||
+          (!hasPublicQueueIdsPayload && publicQueueData.length > 0) ||
           hasMissingVisibleTaskDetails(personalBase, taskData, taskIds) ||
-          hasMissingVisibleTaskDetails(publicQueueRawRef.current, publicQueueData, publicQueueIds)
+          (publicQueueIds ? hasMissingVisibleTaskDetails(publicQueueRawRef.current, publicQueueData, publicQueueIds) : false)
         );
         if (deltaNeedsFullRetry) {
           workbenchSyncTokenRef.current = null;

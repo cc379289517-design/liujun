@@ -1210,6 +1210,13 @@ export async function GET(request: NextRequest) {
           areaTaskWhere,
         )
       : null;
+    const shouldSendPublicQueueIds =
+      !since ||
+      areaSummaryUpdatedTask != null ||
+      areaRelatedChanges.ids.length > 0 ||
+      areaRelatedChanges.truncated ||
+      areaTaskIdsTruncated ||
+      areaTasksTruncated;
     const syncTruncated = Boolean(since) && (
       areaTasksTruncated ||
       scopedTasksTruncated ||
@@ -1230,7 +1237,7 @@ export async function GET(request: NextRequest) {
       tasks: visibleTasks.map(serializeTaskAssistantAvatars),
       taskIds: visibleTaskIds.map((task) => task.id),
       publicQueue: visibleAreaTasks.map((task) => serializeQueueTaskForJson(task, !since)),
-      publicQueueIds: visibleAreaTaskIds.map((task) => task.id),
+      publicQueueIds: shouldSendPublicQueueIds ? visibleAreaTaskIds.map((task) => task.id) : undefined,
       publicQueueSummary: {
         total: visibleAreaTaskIds.length,
         changed: visibleAreaTasks.length,
