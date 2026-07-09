@@ -55,6 +55,7 @@ export default function AdminPage() {
   const [resolvedTheme, setResolvedTheme] = useState<"light" | "dark">("light");
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [buildings, setBuildings] = useState<Building[]>([]);
+  const [hasFullBuildings, setHasFullBuildings] = useState(false);
   const [categories, setCategories] = useState<Category[]>([]);
   const [config, setConfig] = useState<SystemConfigMap>({});
   const [loading, setLoading] = useState(true);
@@ -77,7 +78,7 @@ export default function AdminPage() {
     try {
       const [pRes, bRes, cRes, cfgRes] = await Promise.all([
         fetch("/api/profiles?view=admin"),
-        fetch("/api/buildings"),
+        fetch("/api/buildings?view=summary"),
         fetch("/api/categories"),
         fetch("/api/config"),
       ]);
@@ -87,12 +88,33 @@ export default function AdminPage() {
       const cfgData = await cfgRes.json().catch(() => ({}));
       setProfiles(Array.isArray(pData) ? pData : []);
       setBuildings(Array.isArray(bData) ? bData : []);
+      setHasFullBuildings(false);
       setCategories(Array.isArray(cData) ? cData : []);
       setConfig(cfgData && typeof cfgData === "object" ? cfgData : {});
     } catch (e) {
       console.error("Failed to fetch data", e);
     }
     setLoading(false);
+  }, []);
+
+  const fetchSpaceData = useCallback(async () => {
+    try {
+      const [buildingRes, cfgRes] = await Promise.all([
+        fetch("/api/buildings?view=full"),
+        fetch("/api/config"),
+      ]);
+      if (buildingRes.ok) {
+        const data = await buildingRes.json();
+        setBuildings(Array.isArray(data) ? data : []);
+        setHasFullBuildings(true);
+      }
+      if (cfgRes.ok) {
+        const cfgData = await cfgRes.json().catch(() => ({}));
+        setConfig(cfgData && typeof cfgData === "object" ? cfgData : {});
+      }
+    } catch (e) {
+      console.error("Failed to fetch space data", e);
+    }
   }, []);
 
   useEffect(() => {
@@ -116,6 +138,12 @@ export default function AdminPage() {
   }, [themeMode]);
 
   useEffect(() => { fetchData(); }, [fetchData]);
+
+  useEffect(() => {
+    if (tab === "spaces" && !hasFullBuildings) {
+      void fetchSpaceData();
+    }
+  }, [fetchSpaceData, hasFullBuildings, tab]);
 
   return (
     <div className={`admin-shell ${adminPageBackground ? "admin-shell--custom-bg" : ""} h-screen overflow-y-scroll px-8 py-6`} style={adminShellStyle}>
@@ -189,7 +217,13 @@ export default function AdminPage() {
             ) : (
               <>
                 {tab === "profiles" && <ProfilesTab profiles={profiles} buildings={buildings} onRefresh={fetchData} />}
-                {tab === "spaces" && <SpaceTab buildings={buildings} config={config} onRefresh={fetchData} />}
+                {tab === "spaces" && (
+                  hasFullBuildings ? (
+                    <SpaceTab buildings={buildings} config={config} onRefresh={fetchSpaceData} />
+                  ) : (
+                    <div className="flex items-center justify-center py-20 text-[--text-muted]">正在加载空间数据...</div>
+                  )
+                )}
                 {tab === "tasks" && <TaskLogicTab categories={categories} buildings={buildings} config={config} onRefresh={fetchData} />}
                 {tab === "approvals" && <ApprovalTab config={config} profiles={profiles} buildings={buildings} onRefresh={fetchData} />}
                 {tab === "stats" && <StatsTab />}

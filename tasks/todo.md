@@ -6767,6 +6767,25 @@
 - 页面冒烟：隔离 `loadtest.db` 下 `/photographer` 200 / 37866 bytes，`/admin` 200 / 13165 bytes，`/stats` 200 / 9926 bytes，`/api/workbench/sync?...&full=1` 200 / 49724 bytes。
 - 待后续：继续追求极致轻量时，可把 `/api/buildings` 也按 `view=identity/map/admin/stats` 拆分；当前工作台初始加载仍会拿完整楼座、房间、地图和熨烫机信息。
 
+#### 阶段 D 第二十五批计划：building 场景化 view
+
+- [x] `/api/buildings` 增加 `view=summary/stats/full`：默认和 `full` 保持完整楼座、房间、熨烫机、平面图和额外场地兼容；`summary/stats` 只返回 `id/name`。
+- [x] 后台首页初始加载改用 `/api/buildings?view=summary`，人员管理、逻辑设置、审批管理只消费轻量楼座列表；进入空间管理时再按需加载 `view=full`。
+- [x] 统计页参考楼座改用 `/api/buildings?view=stats`，避免统计页打开时拉取房间、熨烫机、平面图和裁剪字段。
+- [x] 摄影师工作台继续使用默认完整 `/api/buildings`，空间管理增删改后继续刷新完整数据；本批不改地图、派单、熨烫机、状态命令或业务规则。
+- [x] 验证 `tsc`、`git diff --check`、生产构建、building 接口体积和 `/admin`、`/stats`、`/photographer` 冒烟；本批只做场景化取数字段瘦身。
+
+#### 阶段 D 第二十五批评审：building 场景化 view
+
+- 已完成：`GET /api/buildings` 支持 `view=summary/stats/full`，默认和 `view=full` 继续返回完整楼座、房间、熨烫机、平面图、裁剪和额外场地数据；非法 view 返回 400。
+- 已完成：后台首页初始数据改拉 `/api/buildings?view=summary`，进入空间管理 tab 时再按需拉 `/api/buildings?view=full`；空间管理自己的刷新继续拉完整楼座并同步配置，避免上传背景或维护楼座后数据不同步。
+- 已完成：统计页参考楼座改拉 `/api/buildings?view=stats`，只保留统计筛选需要的 `id/name`。
+- 已保持：摄影师工作台继续使用默认完整 `/api/buildings`，地图、房间、熨烫机、额外场地、派单、状态切换、优先级、熨烫和移交规则均未改变。
+- 验证通过：`npx prisma validate`、`npx tsc --noEmit --pretty false --incremental false`、`git diff --check`、`DATABASE_URL=file:./prisma/loadtest.db npm run build`。
+- 本地隔离服务验证：`/api/buildings` 200 / 22356 bytes，`/api/buildings?view=summary` 200 / 131 bytes，`/api/buildings?view=stats` 200 / 131 bytes，非法 `view=thin` 400 / 24 bytes；summary/stats 首项字段只有 `id,name`，不含 `rooms/ironingMachines/floorPlanUrl`。
+- 页面冒烟：隔离 `loadtest.db` 下 `/admin` 200 / 13165 bytes，`/stats` 200 / 9926 bytes，`/photographer` 200 / 37866 bytes。
+- 待后续：继续查 `/api/categories`、后台配置读取和统计明细聚合；如果后台首屏仍慢，下一刀应优先看客户端执行时的 API waterfall，而不是再改已经很小的 summary 楼座数据。
+
 ### 阶段 A 评审
 
 - 已完成压测工具：新增 `scripts/loadtest/seed.ts`、`run.ts`、`report.ts`、`common.ts`，不引入 k6/artillery 等新依赖；使用 Node 内置 `fetch`、现有 `tsx` 和 Prisma/SQLite。

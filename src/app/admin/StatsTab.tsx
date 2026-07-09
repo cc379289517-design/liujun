@@ -333,7 +333,7 @@ export default function StatsTab() {
     try {
       const [profileRes, buildingRes] = await Promise.all([
         fetch("/api/profiles?view=stats"),
-        fetch("/api/buildings"),
+        fetch("/api/buildings?view=stats"),
       ]);
       if (profileRes.ok) {
         const data = await profileRes.json();

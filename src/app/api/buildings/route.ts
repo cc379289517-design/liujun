@@ -4,8 +4,26 @@ import { prisma } from "@/lib/prisma";
 /**
  * GET /api/buildings - 获取所有楼座及房间
  */
-export async function GET() {
+export async function GET(request: NextRequest) {
   try {
+    const view = request.nextUrl.searchParams.get("view") ?? "full";
+
+    if (view === "summary" || view === "stats") {
+      const buildings = await prisma.building.findMany({
+        select: {
+          id: true,
+          name: true,
+        },
+        orderBy: { id: "asc" },
+      });
+
+      return Response.json(buildings);
+    }
+
+    if (view !== "full") {
+      return Response.json({ error: "Invalid view" }, { status: 400 });
+    }
+
     const buildings = await prisma.building.findMany({
       include: {
         rooms: { orderBy: { roomNumber: "asc" } },
