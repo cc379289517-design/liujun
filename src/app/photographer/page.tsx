@@ -162,7 +162,17 @@ type CompletionRegistrationReasonType = typeof COMPLETION_REGISTRATION_REASON_OP
 const PAGE_NOW_REFRESH_MS = 60_000;
 const LIVE_TIMER_REFRESH_MS = 1_000;
 const RECENT_TASK_PATCH_TTL_MS = 8_000;
-type WorkbenchPendingAction = "start" | "complete" | "pause" | "resume" | "cancel" | "create-mobile";
+type WorkbenchPendingAction =
+  | "start"
+  | "complete"
+  | "pause"
+  | "resume"
+  | "cancel"
+  | "create"
+  | "create-mobile"
+  | "transfer"
+  | "transfer-response"
+  | "priority-upgrade";
 const DISPLAY_TASK_TYPE_ORDER = ["手持", "服装穿戴", "手工DIY", "熨烫", EXTERNAL_MODEL_ASSIST_DISPLAY_NAME, "其他"];
 const DISPLAY_TASK_TYPE_SOLID_BG: Record<string, string> = {
   ...CAT_SOLID_BG,
@@ -645,6 +655,7 @@ export default function PhotographerPage() {
     specifiedAssistantId: string | null;
     specifiedAssistantName: string | null;
     specifiedAssistantAvatar: string | null;
+    pendingActionKey: string;
     phase: number;
   } | null>(null);
   const [enteringTaskId, setEnteringTaskId] = useState<string | null>(null);
@@ -3647,6 +3658,8 @@ export default function PhotographerPage() {
       setPriorityUpgradeError("请填写提权申请理由");
       return;
     }
+    const actionKey = workbenchTaskActionKey("priority-upgrade", priorityUpgradeTask.id, profile.id);
+    if (!beginWorkbenchPendingAction(actionKey)) return;
     setPriorityUpgradeSaving(true);
     setPriorityUpgradeError(null);
     try {
@@ -3693,8 +3706,9 @@ export default function PhotographerPage() {
       setPriorityUpgradeError(error instanceof Error ? error.message : "提权申请提交失败");
     } finally {
       setPriorityUpgradeSaving(false);
+      endWorkbenchPendingAction(actionKey);
     }
-  }, [priorityUpgradeReason, priorityUpgradeSaving, priorityUpgradeSku, priorityUpgradeTask, profile, updateLocalTaskSources]);
+  }, [beginWorkbenchPendingAction, endWorkbenchPendingAction, priorityUpgradeReason, priorityUpgradeSaving, priorityUpgradeSku, priorityUpgradeTask, profile, updateLocalTaskSources]);
 
   const openCompletionRegistrationModal = useCallback((task: TaskFromAPI) => {
     const registration = task.completionRegistration;
@@ -4043,7 +4057,7 @@ export default function PhotographerPage() {
 
   const handleBook = useCallback(
     (catName: string, dur: BuiltCategory["durations"][number], e: React.MouseEvent) => {
-      if (genie) return;
+      if (genie || !profile) return;
       if (selectedQuickBookAssistant && !selectedQuickBookAssistantCanSubmit) {
         showTaskCreateError("指定助理当前暂不可接单，请重新选择");
         setQuickBookAssistantPickerOpen(true);
@@ -4053,6 +4067,8 @@ export default function PhotographerPage() {
       const listEl = taskListRef.current;
       if (!listEl) return;
       const listRect = listEl.getBoundingClientRect();
+      const actionKey = workbenchProfileActionKey("create", profile.id);
+      if (!beginWorkbenchPendingAction(actionKey)) return;
       setHoveredCat(null);
       setGenie({
         sx: btn.left, sy: btn.top, sw: btn.width, sh: btn.height,
@@ -4064,9 +4080,10 @@ export default function PhotographerPage() {
         specifiedAssistantId: selectedQuickBookAssistant?.id ?? null,
         specifiedAssistantName: selectedQuickBookAssistant?.name ?? null,
         specifiedAssistantAvatar: selectedQuickBookAssistant?.avatar ?? null,
+        pendingActionKey: actionKey,
       });
     },
-    [genie, selectedQuickBookAssistant, selectedQuickBookAssistantCanSubmit, showTaskCreateError],
+    [beginWorkbenchPendingAction, genie, profile, selectedQuickBookAssistant, selectedQuickBookAssistantCanSubmit, showTaskCreateError],
   );
 
   const clampTaskListScroll = useCallback((next: number) => {
@@ -4099,6 +4116,7 @@ export default function PhotographerPage() {
         if (!room) {
           setGenie(null);
           showTaskCreateError("当前楼座没有可用场地，无法创建任务");
+          endWorkbenchPendingAction(genie.pendingActionKey);
           return;
         }
         const categoryId = genie.categoryId;
@@ -4134,8 +4152,8 @@ export default function PhotographerPage() {
         setTaskListScrollY(0);
         setTimeout(() => setEnteringTaskId(null), 600);
         // Persist to API
-        if (profile) {
-          try {
+        try {
+          if (profile) {
             const res = await fetch("/api/tasks", {
               method: "POST",
               headers: { "Content-Type": "application/json" },
@@ -4169,16 +4187,18 @@ export default function PhotographerPage() {
                   data?.code === "PHOTOGRAPHER_LIMIT_QUEUE_FULL"
               );
             }
-          } catch (e) {
-            removeLocalTaskSources(tempId, { updateDisplay: true });
-            showTaskCreateError("任务创建失败，请检查网络后重试");
-            console.error("Failed to create task", e);
           }
+        } catch (e) {
+          removeLocalTaskSources(tempId, { updateDisplay: true });
+          showTaskCreateError("任务创建失败，请检查网络后重试");
+          console.error("Failed to create task", e);
+        } finally {
+          endWorkbenchPendingAction(genie.pendingActionKey);
         }
       }, 550);
       return () => clearTimeout(timer);
     }
-  }, [genie, photographerMaxActiveTasks, profile, profileCurrentWorkbenchRoom, refreshAssistants, removeLocalTaskSources, showTaskCreateError, taskPublishBuilding, taskPublishBuildingId, upsertLocalTaskSource]);
+  }, [endWorkbenchPendingAction, genie, photographerMaxActiveTasks, profile, profileCurrentWorkbenchRoom, refreshAssistants, removeLocalTaskSources, showTaskCreateError, taskPublishBuilding, taskPublishBuildingId, upsertLocalTaskSource]);
 
   const notePopupStyle = notePopupPosition(notePopupAnchor);
   const notePopupTaskIsExecuting = notePopupTaskId ? noteTaskIsExecuting(notePopupTaskId) : false;
@@ -4554,6 +4574,8 @@ export default function PhotographerPage() {
 
   const handleTransferAssistant = useCallback(async (targetAssistantId: string) => {
     if (!transferTask || !profile || transferSavingAssistantId) return;
+    const actionKey = workbenchTaskActionKey("transfer", transferTask.id, profile.id);
+    if (!beginWorkbenchPendingAction(actionKey)) return;
     setTransferSavingAssistantId(targetAssistantId);
     setTransferError(null);
     try {
@@ -4582,14 +4604,17 @@ export default function PhotographerPage() {
       setTransferError("交换/移交失败，请检查网络后重试");
     } finally {
       setTransferSavingAssistantId(null);
+      endWorkbenchPendingAction(actionKey);
     }
-  }, [closeTransferModal, profile, refreshAssistants, replaceVisibleTaskForProfile, showTaskCreateError, transferSavingAssistantId, transferTask]);
+  }, [beginWorkbenchPendingAction, closeTransferModal, endWorkbenchPendingAction, profile, refreshAssistants, replaceVisibleTaskForProfile, showTaskCreateError, transferSavingAssistantId, transferTask]);
 
   const handleRespondTransferRequest = useCallback(async (
     accepted: boolean,
     responseMode?: "pause_and_go" | "after_complete",
   ) => {
     if (!profile || !incomingConfirmingTransferTask || !incomingConfirmingTransfer || transferResponseSaving) return;
+    const actionKey = workbenchTaskActionKey("transfer-response", incomingConfirmingTransfer.id, profile.id);
+    if (!beginWorkbenchPendingAction(actionKey)) return;
     setTransferResponseSaving(accepted ? (responseMode ?? "accept") : "reject");
     try {
       const response = await fetch(`/api/tasks/${incomingConfirmingTransferTask.id}`, {
@@ -4633,10 +4658,13 @@ export default function PhotographerPage() {
       showTaskCreateError("移交请求处理失败，请检查网络后重试");
     } finally {
       setTransferResponseSaving(null);
+      endWorkbenchPendingAction(actionKey);
     }
   }, [
     activeTransferForTask,
+    beginWorkbenchPendingAction,
     confirmingTransferForTask,
+    endWorkbenchPendingAction,
     incomingConfirmingTransfer,
     incomingConfirmingTransferTask,
     profile,
@@ -4645,6 +4673,16 @@ export default function PhotographerPage() {
     showTaskCreateError,
     transferResponseSaving,
   ]);
+
+  const transferActionPending = transferTask && profile
+    ? isWorkbenchPendingAction(workbenchTaskActionKey("transfer", transferTask.id, profile.id))
+    : false;
+  const transferResponseActionPending = incomingConfirmingTransfer && profile
+    ? isWorkbenchPendingAction(workbenchTaskActionKey("transfer-response", incomingConfirmingTransfer.id, profile.id))
+    : false;
+  const priorityUpgradeActionPending = priorityUpgradeTask && profile
+    ? isWorkbenchPendingAction(workbenchTaskActionKey("priority-upgrade", priorityUpgradeTask.id, profile.id))
+    : false;
 
   const renderTransferPicker = () => {
     if (!transferTask) return null;
@@ -4666,9 +4704,10 @@ export default function PhotographerPage() {
           <div className="max-h-[286px] space-y-1 overflow-y-auto pr-0.5 task-scroll">
             {transferCandidates.map(({ profile: candidate, info }) => {
               const isSaving = transferSavingAssistantId === candidate.id;
+              const transferButtonPending = transferActionPending || isSaving;
               const showBubble = transferHoverAssistantId === candidate.id;
               const candidateDock = profileToQuickBookAssistant(candidate);
-              const transferStatusText = isSaving
+              const transferStatusText = transferButtonPending
                 ? "处理中"
 	                : info.mode === "reserved"
 	                  ? "需预约"
@@ -4679,7 +4718,7 @@ export default function PhotographerPage() {
                 <button
                   key={candidate.id}
                   type="button"
-                  disabled={isSaving}
+                  disabled={transferButtonPending}
                   onMouseEnter={() => setTransferHoverAssistantId(candidate.id)}
                   onMouseLeave={() => setTransferHoverAssistantId(null)}
                   onClick={(event) => {
@@ -5927,6 +5966,9 @@ export default function PhotographerPage() {
 
   const mobileCreatePending = profile
     ? isWorkbenchPendingAction(workbenchProfileActionKey("create-mobile", profile.id))
+    : false;
+  const desktopCreatePending = profile
+    ? isWorkbenchPendingAction(workbenchProfileActionKey("create", profile.id))
     : false;
 
   const renderMobileCurrentView = useCallback(() => {
@@ -8384,7 +8426,7 @@ export default function PhotographerPage() {
                 type="button"
                 aria-label="关闭转派提醒"
                 title="关闭"
-                disabled={transferSavingAssistantId === transferConfirmTarget.assistantId}
+                disabled={transferActionPending || transferSavingAssistantId === transferConfirmTarget.assistantId}
                 onClick={() => setTransferConfirmTarget(null)}
                 className="absolute right-5 top-5 flex h-8 w-8 items-center justify-center rounded-full bg-white/60 text-[20px] font-semibold leading-none text-slate-400 shadow-sm shadow-slate-200/50 transition-colors hover:bg-white/90 hover:text-slate-600 disabled:cursor-wait disabled:opacity-50"
               >
@@ -8411,11 +8453,11 @@ export default function PhotographerPage() {
               </div>
               <button
                 type="button"
-                disabled={transferSavingAssistantId === transferConfirmTarget.assistantId}
+                disabled={transferActionPending || transferSavingAssistantId === transferConfirmTarget.assistantId}
                 className="mt-8 w-full rounded-3xl bg-purple-500 px-6 py-4 text-[21px] font-bold text-white shadow-lg shadow-purple-500/20 transition-colors hover:bg-purple-600 active:scale-[0.99] disabled:opacity-70"
                 onClick={() => void handleTransferAssistant(transferConfirmTarget.assistantId)}
               >
-                {transferSavingAssistantId === transferConfirmTarget.assistantId ? "确认中..." : "确认"}
+                {transferActionPending || transferSavingAssistantId === transferConfirmTarget.assistantId ? "确认中..." : "确认"}
               </button>
             </div>
           </div>
@@ -8428,7 +8470,7 @@ export default function PhotographerPage() {
                 type="button"
                 aria-label="稍后处理移交请求"
                 title="稍后处理"
-                disabled={transferResponseSaving != null}
+                disabled={transferResponseActionPending || transferResponseSaving != null}
                 onClick={() => setDismissedTransferRequestIds((prev) => [...prev, incomingConfirmingTransfer.id])}
                 className="absolute right-5 top-5 flex h-8 w-8 items-center justify-center rounded-full bg-white/60 text-[20px] font-semibold leading-none text-slate-400 shadow-sm shadow-slate-200/50 transition-colors hover:bg-white/90 hover:text-slate-600 disabled:cursor-wait disabled:opacity-50"
               >
@@ -8458,39 +8500,39 @@ export default function PhotographerPage() {
               <div className="mt-8 flex gap-3">
                 <button
                   type="button"
-                  disabled={transferResponseSaving != null}
+                  disabled={transferResponseActionPending || transferResponseSaving != null}
                   className="min-h-[54px] flex-1 rounded-3xl bg-white/70 px-5 text-[18px] font-bold text-[--text-secondary] shadow-sm shadow-slate-200/50 transition-colors hover:bg-white disabled:opacity-60"
                   onClick={() => void handleRespondTransferRequest(false)}
                 >
-                  {transferResponseSaving === "reject" ? "处理中..." : "拒绝"}
+                  {transferResponseActionPending || transferResponseSaving === "reject" ? "处理中..." : "拒绝"}
                 </button>
                 {incomingConfirmingTransferIsSwap ? (
                   <>
                     <button
                       type="button"
-                      disabled={transferResponseSaving != null}
+                      disabled={transferResponseActionPending || transferResponseSaving != null}
                       className="min-h-[54px] flex-1 rounded-3xl bg-purple-500 px-4 text-[17px] font-bold text-white shadow-lg shadow-purple-500/20 transition-colors hover:bg-purple-600 active:scale-[0.99] disabled:opacity-70"
                       onClick={() => void handleRespondTransferRequest(true, "pause_and_go")}
                     >
-                      {transferResponseSaving === "pause_and_go" ? "处理中..." : "暂停并前往"}
+                      {transferResponseActionPending || transferResponseSaving === "pause_and_go" ? "处理中..." : "暂停并前往"}
                     </button>
                     <button
                       type="button"
-                      disabled={transferResponseSaving != null}
+                      disabled={transferResponseActionPending || transferResponseSaving != null}
                       className="min-h-[54px] flex-1 rounded-3xl bg-purple-600 px-4 text-[17px] font-bold text-white shadow-lg shadow-purple-600/20 transition-colors hover:bg-purple-700 active:scale-[0.99] disabled:opacity-70"
                       onClick={() => void handleRespondTransferRequest(true, "after_complete")}
                     >
-                      {transferResponseSaving === "after_complete" ? "处理中..." : "结束后前往"}
+                      {transferResponseActionPending || transferResponseSaving === "after_complete" ? "处理中..." : "结束后前往"}
                     </button>
                   </>
                 ) : (
                   <button
                     type="button"
-                    disabled={transferResponseSaving != null}
+                    disabled={transferResponseActionPending || transferResponseSaving != null}
                     className="min-h-[54px] flex-1 rounded-3xl bg-purple-500 px-5 text-[18px] font-bold text-white shadow-lg shadow-purple-500/20 transition-colors hover:bg-purple-600 active:scale-[0.99] disabled:opacity-70"
                     onClick={() => void handleRespondTransferRequest(true)}
                   >
-                    {transferResponseSaving === "accept" ? "确认中..." : "确认接替"}
+                    {transferResponseActionPending || transferResponseSaving === "accept" ? "确认中..." : "确认接替"}
                   </button>
                 )}
               </div>
@@ -9888,8 +9930,9 @@ export default function PhotographerPage() {
                       {cat.durations.map((d) => (
                         <button
                           key={d.priority}
+                          disabled={desktopCreatePending}
                           onClick={(e) => handleBook(cat.name, d, e)}
-                          className={`px-4 py-1.5 rounded-lg ${d.cls} hover:brightness-110 active:scale-95 transition-all flex items-center justify-between gap-2 shadow-lg whitespace-nowrap min-w-[140px]`}
+                          className={`px-4 py-1.5 rounded-lg ${d.cls} hover:brightness-110 active:scale-95 transition-all flex items-center justify-between gap-2 shadow-lg whitespace-nowrap min-w-[140px] disabled:cursor-wait disabled:opacity-65`}
                         >
                           <span className="text-[11px] font-bold opacity-90">{d.label}</span>
                           <span className="text-[11px] font-extrabold">{d.priority}</span>
@@ -9898,8 +9941,9 @@ export default function PhotographerPage() {
                       {cat.specialActions?.map((action) => (
                         <button
                           key={`special-${action.title}`}
+                          disabled={desktopCreatePending}
                           onClick={(e) => handleBook(action.title, action, e)}
-                          className="mt-1 flex min-w-[140px] items-center justify-between gap-2 whitespace-nowrap rounded-lg bg-purple-500 px-4 py-1.5 text-white shadow-lg shadow-purple-500/20 transition-all hover:brightness-110 active:scale-95"
+                          className="mt-1 flex min-w-[140px] items-center justify-between gap-2 whitespace-nowrap rounded-lg bg-purple-500 px-4 py-1.5 text-white shadow-lg shadow-purple-500/20 transition-all hover:brightness-110 active:scale-95 disabled:cursor-wait disabled:opacity-65"
                         >
                           <span className="text-[11px] font-extrabold">{action.title}</span>
                           <span className="text-[11px] font-extrabold">{action.priority}</span>
@@ -11954,7 +11998,7 @@ export default function PhotographerPage() {
               <button
                 type="button"
                 onClick={closePriorityUpgradeModal}
-                disabled={priorityUpgradeSaving}
+                disabled={priorityUpgradeActionPending || priorityUpgradeSaving}
                 className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl bg-white/50 text-[18px] font-bold text-[--text-muted] transition-colors hover:bg-white/80 disabled:opacity-50"
                 aria-label="关闭提权申请"
               >
@@ -12004,7 +12048,7 @@ export default function PhotographerPage() {
               <button
                 type="button"
                 onClick={closePriorityUpgradeModal}
-                disabled={priorityUpgradeSaving}
+                disabled={priorityUpgradeActionPending || priorityUpgradeSaving}
                 className="min-h-[42px] flex-1 rounded-2xl bg-white/56 px-4 text-[13px] font-extrabold text-[--text-secondary] transition-colors hover:bg-white/80 disabled:opacity-60"
               >
                 取消
@@ -12012,10 +12056,10 @@ export default function PhotographerPage() {
               <button
                 type="button"
                 onClick={() => void handleSubmitPriorityUpgrade()}
-                disabled={priorityUpgradeSaving || priorityUpgradeSku.trim().length === 0 || priorityUpgradeReason.trim().length === 0}
+                disabled={priorityUpgradeActionPending || priorityUpgradeSaving || priorityUpgradeSku.trim().length === 0 || priorityUpgradeReason.trim().length === 0}
                 className="min-h-[42px] flex-1 rounded-2xl bg-red-500 px-4 text-[13px] font-extrabold text-white shadow-lg shadow-red-500/20 transition-colors hover:bg-red-600 disabled:cursor-not-allowed disabled:opacity-55"
               >
-                {priorityUpgradeSaving ? "提交中..." : "提交申请"}
+                {priorityUpgradeActionPending || priorityUpgradeSaving ? "提交中..." : "提交申请"}
               </button>
             </div>
           </div>

@@ -6465,6 +6465,24 @@
 - 验证通过：`npx tsc --noEmit --pretty false --incremental false`、`git diff --check -- src/app/photographer/page.tsx tasks/todo.md tasks/lessons.md`、`DATABASE_URL=file:./prisma/loadtest.db npm run build`、本地隔离服务 `http://localhost:3100/photographer` 200、`/api/config` 200、`/api/workbench/sync?role=photographer&buildingId=1&full=1` 200。
 - 待后续：阶段 D 剩余重点是完整 reducer/store 和继续拆 `CurrentTaskPanel`、`TaskListPanel`、`MapWorkbench` 的数据适配层。
 
+#### 阶段 D 第九批计划：高风险操作 pending 锁补齐
+
+- [x] 扩展工作台 pending action 类型，覆盖桌面快捷发单、移交发起、移交响应和人工提权申请。
+- [x] 桌面快捷发单点击后立即进入 ref+state pending，动画期和 API 写入期都挡住重复提交；成功、失败、前置校验失败均释放 pending。
+- [x] 移交发起与目标确认/拒绝接入同一 pending 队列，保留原 `transferSavingAssistantId` / `transferResponseSaving` UI 文案，不改变移交业务规则。
+- [x] 人工提权提交接入同一 pending 队列，保留原表单校验、错误文案和本地任务源补丁，不改变审批规则。
+- [x] 验证 `tsc`、`git diff --check`、生产构建和本地轻量接口；本批只做前端重复提交防护，不更新长期业务文档。
+
+#### 阶段 D 第九批评审：高风险操作 pending 锁补齐
+
+- 已完成：`WorkbenchPendingAction` 补齐 `create / transfer / transfer-response / priority-upgrade`，桌面发单、移交发起、移交响应和人工提权都进入同一套 `beginWorkbenchPendingAction/endWorkbenchPendingAction`。
+- 已完成：桌面快捷发单从按钮点击开始锁定，覆盖 genie 动画和 API 写入全过程；无可用场地、接口失败、业务 409、网络异常和成功路径都会释放 pending。
+- 已完成：移交发起、目标确认/拒绝、暂停并前往、结束后前往都用 action-level pending ref 挡重复提交，同时保留原 UI 文案和局部 saving 状态。
+- 已完成：人工提权申请在表单校验通过后进入 action-level pending，保留原 SKU/理由校验、错误文案和本地 `priorityUpgradeRequests` 补丁。
+- 业务边界：本批只做前端重复提交防护和即时禁用反馈，不改变创建任务、移交/互换、提权审批、优先级、熨烫机或数据库结构；长期业务文档无需新增规则。
+- 验证通过：`npx tsc --noEmit --pretty false --incremental false`、`git diff --check -- src/app/photographer/page.tsx tasks/todo.md tasks/lessons.md`、`DATABASE_URL=file:./prisma/loadtest.db npm run build`、本地隔离服务 `http://localhost:3100/photographer` 200、`/api/config` 200、`/api/workbench/sync?role=photographer&buildingId=1&full=1` 200。
+- 验证备注：首次构建因 Google 字体瞬时请求失败中断，复核字体 URL 可访问后重跑通过；本地 dev 首次启动遇到 `.next` Turbopack 缓存被 macOS `._*` 污染，按既有安全脚本清理 `.next` 缓存后通过，不涉及数据库。
+
 ### 阶段 E：验收与对抗审查
 
 - [ ] 基线压测完成后，先根据报告排序瓶颈，再决定是否进入 B/C/D 的第一批代码改动。
