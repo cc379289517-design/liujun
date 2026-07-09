@@ -6855,6 +6855,22 @@
 - 行为保持：业务 409 的响应状态和错误文案不变；非业务异常继续 `console.error("[PATCH /api/tasks/[id]]", error)`，便于追查真正系统问题。
 - 预期收益：80 摄影师、30 助理、5 管理混合压测中大量“当前助理已有执行中或暂停中的任务”“有更高优先级任务可开始”等正确拦截不再污染错误日志，降低日志 IO、控制台噪音和误报排查成本。
 
+#### 阶段 E 第四批计划：收窄工作台非主同步读路径
+
+- [x] 工作台身份选择、任务操作后兜底刷新、切楼座/切状态后的个人任务刷新，调用 `/api/tasks` 时带当前 `buildingId`，避免在 150 人场景拉取全场今日任务。
+- [x] `refreshAssistants()` 无同步快照兜底时，只拉当前楼座今日任务；主同步仍继续走 `/api/workbench/sync`，不改变增量同步和派单规则。
+- [x] 工作台周统计弹窗改用 `/api/tasks?payload=stats`，只取统计/明细需要的轻量字段，避免拉移交、提权等重关系。
+- [x] 验证 TypeScript、生产 build，并用本地接口样本对比响应体积。
+
+#### 阶段 E 第四批评审：收窄工作台非主同步读路径
+
+- 改动范围：`src/app/photographer/page.tsx` 的非主同步兜底请求收窄到当前楼座；身份选择、切楼座、切状态、任务操作后刷新都通过 helper 带上 `buildingId`。
+- 统计降载：工作台个人周统计和区域完成统计改用 `payload=stats`；区域完成统计同时带 `buildingId`，只取统计表格需要的任务基础字段、人员名、分类、状态和反馈。
+- 行为保持：主轮询仍走 `/api/workbench/sync`；开始、暂停、完成、移交、熨烫槽位、优先级规则没有变化，本批只减少兜底读路径的查询范围和 JSON 关系体积。
+- 本地样本：隔离 `prisma/loadtest.db`、115 人/360 任务，`/api/tasks?todayOnly=true` 为 442527 bytes，带 `buildingId=1` 后为 88385 bytes。
+- 统计样本：`/api/tasks?weekOnly=true&weekOffset=0` 为 442527 bytes，`payload=stats` 为 310139 bytes，`payload=stats&buildingId=1` 为 61910 bytes。
+- 验证通过：`git diff --check`、`npx prisma validate`、`npx tsc --noEmit --pretty false --incremental false`、`DATABASE_URL=file:./prisma/loadtest.db npm run build`、本地生产服务接口样本。
+
 ### 阶段 A 评审
 
 - 已完成压测工具：新增 `scripts/loadtest/seed.ts`、`run.ts`、`report.ts`、`common.ts`，不引入 k6/artillery 等新依赖；使用 Node 内置 `fetch`、现有 `tsx` 和 Prisma/SQLite。

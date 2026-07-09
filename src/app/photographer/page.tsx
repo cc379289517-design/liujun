@@ -493,12 +493,23 @@ function taskAllowsCollaboration(task: TaskFromAPI | undefined, collaborationEna
   return collaborationEnabled && task != null && task.status !== "completed";
 }
 
-function taskListUrlForProfile(profile: { id: string; role: string }): string {
+function taskListUrlForProfile(profile: { id: string; role: string }, buildingId?: number | null): string {
   const params = new URLSearchParams({ todayOnly: "true" });
   if (isAssistantRole(profile.role)) {
     params.set("assistantId", profile.id);
   } else if (profile.role === "photographer") {
     params.set("photographerId", profile.id);
+  }
+  if (buildingId != null) {
+    params.set("buildingId", String(buildingId));
+  }
+  return `/api/tasks?${params.toString()}`;
+}
+
+function taskListUrlForAssistant(assistantId: string, buildingId?: number | null): string {
+  const params = new URLSearchParams({ todayOnly: "true", assistantId });
+  if (buildingId != null) {
+    params.set("buildingId", String(buildingId));
   }
   return `/api/tasks?${params.toString()}`;
 }
@@ -1615,7 +1626,7 @@ export default function PhotographerPage() {
     } else {
       setReassignmentNotices([]);
     }
-    fetch(taskListUrlForProfile(selectedForWorkbench))
+    fetch(taskListUrlForProfile(selectedForWorkbench, selectedServiceBuildingId))
       .then((r) => r.json())
       .then((taskData) => {
         if (Array.isArray(taskData)) {
@@ -1990,7 +2001,7 @@ export default function PhotographerPage() {
   // Fetch weekly tasks when stats modal opens or the viewed week changes
   useEffect(() => {
     if (!showStatsModal) return;
-    const params = new URLSearchParams({ weekOnly: "true", weekOffset: String(statsWeekOffset) });
+    const params = new URLSearchParams({ weekOnly: "true", weekOffset: String(statsWeekOffset), payload: "stats" });
     if (profile?.role === "photographer") params.set("photographerId", profile.id);
     if (isAssistantRole(profile?.role)) params.set("assistantId", profile!.id);
     fetch(`/api/tasks?${params}`)
@@ -2001,12 +2012,13 @@ export default function PhotographerPage() {
 
   useEffect(() => {
     if (!showAreaCompletedStatsModal) return;
-    const params = new URLSearchParams({ weekOnly: "true", weekOffset: String(areaCompletedStatsWeekOffset) });
+    const params = new URLSearchParams({ weekOnly: "true", weekOffset: String(areaCompletedStatsWeekOffset), payload: "stats" });
+    if (activeBuildingId != null) params.set("buildingId", String(activeBuildingId));
     fetch(`/api/tasks?${params}`)
       .then((r) => r.json())
       .then((data: TaskFromAPI[]) => setAreaCompletedWeeklyTasks(Array.isArray(data) ? data : []))
       .catch(() => setAreaCompletedWeeklyTasks([]));
-  }, [showAreaCompletedStatsModal, areaCompletedStatsWeekOffset]);
+  }, [activeBuildingId, showAreaCompletedStatsModal, areaCompletedStatsWeekOffset]);
 
   // Fetch assistants + their active tasks for the active building
   const refreshAssistants = useCallback((snapshot?: { profiles?: unknown; tasks?: unknown; assistantStatus?: unknown }) => {
@@ -2015,7 +2027,7 @@ export default function PhotographerPage() {
       ? Promise.resolve([snapshot.profiles, snapshot.tasks])
       : Promise.all([
         fetch(`/api/profiles?role=assistant&buildingId=${activeBuildingId}&view=identity`, { cache: "no-store" }).then((r) => r.json()),
-        fetch("/api/tasks?todayOnly=true", { cache: "no-store" }).then((r) => r.json()).catch(() => []),
+        fetch(`/api/tasks?todayOnly=true&buildingId=${activeBuildingId}`, { cache: "no-store" }).then((r) => r.json()).catch(() => []),
       ]);
     return source.then(async ([profilesData, tasksData]) => {
       const nowMs = Date.now();
@@ -3037,7 +3049,7 @@ export default function PhotographerPage() {
       } : p));
       setActiveBuildingId(updatedServiceBuildingId);
 
-      const taskRes = await fetch(`/api/tasks?assistantId=${profile.id}&todayOnly=true`, { cache: "no-store" });
+      const taskRes = await fetch(taskListUrlForProfile(profile, updatedServiceBuildingId), { cache: "no-store" });
       const taskData = await taskRes.json();
       if (Array.isArray(taskData)) {
         applyTaskDataForProfile(
@@ -3190,7 +3202,7 @@ export default function PhotographerPage() {
       let targetRawTasks: TaskFromAPI[] | null = null;
       if (!targetCurrentTask) {
         try {
-          const taskRes = await fetch(`/api/tasks?assistantId=${profileId}&todayOnly=true`, { cache: "no-store" });
+          const taskRes = await fetch(taskListUrlForAssistant(profileId, activeBuildingId ?? profile?.buildingId), { cache: "no-store" });
           const taskData = await taskRes.json();
           if (Array.isArray(taskData)) {
             targetRawTasks = taskData as TaskFromAPI[];
@@ -3222,8 +3234,8 @@ export default function PhotographerPage() {
           console.error("切换状态前暂停任务失败", pauseRes.status, await pauseRes.text().catch(() => ""));
           return;
         }
-	      if (profile?.id === profileId) {
-          const taskRes = await fetch(`/api/tasks?assistantId=${profileId}&todayOnly=true`, { cache: "no-store" });
+        if (profile?.id === profileId) {
+          const taskRes = await fetch(taskListUrlForAssistant(profileId, activeBuildingId ?? profile.buildingId), { cache: "no-store" });
           const taskData = await taskRes.json();
           if (Array.isArray(taskData)) {
             applyTaskDataForProfile(taskData as TaskFromAPI[], profile, activeBuildingId ?? profile.buildingId);
@@ -3781,7 +3793,7 @@ export default function PhotographerPage() {
         } : item));
       }
 
-      const taskResponse = await fetch(`/api/tasks?assistantId=${profile.id}&todayOnly=true`, { cache: "no-store" });
+      const taskResponse = await fetch(taskListUrlForProfile(profile, activeBuildingId ?? profile.buildingId), { cache: "no-store" });
       const taskData = await taskResponse.json();
       if (Array.isArray(taskData)) {
         applyTaskDataForProfile(taskData as TaskFromAPI[], profile, activeBuildingId ?? profile.buildingId);
@@ -3906,7 +3918,7 @@ export default function PhotographerPage() {
         };
       }));
 
-      const taskRes = await fetch(`/api/tasks?assistantId=${profile.id}&todayOnly=true`);
+      const taskRes = await fetch(taskListUrlForProfile(profile, activeBuildingId ?? profile.buildingId));
       const taskData = await taskRes.json();
       if (Array.isArray(taskData)) {
         applyTaskDataForProfile(taskData as TaskFromAPI[], profile, activeBuildingId ?? profile.buildingId);
@@ -3956,7 +3968,7 @@ export default function PhotographerPage() {
           applyOptimisticAssistantTaskStatus(task, action);
         }
         try {
-          const taskRes = await fetch(taskListUrlForProfile(profile), { cache: "no-store" });
+          const taskRes = await fetch(taskListUrlForProfile(profile, activeBuildingId ?? profile.buildingId), { cache: "no-store" });
           const taskData = await taskRes.json().catch(() => null);
           if (Array.isArray(taskData)) {
             applyTaskDataForProfile(taskData as TaskFromAPI[], profile, activeBuildingId ?? profile.buildingId);
