@@ -6560,6 +6560,22 @@
 - 验证备注：本地 dev 首启仍需按既有脚本清理 `.next` 中 macOS `._*` 伴生文件和 Turbopack 缓存；本轮清理 885 个伴生文件。`/api/workbench/sync` 维护日志只影响隔离 `loadtest.db`。
 - 待后续：第二批可继续把 `assistantRawTasks` 接入同一 store，或把协作/移交/任务列表中的 `taskListRaw.find()` 高频查找继续替换为 `tasksByIdRef`。
 
+#### 阶段 D 第十四批计划：assistantRawTasks reducer 接入
+
+- [x] 复用 `useWorkbenchTaskSourceStore` 接管 `assistantRawTasks`，让助理当前/暂停/pending/让行任务源也具备 `tasksById + orderedIds + tasksRef`。
+- [x] `applyTaskDataForProfile()`、`updateLocalTaskSources()`、`removeLocalTaskSources()`、`upsertLocalTaskSource()`、`replaceVisibleTaskForProfile()`、`applyOptimisticAssistantTaskStatus()` 中的助理源写入改走 store 方法。
+- [x] 保持 `publicQueueRaw`、当前/暂停/pending/让行任务卡派生、展示 `tasks`、乐观补丁和后端状态命令口径不变。
+- [x] 验证 `tsc`、`git diff --check`、生产构建和本地轻量接口；本批只做前端状态源等价优化，不更新长期业务文档。
+
+#### 阶段 D 第十四批评审：assistantRawTasks reducer 接入
+
+- 已完成：`assistantRawTasks` 由第二个 `useWorkbenchTaskSourceStore()` 接管，原 `setAssistantRawTasks` 和手写 `assistantRawTasksRef.current = ...` 写入已移除。
+- 已完成：助理视角全量应用、单任务补丁、删除、插入、移交可见性替换、乐观开始/完成均通过 store 方法更新助理任务源，保留同步 ref 供当前任务状态卡即时派生。
+- 已保持：公共队列源、当前/暂停/pending/让行任务卡派生逻辑、展示列表排序、移交隐藏 TTL、乐观补丁 TTL、API 和后端状态命令均不变；本批不更新长期业务规则文档。
+- 验证通过：`npx tsc --noEmit --pretty false --incremental false`、`git diff --check -- src/app/photographer/page.tsx tasks/todo.md tasks/lessons.md`、`DATABASE_URL=file:./prisma/loadtest.db npm run build`、本地隔离服务 `http://localhost:3100/photographer` 200、`/api/config` 200、`/api/workbench/sync?role=photographer&buildingId=1&full=1` 200。
+- 验证备注：本地 dev 首启仍需按既有脚本清理 `.next` 中 macOS `._*` 伴生文件和 Turbopack 缓存；本轮清理 882 个伴生文件。`/api/workbench/sync` 维护日志只影响隔离 `loadtest.db`。
+- 待后续：继续把协作、移交、任务列表中的 `taskListRaw.find()` / `assistantRawTasks.find()` 高频查找替换为 store `getTask()` / `tasksByIdRef`；再考虑 `publicQueueRaw` 是否也适合接入同一 store。
+
 ### 阶段 E：验收与对抗审查
 
 - [ ] 基线压测完成后，先根据报告排序瓶颈，再决定是否进入 B/C/D 的第一批代码改动。

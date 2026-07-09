@@ -793,7 +793,15 @@ export default function PhotographerPage() {
   /** 待就位被插单时，被让行的原较低优先任务 */
   const [deferredWaitingRawTask, setDeferredWaitingRawTask] = useState<TaskFromAPI | null>(null);
   /** 助理视角下最近一次拉取到的原始任务列表（用于列表点击「待就位」与目标任务对齐） */
-  const [assistantRawTasks, setAssistantRawTasks] = useState<TaskFromAPI[]>([]);
+  const {
+    replaceOrRemoveTask: replaceOrRemoveAssistantRawTask,
+    replaceTasks: replaceAssistantRawTasks,
+    removeTask: removeAssistantRawTask,
+    tasks: assistantRawTasks,
+    tasksRef: assistantRawTasksRef,
+    updateTask: updateAssistantRawTask,
+    upsertTask: upsertAssistantRawTask,
+  } = useWorkbenchTaskSourceStore();
   /** 与「我的任务」展示同步的原始任务（摄影师/助理均填充，用于已进行/已等待实时文案） */
   const {
     getTask: getTaskListRawById,
@@ -828,7 +836,6 @@ export default function PhotographerPage() {
   const publicQueuePromotionSignatureRef = useRef("");
   const publicQueuePromotionRunningRef = useRef(false);
   const pendingRawTaskRef = useRef<TaskFromAPI | null>(null);
-  const assistantRawTasksRef = useRef<TaskFromAPI[]>([]);
   const publicQueueRawRef = useRef<TaskFromAPI[]>([]);
   const workbenchSyncTokenRef = useRef<string | null>(null);
   const workbenchLastFullSyncAtRef = useRef(0);
@@ -845,9 +852,6 @@ export default function PhotographerPage() {
   useEffect(() => {
     pendingRawTaskRef.current = pendingRawTask;
   }, [pendingRawTask]);
-  useEffect(() => {
-    assistantRawTasksRef.current = assistantRawTasks;
-  }, [assistantRawTasks]);
   useEffect(() => {
     publicQueueRawRef.current = publicQueueRaw;
   }, [publicQueueRaw]);
@@ -1325,8 +1329,7 @@ export default function PhotographerPage() {
     replaceTaskListRaw(raw);
     setTasks(sortTasksByStatus(raw.map((t) => apiTaskToDisplay(t, assistantView ? targetProfile.id : undefined))));
     if (assistantView) {
-      assistantRawTasksRef.current = raw;
-      setAssistantRawTasks(raw);
+      replaceAssistantRawTasks(raw);
       const { current: active, paused, pending, deferredWaiting } = resolveAssistantTasks(raw, targetProfile.id);
       pendingRawTaskRef.current = pending;
       setCurrentRawTask(active);
@@ -1334,15 +1337,14 @@ export default function PhotographerPage() {
       setPendingRawTask(pending);
       setDeferredWaitingRawTask(deferredWaiting);
     } else {
-      assistantRawTasksRef.current = [];
+      replaceAssistantRawTasks([]);
       pendingRawTaskRef.current = null;
-      setAssistantRawTasks([]);
       setDeferredWaitingRawTask(null);
       setCurrentRawTask(null);
       setPausedRawTask(null);
       setPendingRawTask(null);
     }
-  }, [applyOptimisticTaskPatches, replaceTaskListRaw]);
+  }, [applyOptimisticTaskPatches, replaceAssistantRawTasks, replaceTaskListRaw]);
 
   const updateLocalTaskSources = useCallback((
     taskId: string,
@@ -1359,11 +1361,7 @@ export default function PhotographerPage() {
 
     const nextTaskList = updateTaskListRaw(taskId, updateRawTask);
 
-    const nextAssistantTasks = updateList(assistantRawTasksRef.current);
-    if (nextAssistantTasks !== assistantRawTasksRef.current) {
-      assistantRawTasksRef.current = nextAssistantTasks;
-      setAssistantRawTasks(nextAssistantTasks);
-    }
+    updateAssistantRawTask(taskId, updateRawTask);
 
     const nextPublicQueue = updateList(publicQueueRawRef.current);
     if (nextPublicQueue !== publicQueueRawRef.current) {
@@ -1394,7 +1392,7 @@ export default function PhotographerPage() {
       const updateDisplayTask = options.updateDisplay;
       setTasks((prev) => prev.map((task) => task.id === taskId ? updateDisplayTask(task) : task));
     }
-  }, [profile?.id, profile?.role, updateTaskListRaw]);
+  }, [profile?.id, profile?.role, updateAssistantRawTask, updateTaskListRaw]);
 
   const removeLocalTaskSources = useCallback((
     taskId: string,
@@ -1407,11 +1405,7 @@ export default function PhotographerPage() {
 
     const nextTaskList = removeTaskListRaw(taskId);
 
-    const nextAssistantTasks = removeFromList(assistantRawTasksRef.current);
-    if (nextAssistantTasks !== assistantRawTasksRef.current) {
-      assistantRawTasksRef.current = nextAssistantTasks;
-      setAssistantRawTasks(nextAssistantTasks);
-    }
+    removeAssistantRawTask(taskId);
 
     if (options?.updatePublicQueue) {
       const nextPublicQueue = removeFromList(publicQueueRawRef.current);
@@ -1434,7 +1428,7 @@ export default function PhotographerPage() {
     if (options?.updateDisplay) {
       setTasks((prev) => prev.filter((task) => task.id !== taskId));
     }
-  }, [removeTaskListRaw]);
+  }, [removeAssistantRawTask, removeTaskListRaw]);
 
   const upsertLocalTaskSource = useCallback((
     task: TaskFromAPI,
@@ -1447,9 +1441,7 @@ export default function PhotographerPage() {
     const nextTaskList = upsertTaskListRaw(task, { moveExisting: true });
 
     if (assistantRawTasksRef.current.some((item) => item.id === task.id)) {
-      const nextAssistantTasks = upsertList(assistantRawTasksRef.current);
-      assistantRawTasksRef.current = nextAssistantTasks;
-      setAssistantRawTasks(nextAssistantTasks);
+      upsertAssistantRawTask(task, { moveExisting: true });
     }
 
     if (options?.updatePublicQueue) {
@@ -1467,7 +1459,7 @@ export default function PhotographerPage() {
         : [display, ...withoutTask];
       return sortTasksByStatus(replaced);
     });
-  }, [profile?.id, profile?.role, upsertTaskListRaw]);
+  }, [profile?.id, profile?.role, upsertAssistantRawTask, upsertTaskListRaw]);
 
   const mergeAuthoritativeTaskForProfile = useCallback((
     updatedTask: TaskFromAPI,
@@ -1502,12 +1494,16 @@ export default function PhotographerPage() {
     setTasks(sortTasksByStatus(nextTaskList.map((task) => apiTaskToDisplay(task, isAssistantRole(targetProfile.role) ? targetProfile.id : undefined))));
 
     if (isAssistantRole(targetProfile.role)) {
-      const assistantSource = assistantRawTasksRef.current.length > 0
+      const hadAssistantTasks = assistantRawTasksRef.current.length > 0;
+      const assistantSource = hadAssistantTasks
         ? assistantRawTasksRef.current
         : taskListRawRef.current;
-      const nextAssistantTasks = replaceOrRemove(assistantSource);
-      assistantRawTasksRef.current = nextAssistantTasks;
-      setAssistantRawTasks(nextAssistantTasks);
+      const nextAssistantTasks = hadAssistantTasks
+        ? replaceOrRemoveAssistantRawTask(updatedTask, keepTask)
+        : replaceOrRemove(assistantSource);
+      if (!hadAssistantTasks) {
+        replaceAssistantRawTasks(nextAssistantTasks);
+      }
       const { current: active, paused, pending, deferredWaiting } = resolveAssistantTasks(nextAssistantTasks, targetProfile.id);
       pendingRawTaskRef.current = pending;
       setCurrentRawTask(active);
@@ -1515,15 +1511,14 @@ export default function PhotographerPage() {
       setPendingRawTask(pending);
       setDeferredWaitingRawTask(deferredWaiting);
     } else {
-      assistantRawTasksRef.current = [];
+      replaceAssistantRawTasks([]);
       pendingRawTaskRef.current = null;
-      setAssistantRawTasks([]);
       setCurrentRawTask(null);
       setPausedRawTask(null);
       setPendingRawTask(null);
       setDeferredWaitingRawTask(null);
     }
-  }, [forgetTaskPatch, hideTaskForProfile, rememberTaskPatch, replaceOrRemoveTaskListRaw]);
+  }, [forgetTaskPatch, hideTaskForProfile, rememberTaskPatch, replaceAssistantRawTasks, replaceOrRemoveAssistantRawTask, replaceOrRemoveTaskListRaw]);
 
   const applyOptimisticAssistantTaskStatus = useCallback((task: TaskFromAPI, action: "start" | "complete") => {
     if (!profile || !isAssistantRole(profile.role)) return;
@@ -1557,16 +1552,23 @@ export default function PhotographerPage() {
     });
     rememberTaskPatch(nextTask);
     const currentTaskList = taskListRawRef.current;
-    const currentAssistantTasks = assistantRawTasksRef.current.length > 0
+    const hadAssistantTasks = assistantRawTasksRef.current.length > 0;
+    const currentAssistantTasks = hadAssistantTasks
       ? assistantRawTasksRef.current
       : currentTaskList;
     const nextTaskList = upsertTaskListRaw(nextTask, {
       mergeExisting: true,
       position: "prepend",
     });
-    const nextAssistantTasks = mergeTask(currentAssistantTasks);
-    assistantRawTasksRef.current = nextAssistantTasks;
-    setAssistantRawTasks(nextAssistantTasks);
+    const nextAssistantTasks = hadAssistantTasks
+      ? upsertAssistantRawTask(nextTask, {
+        mergeExisting: true,
+        position: "prepend",
+      })
+      : mergeTask(currentAssistantTasks);
+    if (!hadAssistantTasks) {
+      replaceAssistantRawTasks(nextAssistantTasks);
+    }
     setTasks(sortTasksByStatus(nextTaskList.map((t) => apiTaskToDisplay(t, profile.id))));
     const { current: active, paused, pending, deferredWaiting } = resolveAssistantTasks(nextAssistantTasks, profile.id);
     pendingRawTaskRef.current = pending;
@@ -1574,7 +1576,7 @@ export default function PhotographerPage() {
     setPausedRawTask(paused);
     setPendingRawTask(pending);
     setDeferredWaitingRawTask(deferredWaiting);
-  }, [profile, rememberTaskPatch, taskListRawRef, upsertTaskListRaw]);
+  }, [profile, rememberTaskPatch, replaceAssistantRawTasks, taskListRawRef, upsertAssistantRawTask, upsertTaskListRaw]);
 
   const applyWorkbenchProfile = useCallback((selected: typeof allProfiles[0]) => {
     originalRoomRef.current = selected.currentRoom;
@@ -2780,7 +2782,7 @@ export default function PhotographerPage() {
             setProfile(null);
             setTasks([]);
             replaceTaskListRaw([]);
-            setAssistantRawTasks([]);
+            replaceAssistantRawTasks([]);
             setCurrentRawTask(null);
             setPausedRawTask(null);
             setPendingRawTask(null);
