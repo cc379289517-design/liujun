@@ -6608,6 +6608,22 @@
 - 验证备注：本地 dev 首启仍需清理 `.next` 中 macOS `._*` 伴生文件和 Turbopack 缓存；本轮清理 882 个伴生文件。`/api/workbench/sync` 在隔离 `loadtest.db` 触发熨烫队列维护日志，不影响 `prisma/dev.db` 或生产库。
 - 待后续：继续把公共队列派生展示从每轮数组扫描推进到摘要/索引层，或进入移交请求、可开始池这类条件筛选的派生索引，但必须继续保持业务规则不变。
 
+#### 阶段 D 第十七批计划：公共队列状态索引化
+
+- [x] 在 `taskDisplay` 增加暂停/公共队列状态 lookup：一次扫描得到 active interrupt parent ids，并保留原 `publicQueueStatusInfo()` 兼容入口。
+- [x] 页面层为 `publicQueueRaw` 预计算 `statusInfoById`，公共队列排序、提权动画前后顺序推断、移动端/桌面端队列卡片渲染统一读取该 map。
+- [x] 保持“插单暂停 / 暂停 / 已分配待就位 / 未分配待派发”的状态文案、rank、样式和排序结果不变，只减少重复扫描。
+- [x] 验证 `tsc`、`git diff --check`、生产构建和本地轻量接口；本批只做前端公共队列状态派生等价优化，不更新长期业务文档。
+
+#### 阶段 D 第十七批评审：公共队列状态索引化
+
+- 已完成：`taskDisplay` 新增 `buildTaskPauseLookup()`、`taskPauseKindFromLookup()`、`publicQueueStatusInfoFromLookup()`，旧 `taskPauseKind()`、`publicQueueStatusInfo()` 和 `sortPublicQueueTasks()` 保持兼容。
+- 已完成：`sortPublicQueueTasks()` 默认路径改成一次 lookup 后排序，页面公共队列路径额外预计算 `publicQueueStatusInfoById`，排序、提权动画推断、移动端/桌面端公共队列卡片共用同一状态派生结果。
+- 已保持：“插单暂停 / 暂停 / 已分配待就位 / 未分配待派发”的 label、rank、样式、assignedWaiting 语义和排序优先级不变；本批不改后端状态命令、派单、熨烫或移交规则。
+- 验证通过：`npx tsc --noEmit --pretty false --incremental false`、`git diff --check -- src/app/photographer/page.tsx src/app/photographer/taskDisplay.ts tasks/todo.md tasks/lessons.md`、`DATABASE_URL=file:./prisma/loadtest.db npm run build`、本地隔离服务 `http://localhost:3100/photographer` 200、`/api/config` 200、`/api/workbench/sync?role=photographer&buildingId=1&full=1` 200。
+- 验证备注：本地 dev 首启仍需清理 `.next` 中 macOS `._*` 伴生文件和 Turbopack 缓存；本轮清理 883 个伴生文件。`/api/workbench/sync` 在隔离 `loadtest.db` 触发熨烫队列维护日志，不影响 `prisma/dev.db` 或生产库。
+- 待后续：继续推进公共队列摘要/首屏截断、`areaTasks`/排行榜派生索引，或拆解 `now` 对区域统计和队列列表的秒级重算影响。
+
 ### 阶段 E：验收与对抗审查
 
 - [ ] 基线压测完成后，先根据报告排序瓶颈，再决定是否进入 B/C/D 的第一批代码改动。

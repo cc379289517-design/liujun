@@ -523,13 +523,29 @@ export function taskListActualLine(
 }
 
 export function taskPauseKind(task: TaskFromAPI | undefined, allTasks: TaskFromAPI[]): TaskPauseKind | null {
+  return taskPauseKindFromLookup(task, buildTaskPauseLookup(allTasks));
+}
+
+export type TaskPauseLookup = {
+  activeInterruptedParentIds: ReadonlySet<string>;
+};
+
+export function buildTaskPauseLookup(allTasks: TaskFromAPI[]): TaskPauseLookup {
+  const activeInterruptedParentIds = new Set<string>();
+  for (const candidate of allTasks) {
+    if (candidate.parentTaskId && candidate.status !== "completed") {
+      activeInterruptedParentIds.add(candidate.parentTaskId);
+    }
+  }
+  return { activeInterruptedParentIds };
+}
+
+export function taskPauseKindFromLookup(
+  task: TaskFromAPI | undefined,
+  lookup: TaskPauseLookup,
+): TaskPauseKind | null {
   if (!task || task.status !== "paused") return null;
-  const hasActiveInterrupt = allTasks.some(
-    (candidate) =>
-      candidate.parentTaskId === task.id &&
-      candidate.status !== "completed"
-  );
-  return hasActiveInterrupt ? "interrupt" : "manual";
+  return lookup.activeInterruptedParentIds.has(task.id) ? "interrupt" : "manual";
 }
 
 export function taskStatusLabelForList(d: DisplayTask, raw: TaskFromAPI | undefined, allTasks: TaskFromAPI[]): string {
@@ -549,9 +565,19 @@ export function taskStatusLabelForList(d: DisplayTask, raw: TaskFromAPI | undefi
   return d.statusLabel;
 }
 
-export function publicQueueStatusInfo(task: TaskFromAPI, allTasks: TaskFromAPI[]) {
+export type PublicQueueStatusInfo = {
+  label: string;
+  cls: string;
+  rank: number;
+  assignedWaiting: boolean;
+};
+
+export function publicQueueStatusInfoFromLookup(
+  task: TaskFromAPI,
+  lookup: TaskPauseLookup,
+): PublicQueueStatusInfo {
   if (task.status === "paused") {
-    const kind = taskPauseKind(task, allTasks);
+    const kind = taskPauseKindFromLookup(task, lookup);
     return {
       label: kind === "interrupt" ? "插单暂停" : "暂停",
       cls: "bg-yellow-100/70 text-yellow-700",
@@ -564,6 +590,10 @@ export function publicQueueStatusInfo(task: TaskFromAPI, allTasks: TaskFromAPI[]
   return assigned
     ? { label: "已分配待就位", cls: "bg-blue-100/70 text-blue-700", rank: 0, assignedWaiting: true }
     : { label: "未分配待派发", cls: "bg-gray-100/80 text-gray-600", rank: 1, assignedWaiting: false };
+}
+
+export function publicQueueStatusInfo(task: TaskFromAPI, allTasks: TaskFromAPI[]): PublicQueueStatusInfo {
+  return publicQueueStatusInfoFromLookup(task, buildTaskPauseLookup(allTasks));
 }
 
 export function publicQueueRankCls(index: number): string {
@@ -614,11 +644,17 @@ export function publicQueueRankShapeCls(index: number, priority: number): string
 export function sortPublicQueueTasks(
   tasks: TaskFromAPI[],
   allTasks: TaskFromAPI[],
-  priorityOf: (task: TaskFromAPI) => number = (task) => task.priority
+  priorityOf: (task: TaskFromAPI) => number = (task) => task.priority,
+  statusInfoOf?: (task: TaskFromAPI) => PublicQueueStatusInfo,
 ): TaskFromAPI[] {
+  let resolveStatusInfo = statusInfoOf;
+  if (!resolveStatusInfo) {
+    const fallbackLookup = buildTaskPauseLookup(allTasks);
+    resolveStatusInfo = (task: TaskFromAPI) => publicQueueStatusInfoFromLookup(task, fallbackLookup);
+  }
   return [...tasks].sort((a, b) => {
-    const statusA = publicQueueStatusInfo(a, allTasks).rank;
-    const statusB = publicQueueStatusInfo(b, allTasks).rank;
+    const statusA = resolveStatusInfo(a).rank;
+    const statusB = resolveStatusInfo(b).rank;
     const createdA = new Date(a.createdAt).getTime();
     const createdB = new Date(b.createdAt).getTime();
     return (

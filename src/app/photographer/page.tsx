@@ -60,6 +60,7 @@ import {
   assistantStartCandidateTasksForProfile,
   activeTaskParticipants,
   apiTaskToDisplay,
+  buildTaskPauseLookup,
   buildDurationLabel,
   canCancelTaskFromWorkbench,
   fmtMin,
@@ -83,7 +84,7 @@ import {
   publicQueuePriorityLevelCls,
   publicQueueRankLabel,
   publicQueueRankShapeCls,
-  publicQueueStatusInfo,
+  publicQueueStatusInfoFromLookup,
   resolveAssistantTasks,
   sortPublicQueueTasks,
   sortTasksByStatus,
@@ -99,6 +100,7 @@ import {
   taskStatusLabelForList,
   taskTimingForProfile,
   taskTypeGroupName,
+  type PublicQueueStatusInfo,
 } from "./taskDisplay";
 import {
   buildSyntheticBeforePromotionIds,
@@ -4298,12 +4300,26 @@ export default function PhotographerPage() {
         return idle;
       })
     : [];
+  const publicQueuePauseLookup = useMemo(
+    () => buildTaskPauseLookup(publicQueueRaw),
+    [publicQueueRaw],
+  );
+  const publicQueueStatusInfoById = useMemo(() => {
+    const byId = new Map<string, PublicQueueStatusInfo>();
+    for (const task of publicQueueRaw) {
+      byId.set(task.id, publicQueueStatusInfoFromLookup(task, publicQueuePauseLookup));
+    }
+    return byId;
+  }, [publicQueuePauseLookup, publicQueueRaw]);
+  const publicQueueStatusInfoForTask = useCallback((task: TaskFromAPI): PublicQueueStatusInfo => (
+    publicQueueStatusInfoById.get(task.id) ?? publicQueueStatusInfoFromLookup(task, publicQueuePauseLookup)
+  ), [publicQueuePauseLookup, publicQueueStatusInfoById]);
   const publicQueueTasks = useMemo(
     () => {
       const queueTasks = publicQueueRaw.filter((task) => isPublicQueueTaskForBuilding(task, publicQueueBuildingId));
-      return sortPublicQueueTasks(queueTasks, publicQueueRaw);
+      return sortPublicQueueTasks(queueTasks, publicQueueRaw, undefined, publicQueueStatusInfoForTask);
     },
-    [publicQueueBuildingId, publicQueueRaw],
+    [publicQueueBuildingId, publicQueueRaw, publicQueueStatusInfoForTask],
   );
   const publicQueueInteractionVisible = true;
   const publicQueuePendingPromotion = useMemo(() => {
@@ -4318,7 +4334,8 @@ export default function PhotographerPage() {
     const inferredBeforePromotion = sortPublicQueueTasks(
       publicQueueTasks,
       publicQueueRaw,
-      (task) => unseenIds.has(task.id) ? Math.min(6, task.priority + 1) : task.priority
+      (task) => unseenIds.has(task.id) ? Math.min(6, task.priority + 1) : task.priority,
+      publicQueueStatusInfoForTask,
     );
     const finalIds = publicQueueTasks.map((task) => task.id);
     const storedBeforeIds = mergePublicQueueOrder(
@@ -4367,7 +4384,7 @@ export default function PhotographerPage() {
       keys: moving.map((item) => item.key),
       signature: `${profile.id}:${publicQueueBuildingId ?? "all"}:${moving.map((item) => item.key).join("|")}:${finalIds.join(",")}`,
     };
-  }, [profile?.id, publicQueueBuildingId, publicQueueInteractionVisible, publicQueueRaw, publicQueueSeenVersion, publicQueueTasks]);
+  }, [profile?.id, publicQueueBuildingId, publicQueueInteractionVisible, publicQueueRaw, publicQueueSeenVersion, publicQueueStatusInfoForTask, publicQueueTasks]);
   const publicQueueDisplayTasks = useMemo(() => {
     const orderIds = publicQueueVisualOrderIds ?? publicQueuePendingPromotion?.beforeIds ?? null;
     if (!orderIds) return publicQueueTasks;
@@ -6282,7 +6299,7 @@ export default function PhotographerPage() {
         </p>
       ) : publicQueueDisplayTasks.map((task, index) => {
         const display = apiTaskToDisplay(task);
-        const statusInfo = publicQueueStatusInfo(task, publicQueueRaw);
+        const statusInfo = publicQueueStatusInfoForTask(task);
         const timeLine = taskListActualLine(display, task, now.getTime(), true);
         return (
           <div key={`mobile-public-${task.id}`} className={`rounded-[20px] border p-4 backdrop-blur-2xl ${mobileGlassPanel}`}>
@@ -6307,7 +6324,7 @@ export default function PhotographerPage() {
         );
       })}
     </div>
-  ), [mobileGlassPanel, mobileSoftPanel, now, publicQueueDisplayTasks, publicQueueRaw]);
+  ), [mobileGlassPanel, mobileSoftPanel, now, publicQueueDisplayTasks, publicQueueStatusInfoForTask]);
 
   const renderMobileMeView = useCallback(() => (
     <div className="space-y-4">
@@ -7437,7 +7454,7 @@ export default function PhotographerPage() {
                     <div className="area-public-queue-list space-y-2.5">
                       {areaPublicQueueRows.map((queueTask, index) => {
                         const display = apiTaskToDisplay(queueTask);
-                        const statusInfo = publicQueueStatusInfo(queueTask, publicQueueRaw);
+                        const statusInfo = publicQueueStatusInfoForTask(queueTask);
                         const compactStatusLabel = statusInfo.assignedWaiting ? "待就位" : statusInfo.label.replace("待派发", "待派");
                         const queuedWaitingMinutes = Math.floor((now.getTime() - new Date(queueTask.createdAt).getTime()) / 60000);
                         const actualLine = taskListActualLine(display, queueTask, now.getTime(), true) ?? `已等待${fmtMin(queuedWaitingMinutes)}`;
@@ -9942,7 +9959,7 @@ export default function PhotographerPage() {
                   ) : (
                     publicQueueDisplayTasks.map((queueTask, index) => {
                       const display = apiTaskToDisplay(queueTask);
-                      const statusInfo = publicQueueStatusInfo(queueTask, publicQueueRaw);
+                      const statusInfo = publicQueueStatusInfoForTask(queueTask);
                       const actualLine = taskListActualLine(display, queueTask, now.getTime(), true);
                       const assigneeNames = [
                         queueTask.assistant?.name,
