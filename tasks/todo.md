@@ -6543,6 +6543,23 @@
 - [x] 远端依赖安装改为 `npm ci`，避免 Mac mini 因平台/ npm 版本差异把 `package-lock.json` 变成本地脏改动。
 - [x] 验证：`bash -n scripts/release-to-mini.sh`、发布脚本再次完整跑通；Mac mini 工作区仅保留生产 `prisma/dev.db` 改动。
 
+#### 阶段 D 第十三批计划：tasksById reducer 第一批
+
+- [x] 新增 `useWorkbenchTaskSourceStore`：用 reducer 维护 `taskListRaw` 的 `tasksById + orderedIds + tasks` 快照，并保留同步 ref 供弱网/乱序响应路径即时读取。
+- [x] `page.tsx` 先只把主任务源 `taskListRaw` 接入 store，`assistantRawTasks` / `publicQueueRaw` 暂不迁移，降低一次性改动风险。
+- [x] 将 `applyTaskDataForProfile()`、`updateLocalTaskSources()`、`removeLocalTaskSources()`、`upsertLocalTaskSource()`、`replaceVisibleTaskForProfile()`、乐观开始/完成合并改走 store 方法。
+- [x] 验证 `tsc`、`git diff --check`、生产构建和本地轻量接口；本批只做前端状态源等价优化，不更新长期业务文档。
+
+#### 阶段 D 第十三批评审：tasksById reducer 第一批
+
+- 已完成：新增 `src/app/photographer/useWorkbenchTaskSourceStore.ts`，用 reducer 维护 `tasks + tasksById + orderedIds` 快照，并在每次操作时先同步 refs 再触发 React 更新。
+- 已完成：`taskListRaw` 主任务源由 store 接管，原 `taskListRawRef` 手写同步 effect 已移除；全量应用、单任务补丁、删除、插入、移交可见性替换、乐观开始/完成均改走 store 方法。
+- 已完成：`mergeAuthoritativeTaskForProfile()` 改读 `tasksByIdRef` 合并权威任务，备注保存前的执行中判断优先按 id 查 store，减少高频路径数组扫描和旧闭包读取。
+- 已保持：`assistantRawTasks`、`publicQueueRaw`、当前/暂停/pending/让行任务卡、展示列表、移交隐藏 TTL、乐观补丁 TTL 和所有后端状态命令口径不变；本批不更新长期业务规则文档。
+- 验证通过：`npx tsc --noEmit --pretty false --incremental false`、`git diff --check -- src/app/photographer/page.tsx src/app/photographer/useWorkbenchTaskSourceStore.ts src/app/photographer/workbenchTaskSources.ts tasks/todo.md tasks/lessons.md`、`DATABASE_URL=file:./prisma/loadtest.db npm run build`、本地隔离服务 `http://localhost:3100/photographer` 200、`/api/config` 200、`/api/workbench/sync?role=photographer&buildingId=1&full=1` 200。
+- 验证备注：本地 dev 首启仍需按既有脚本清理 `.next` 中 macOS `._*` 伴生文件和 Turbopack 缓存；本轮清理 885 个伴生文件。`/api/workbench/sync` 维护日志只影响隔离 `loadtest.db`。
+- 待后续：第二批可继续把 `assistantRawTasks` 接入同一 store，或把协作/移交/任务列表中的 `taskListRaw.find()` 高频查找继续替换为 `tasksByIdRef`。
+
 ### 阶段 E：验收与对抗审查
 
 - [ ] 基线压测完成后，先根据报告排序瓶颈，再决定是否进入 B/C/D 的第一批代码改动。

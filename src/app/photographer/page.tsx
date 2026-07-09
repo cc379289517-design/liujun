@@ -31,6 +31,7 @@ import {
   workbenchTaskActionKey,
 } from "./useWorkbenchPendingActions";
 import { useWorkbenchTaskOptimism } from "./useWorkbenchTaskOptimism";
+import { useWorkbenchTaskSourceStore } from "./useWorkbenchTaskSourceStore";
 import {
   removeTaskFromList,
   replaceOrRemoveTaskInList,
@@ -794,7 +795,17 @@ export default function PhotographerPage() {
   /** 助理视角下最近一次拉取到的原始任务列表（用于列表点击「待就位」与目标任务对齐） */
   const [assistantRawTasks, setAssistantRawTasks] = useState<TaskFromAPI[]>([]);
   /** 与「我的任务」展示同步的原始任务（摄影师/助理均填充，用于已进行/已等待实时文案） */
-  const [taskListRaw, setTaskListRaw] = useState<TaskFromAPI[]>([]);
+  const {
+    getTask: getTaskListRawById,
+    replaceOrRemoveTask: replaceOrRemoveTaskListRaw,
+    replaceTasks: replaceTaskListRaw,
+    removeTask: removeTaskListRaw,
+    tasks: taskListRaw,
+    tasksByIdRef: taskListRawByIdRef,
+    tasksRef: taskListRawRef,
+    updateTask: updateTaskListRaw,
+    upsertTask: upsertTaskListRaw,
+  } = useWorkbenchTaskSourceStore();
   /** 当前区域公共队列：供所有人查看未分配、待就位、暂停任务 */
   const [publicQueueRaw, setPublicQueueRaw] = useState<TaskFromAPI[]>([]);
   const [publicQueueOpen, setPublicQueueOpen] = useState(false);
@@ -817,7 +828,6 @@ export default function PhotographerPage() {
   const publicQueuePromotionSignatureRef = useRef("");
   const publicQueuePromotionRunningRef = useRef(false);
   const pendingRawTaskRef = useRef<TaskFromAPI | null>(null);
-  const taskListRawRef = useRef<TaskFromAPI[]>([]);
   const assistantRawTasksRef = useRef<TaskFromAPI[]>([]);
   const publicQueueRawRef = useRef<TaskFromAPI[]>([]);
   const workbenchSyncTokenRef = useRef<string | null>(null);
@@ -835,9 +845,6 @@ export default function PhotographerPage() {
   useEffect(() => {
     pendingRawTaskRef.current = pendingRawTask;
   }, [pendingRawTask]);
-  useEffect(() => {
-    taskListRawRef.current = taskListRaw;
-  }, [taskListRaw]);
   useEffect(() => {
     assistantRawTasksRef.current = assistantRawTasks;
   }, [assistantRawTasks]);
@@ -1315,8 +1322,7 @@ export default function PhotographerPage() {
     const patchedTaskData = applyOptimisticTaskPatches(taskData, targetProfile);
     const raw = visibleTasksForProfile(patchedTaskData, targetProfile, targetBuildingId);
     const assistantView = isAssistantRole(targetProfile.role);
-    taskListRawRef.current = raw;
-    setTaskListRaw(raw);
+    replaceTaskListRaw(raw);
     setTasks(sortTasksByStatus(raw.map((t) => apiTaskToDisplay(t, assistantView ? targetProfile.id : undefined))));
     if (assistantView) {
       assistantRawTasksRef.current = raw;
@@ -1336,7 +1342,7 @@ export default function PhotographerPage() {
       setPausedRawTask(null);
       setPendingRawTask(null);
     }
-  }, [applyOptimisticTaskPatches]);
+  }, [applyOptimisticTaskPatches, replaceTaskListRaw]);
 
   const updateLocalTaskSources = useCallback((
     taskId: string,
@@ -1351,11 +1357,7 @@ export default function PhotographerPage() {
     const updateNullable = (task: TaskFromAPI | null): TaskFromAPI | null =>
       task?.id === taskId ? updateRawTask(task) : task;
 
-    const nextTaskList = updateList(taskListRawRef.current);
-    if (nextTaskList !== taskListRawRef.current) {
-      taskListRawRef.current = nextTaskList;
-      setTaskListRaw(nextTaskList);
-    }
+    const nextTaskList = updateTaskListRaw(taskId, updateRawTask);
 
     const nextAssistantTasks = updateList(assistantRawTasksRef.current);
     if (nextAssistantTasks !== assistantRawTasksRef.current) {
@@ -1392,7 +1394,7 @@ export default function PhotographerPage() {
       const updateDisplayTask = options.updateDisplay;
       setTasks((prev) => prev.map((task) => task.id === taskId ? updateDisplayTask(task) : task));
     }
-  }, [profile?.id, profile?.role]);
+  }, [profile?.id, profile?.role, updateTaskListRaw]);
 
   const removeLocalTaskSources = useCallback((
     taskId: string,
@@ -1403,11 +1405,7 @@ export default function PhotographerPage() {
   ) => {
     const removeFromList = (list: TaskFromAPI[]) => removeTaskFromList(list, taskId);
 
-    const nextTaskList = removeFromList(taskListRawRef.current);
-    if (nextTaskList !== taskListRawRef.current) {
-      taskListRawRef.current = nextTaskList;
-      setTaskListRaw(nextTaskList);
-    }
+    const nextTaskList = removeTaskListRaw(taskId);
 
     const nextAssistantTasks = removeFromList(assistantRawTasksRef.current);
     if (nextAssistantTasks !== assistantRawTasksRef.current) {
@@ -1436,7 +1434,7 @@ export default function PhotographerPage() {
     if (options?.updateDisplay) {
       setTasks((prev) => prev.filter((task) => task.id !== taskId));
     }
-  }, []);
+  }, [removeTaskListRaw]);
 
   const upsertLocalTaskSource = useCallback((
     task: TaskFromAPI,
@@ -1446,9 +1444,7 @@ export default function PhotographerPage() {
     },
   ) => {
     const upsertList = (list: TaskFromAPI[]) => upsertTaskInList(list, task, { moveExisting: true });
-    const nextTaskList = upsertList(taskListRawRef.current);
-    taskListRawRef.current = nextTaskList;
-    setTaskListRaw(nextTaskList);
+    const nextTaskList = upsertTaskListRaw(task, { moveExisting: true });
 
     if (assistantRawTasksRef.current.some((item) => item.id === task.id)) {
       const nextAssistantTasks = upsertList(assistantRawTasksRef.current);
@@ -1471,7 +1467,7 @@ export default function PhotographerPage() {
         : [display, ...withoutTask];
       return sortTasksByStatus(replaced);
     });
-  }, [profile?.id, profile?.role]);
+  }, [profile?.id, profile?.role, upsertTaskListRaw]);
 
   const mergeAuthoritativeTaskForProfile = useCallback((
     updatedTask: TaskFromAPI,
@@ -1479,14 +1475,12 @@ export default function PhotographerPage() {
   ) => {
     if (!targetProfile) return;
     rememberTaskPatch(updatedTask);
-    const byId = new Map<string, TaskFromAPI>();
-    for (const task of [...taskListRawRef.current, ...assistantRawTasksRef.current]) {
-      byId.set(task.id, task);
-    }
+    const byId = new Map(taskListRawByIdRef.current);
+    for (const task of assistantRawTasksRef.current) byId.set(task.id, task);
     const existing = byId.get(updatedTask.id);
     byId.set(updatedTask.id, existing ? { ...existing, ...updatedTask } : updatedTask);
     applyTaskDataForProfile([...byId.values()], targetProfile, activeBuildingId ?? targetProfile.buildingId);
-  }, [activeBuildingId, applyTaskDataForProfile, profile, rememberTaskPatch]);
+  }, [activeBuildingId, applyTaskDataForProfile, profile, rememberTaskPatch, taskListRawByIdRef]);
 
   const replaceVisibleTaskForProfile = useCallback((
     updatedTask: TaskFromAPI,
@@ -1504,9 +1498,7 @@ export default function PhotographerPage() {
     const replaceOrRemove = (list: TaskFromAPI[]): TaskFromAPI[] =>
       replaceOrRemoveTaskInList(list, updatedTask, keepTask);
 
-    const nextTaskList = replaceOrRemove(taskListRawRef.current);
-    taskListRawRef.current = nextTaskList;
-    setTaskListRaw(nextTaskList);
+    const nextTaskList = replaceOrRemoveTaskListRaw(updatedTask, keepTask);
     setTasks(sortTasksByStatus(nextTaskList.map((task) => apiTaskToDisplay(task, isAssistantRole(targetProfile.role) ? targetProfile.id : undefined))));
 
     if (isAssistantRole(targetProfile.role)) {
@@ -1531,7 +1523,7 @@ export default function PhotographerPage() {
       setPendingRawTask(null);
       setDeferredWaitingRawTask(null);
     }
-  }, [forgetTaskPatch, hideTaskForProfile, rememberTaskPatch]);
+  }, [forgetTaskPatch, hideTaskForProfile, rememberTaskPatch, replaceOrRemoveTaskListRaw]);
 
   const applyOptimisticAssistantTaskStatus = useCallback((task: TaskFromAPI, action: "start" | "complete") => {
     if (!profile || !isAssistantRole(profile.role)) return;
@@ -1568,11 +1560,12 @@ export default function PhotographerPage() {
     const currentAssistantTasks = assistantRawTasksRef.current.length > 0
       ? assistantRawTasksRef.current
       : currentTaskList;
-    const nextTaskList = mergeTask(currentTaskList);
+    const nextTaskList = upsertTaskListRaw(nextTask, {
+      mergeExisting: true,
+      position: "prepend",
+    });
     const nextAssistantTasks = mergeTask(currentAssistantTasks);
-    taskListRawRef.current = nextTaskList;
     assistantRawTasksRef.current = nextAssistantTasks;
-    setTaskListRaw(nextTaskList);
     setAssistantRawTasks(nextAssistantTasks);
     setTasks(sortTasksByStatus(nextTaskList.map((t) => apiTaskToDisplay(t, profile.id))));
     const { current: active, paused, pending, deferredWaiting } = resolveAssistantTasks(nextAssistantTasks, profile.id);
@@ -1581,7 +1574,7 @@ export default function PhotographerPage() {
     setPausedRawTask(paused);
     setPendingRawTask(pending);
     setDeferredWaitingRawTask(deferredWaiting);
-  }, [profile, rememberTaskPatch]);
+  }, [profile, rememberTaskPatch, taskListRawRef, upsertTaskListRaw]);
 
   const applyWorkbenchProfile = useCallback((selected: typeof allProfiles[0]) => {
     originalRoomRef.current = selected.currentRoom;
@@ -2786,7 +2779,7 @@ export default function PhotographerPage() {
             setNeedsIdentitySelection(true);
             setProfile(null);
             setTasks([]);
-            setTaskListRaw([]);
+            replaceTaskListRaw([]);
             setAssistantRawTasks([]);
             setCurrentRawTask(null);
             setPausedRawTask(null);
@@ -2852,7 +2845,7 @@ export default function PhotographerPage() {
         setCollaborationMaxByBuilding(nextCollaborationMaxConfig);
       })
       .catch(console.error);
-  }, [applyWorkbenchProfile]);
+  }, [applyWorkbenchProfile, replaceTaskListRaw]);
 
   useEffect(() => {
     if (profile || allProfiles.length === 0) return;
@@ -3476,7 +3469,7 @@ export default function PhotographerPage() {
         : pendingRawTask?.id === taskId ? pendingRawTask
           : pausedRawTask?.id === taskId ? pausedRawTask
             : deferredWaitingRawTask?.id === taskId ? deferredWaitingRawTask
-              : taskListRaw.find((t) => t.id === taskId)
+              : getTaskListRawById(taskId)
                 ?? assistantRawTasks.find((t) => t.id === taskId)
                 ?? null;
     if (!task) return false;
@@ -3490,7 +3483,7 @@ export default function PhotographerPage() {
     pausedRawTask,
     profile?.id,
     profile?.role,
-    taskListRaw,
+    getTaskListRawById,
   ]);
 
   const handleSaveNote = useCallback(async (taskId: string, note: string) => {

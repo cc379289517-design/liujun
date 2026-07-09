@@ -2,7 +2,7 @@ type TaskSourceItem = {
   id: string;
 };
 
-type UpsertTaskInListOptions = {
+export type UpsertTaskInListOptions = {
   position?: "append" | "prepend";
   mergeExisting?: boolean;
   moveExisting?: boolean;
