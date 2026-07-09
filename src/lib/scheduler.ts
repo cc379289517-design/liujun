@@ -42,6 +42,11 @@ const NOT_PHOTOGRAPHER_LIMIT_QUEUE_WHERE = {
     { lockReason: { not: PHOTOGRAPHER_LIMIT_QUEUE_LOCK_REASON } },
   ],
 };
+const SCHEDULER_DEBUG_LOG_ENABLED = process.env.SPAD_SCHEDULER_DEBUG === "1";
+
+function schedulerDebugLog(message: string) {
+  if (SCHEDULER_DEBUG_LOG_ENABLED) console.log(message);
+}
 
 /**
  * 从数据库获取动态配置，回退到硬编码默认值
@@ -2351,7 +2356,7 @@ export async function autoClaimWaitingTask(assistantId: string): Promise<string 
     const claimed = await claimWaitingTaskForAssistant(waitingTask.id, assistantId, assistantBuildingId);
     if (!claimed) continue;
     await recordIdleDispatchRoundRobin(assistantBuildingId, assistantId);
-    console.log(`[autoClaimWaitingTask] 助理 ${assistantId} 自动认领任务 ${waitingTask.id} (P${waitingTask.priority})`);
+    schedulerDebugLog(`[autoClaimWaitingTask] 助理 ${assistantId} 自动认领任务 ${waitingTask.id} (P${waitingTask.priority})`);
     return waitingTask.id;
   }
 
@@ -2506,7 +2511,7 @@ export async function reassignOverdueStandbyTasks(): Promise<number> {
         });
       });
       reassignedCount++;
-      console.log(
+      schedulerDebugLog(
         `[reassignOverdueStandbyTasks] ${candidate.task.id} ${candidate.task.assistant.name} 待就位超时且无可替换助理，已离线`
       );
       continue;
@@ -2663,7 +2668,7 @@ export async function reassignOverdueStandbyTasks(): Promise<number> {
     });
     await recordIdleDispatchRoundRobin(candidate.buildingId, newAssistant.id);
     reassignedCount++;
-    console.log(
+    schedulerDebugLog(
       `[reassignOverdueStandbyTasks] ${candidate.task.id} ${oldAssistantName} → ${newAssistant.name}, score=${candidate.score}`
     );
   }
@@ -2814,7 +2819,7 @@ export async function balanceIroningWaitAssignments(): Promise<number> {
       waitCountByAssistant.set(newAssistant.id, 1);
       await recordIdleDispatchRoundRobin(buildingId, newAssistant.id);
       movedCount++;
-      console.log(
+      schedulerDebugLog(
         `[balanceIroningWaitAssignments] 熨烫等待均衡 ${task.id} ${oldAssistantName} → ${newAssistant.name}`
       );
     }
@@ -2952,7 +2957,7 @@ export async function releaseUnselectedStandbyTasks(): Promise<number> {
 
       await recordIdleDispatchRoundRobin(buildingId, newAssistant.id);
       movedCount++;
-      console.log(
+      schedulerDebugLog(
         `[releaseUnselectedStandbyTasks] 未选待就位释放 ${task.id} ${task.assistant.name} → ${newAssistant.name}`
       );
     }
@@ -2989,7 +2994,7 @@ export async function sweepIroningMachineQueue(): Promise<number> {
     });
     await syncProfileStatus();
     for (const task of expiredClaims) {
-      console.log(
+      schedulerDebugLog(
         `[sweepIroningMachineQueue] 熨烫机使用权超时释放 task=${task.id} assistant=${task.assistantId ?? "-"} ttl=${cfg.machineClaimTtlMinutes}m notifiedAt=${task.ironingNotifiedAt?.toISOString() ?? "-"}`
       );
     }
@@ -3073,7 +3078,7 @@ export async function sweepIroningMachineQueue(): Promise<number> {
       await recordIdleDispatchRoundRobin(buildingId, targetAssistantId);
       touched++;
       slots -= requiredSlots;
-      console.log(
+      schedulerDebugLog(
         `[sweepIroningMachineQueue] 熨烫机空档 ${buildingId} → 任务 ${task.id} 分配/通知助理 ${targetAssistantId}, prep=${cfg.prepWindowMinutes}m timeout=${cfg.confirmTimeoutSeconds}s claimTtl=${cfg.machineClaimTtlMinutes}m`
       );
     }
@@ -3140,7 +3145,7 @@ export async function sweepWaitingTasks(): Promise<number> {
         if (!claimed) continue;
         await recordIdleDispatchRoundRobin(buildingId, assistantId);
 
-        console.log(`[sweepWaitingTasks] 助理 ${assistantId} 分配任务 ${task.id} (P${task.priority})`);
+        schedulerDebugLog(`[sweepWaitingTasks] 助理 ${assistantId} 分配任务 ${task.id} (P${task.priority})`);
         assignedCount++;
       }
     }
@@ -3165,7 +3170,7 @@ export async function sweepWaitingTasks(): Promise<number> {
       const taskLeaveUpperMin = taskLeaveUpperMinutes(task.category);
       const waitingPreempted = await interruptWaitingPreempt(bid, task.id, task.priority, taskLeaveUpperMin);
       if (waitingPreempted) {
-        console.log(`[sweepWaitingTasks] 待就位插单 任务 ${task.id} (P${task.priority}) → 楼座 ${bid}`);
+        schedulerDebugLog(`[sweepWaitingTasks] 待就位插单 任务 ${task.id} (P${task.priority}) → 楼座 ${bid}`);
         assignedCount++;
         continue;
       }
@@ -3174,7 +3179,7 @@ export async function sweepWaitingTasks(): Promise<number> {
 
       const executingPreempted = await interruptExecutingPreempt(bid, task.id, task.priority, taskLeaveUpperMin);
       if (executingPreempted) {
-        console.log(`[sweepWaitingTasks] 执行中插单 任务 ${task.id} (P${task.priority}) → 楼座 ${bid}`);
+        schedulerDebugLog(`[sweepWaitingTasks] 执行中插单 任务 ${task.id} (P${task.priority}) → 楼座 ${bid}`);
         assignedCount++;
       }
     }
@@ -3843,7 +3848,7 @@ export async function cleanupStaleTasks(): Promise<number> {
     }
   }
 
-  console.log(`[cleanupStaleTasks] 清理了 ${staleTasks.length} 条过期任务，释放了 ${assistantIds.length} 位助理`);
+  schedulerDebugLog(`[cleanupStaleTasks] 清理了 ${staleTasks.length} 条过期任务，释放了 ${assistantIds.length} 位助理`);
   return staleTasks.length;
 }
 

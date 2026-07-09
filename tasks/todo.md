@@ -7151,6 +7151,25 @@
 - 不变量审查通过：同助理多个执行/暂停根任务 0、重复 current primary 等价风险 0、熨烫 `using` 槽位超容量 0。
 - 验证通过：`npx tsc --noEmit --pretty false --incremental false`、`DATABASE_URL=file:./prisma/loadtest.db npm run build`、隔离库 seed、115 会话 3 分钟混合压测、raw 精查和 SQL 不变量审查。
 
+#### 阶段 E 第二十批计划：调度详细日志降噪
+
+- [x] `src/lib/scheduler.ts` 新增调度 debug 日志 helper，默认生产/压测不输出逐任务派发轨迹。
+- [x] 将 `sweepWaitingTasks()`、`sweepIroningMachineQueue()`、待就位释放、自动认领等高频 `console.log` 改为 debug 日志；保留 `console.warn/error` 作为异常信号。
+- [x] 用环境变量 `SPAD_SCHEDULER_DEBUG=1` 保留现场排查开关，避免以后真要追派单链路时失去可观测性。
+- [x] 不改变派单、熨烫机、插单、移交、状态切换和维护节流业务规则；本批只减少混合写下 stdout IO 和日志噪音。
+- [x] 验证 TypeScript、生产 build、115 会话混合短测、raw 异常审查和状态不变量。
+
+#### 阶段 E 第二十批评审：调度详细日志降噪
+
+- 改动范围：`src/lib/scheduler.ts` 新增 `schedulerDebugLog()`，由 `SPAD_SCHEDULER_DEBUG=1` 控制；默认不输出逐任务派发、熨烫机通知、待就位释放、自动认领和过期清理轨迹。
+- 保留异常信号：`console.warn("[processPendingTaskAssistantTransfers]")` 和 `console.error("[scheduleWorkbenchSyncMaintenance]")` 未改，异常仍会进入日志。
+- 行为保持：本批不改变派单、熨烫机槽位、插单、移交、优先级、状态切换、维护节流和同步响应结构，只减少 stdout IO 与日志噪音。
+- 115 会话混合短测：`phase-e20-scheduler-log-gated-mixed-115-3min`，80 摄影师、30 助理、5 管理，7105 请求、3 个业务 409，均为熨烫机暂无空位；无 HTTP 500、无 SQLite locked/busy、无 timeout。
+- 延迟观察：`/api/workbench/sync` p50 10.2ms、p95 104.1ms、p99 200.6ms；`complete/create/start` p95 分别为 190.9ms、237.5ms、120.6ms。对比第十九批后测，sync p95 从 124.1ms 降到 104.1ms，但本批主要收益仍是日志 IO 降噪。
+- 终端观察：本地 3100 生产服务在混合压测期间不再刷出大量 `[sweepWaitingTasks]` / `[sweepIroningMachineQueue]` 逐任务日志。
+- 不变量审查通过：同助理多个执行/暂停根任务 0、重复 current primary 等价风险 0、熨烫 `using` 槽位超容量 0。
+- 验证通过：`git diff --check`、`npx tsc --noEmit --pretty false --incremental false`、`DATABASE_URL=file:./prisma/loadtest.db npm run build`、隔离库 seed、115 会话 3 分钟混合压测、raw 精查和 SQL 不变量审查。
+
 ### 阶段 A 评审
 
 - 已完成压测工具：新增 `scripts/loadtest/seed.ts`、`run.ts`、`report.ts`、`common.ts`，不引入 k6/artillery 等新依赖；使用 Node 内置 `fetch`、现有 `tsx` 和 Prisma/SQLite。
