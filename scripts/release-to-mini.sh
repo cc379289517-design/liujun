@@ -161,7 +161,7 @@ restore_preserved_db
 trap - EXIT
 
 ./scripts/backup-sqlite.sh
-npm install
+npm ci
 npx prisma db push
 
 if [ "${RUN_REMOTE_BUILD}" = "1" ]; then

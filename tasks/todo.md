@@ -6540,6 +6540,7 @@
 
 - [x] 修复 `scripts/release-to-mini.sh` 远端保护库流程：Mac mini SQLite 临时保护后设置退出 trap，若 pull/stash/build 任一步失败会自动恢复 `prisma/dev.db`。
 - [x] 修复远端 `REMOTE_DIRTY_ACTION=stash`：不再给 `git stash push -u` 传入容易触发 ignored pathspec 报错的 `database-backups/logs` exclude 参数。
+- [x] 远端依赖安装改为 `npm ci`，避免 Mac mini 因平台/ npm 版本差异把 `package-lock.json` 变成本地脏改动。
 - [x] 验证：`bash -n scripts/release-to-mini.sh`、发布脚本再次完整跑通；Mac mini 当前 `HEAD=a6e08c1`，工作区仅保留生产 `prisma/dev.db` 改动。
 
 ### 阶段 E：验收与对抗审查
