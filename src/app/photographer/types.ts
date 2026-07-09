@@ -219,6 +219,33 @@ export type AssistantRankingRow = {
   details: AssistantRankingDetail[];
 };
 
+export type AreaTaskStats = {
+  total: number;
+  queued: number;
+  assigned: number;
+  executing: number;
+  paused: number;
+  completed: number;
+  overtime: number;
+};
+
+export type AreaTaskTypeSummary = {
+  name: string;
+  count: number;
+  color: string;
+};
+
+export type AreaCompletedTaskTypeSummary = AreaTaskTypeSummary & {
+  assistants: { id: string; name: string; avatar: string | null; count: number }[];
+};
+
+export type WorkbenchAreaSummary = {
+  taskStats: AreaTaskStats;
+  publishedTaskTypes: AreaTaskTypeSummary[];
+  completedTaskTypes: AreaCompletedTaskTypeSummary[];
+  assistantRankingRows: AssistantRankingRow[];
+};
+
 export type AreaMetricKey = "executing" | "assigned" | "overtime" | "queue" | "offline";
 
 export type AreaMetricBreakdown = {

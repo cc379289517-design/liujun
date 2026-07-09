@@ -133,6 +133,7 @@ import type {
   ThemeMode,
   VenuePoint,
   WorkbenchBuilding,
+  WorkbenchAreaSummary,
 } from "./types";
 import {
   effectiveWorkMinutesFromApi,
@@ -190,6 +191,17 @@ const DISPLAY_TASK_TYPE_SOLID_HEX: Record<string, string> = {
 
 function displayTaskTypeGroupName(name: string | null | undefined, priority?: number | null): string {
   return isExternalModelAssistTaskName(name, priority) ? EXTERNAL_MODEL_ASSIST_DISPLAY_NAME : taskTypeGroupName(name);
+}
+
+function parseWorkbenchAreaSummary(value: unknown): WorkbenchAreaSummary | null {
+  if (!value || typeof value !== "object") return null;
+  const summary = value as Partial<WorkbenchAreaSummary>;
+  const stats = summary.taskStats;
+  if (!stats || typeof stats !== "object") return null;
+  if (!Array.isArray(summary.publishedTaskTypes)) return null;
+  if (!Array.isArray(summary.completedTaskTypes)) return null;
+  if (!Array.isArray(summary.assistantRankingRows)) return null;
+  return summary as WorkbenchAreaSummary;
 }
 
 function TransferArrowsIcon({ className = "" }: { className?: string }) {
@@ -847,6 +859,7 @@ export default function PhotographerPage() {
   const [publicQueueVisualOrderIds, setPublicQueueVisualOrderIds] = useState<string[] | null>(null);
   const [publicQueueAnimatingTaskId, setPublicQueueAnimatingTaskId] = useState<string | null>(null);
   const [publicQueueSeenVersion, setPublicQueueSeenVersion] = useState(0);
+  const [workbenchAreaSummary, setWorkbenchAreaSummary] = useState<{ buildingId: number; summary: WorkbenchAreaSummary } | null>(null);
   const [expandedAssistantScoreId, setExpandedAssistantScoreId] = useState<string | null>(null);
   const [assistantScoreBubbleAnchor, setAssistantScoreBubbleAnchor] = useState<{ left: number; top: number; width: number } | null>(null);
   const [expandedTaskTypeDetailName, setExpandedTaskTypeDetailName] = useState<string | null>(null);
@@ -2518,6 +2531,7 @@ export default function PhotographerPage() {
         const syncData = await response.json().catch(() => null) as {
           profiles?: unknown;
           assistantStatus?: unknown;
+          areaSummary?: unknown;
           publicQueue?: unknown;
           tasks?: unknown;
           notices?: unknown;
@@ -2533,6 +2547,7 @@ export default function PhotographerPage() {
         const publicQueueData = Array.isArray(syncData.publicQueue) ? syncData.publicQueue as TaskFromAPI[] : [];
         const taskData = Array.isArray(syncData.tasks) ? syncData.tasks as TaskFromAPI[] : [];
         const noticeData = Array.isArray(syncData.notices) ? syncData.notices as StandbyReassignmentNoticeFromAPI[] : [];
+        const nextAreaSummary = parseWorkbenchAreaSummary(syncData.areaSummary);
         const serverSyncMode = syncData.syncMode === "delta" ? "delta" : "full";
         const taskIds = Array.isArray(syncData.taskIds)
           ? syncData.taskIds.filter((id): id is string => typeof id === "string")
@@ -2580,6 +2595,7 @@ export default function PhotographerPage() {
           workbenchLastFullSyncAtRef.current = Date.now();
         }
         startTransition(() => {
+          setWorkbenchAreaSummary(nextAreaSummary ? { buildingId, summary: nextAreaSummary } : null);
           replacePublicQueueRaw(mergedPublicQueue);
           setReassignmentNotices(isAssistantRole(pollingProfile.role) ? noticeData : []);
           applyTaskDataForProfile(mergedTaskData, pollingProfile, buildingId);
@@ -4365,6 +4381,10 @@ export default function PhotographerPage() {
         return idle;
       })
     : [];
+  const currentAreaSummary =
+    workbenchAreaSummary?.buildingId === publicQueueBuildingId
+      ? workbenchAreaSummary.summary
+      : null;
   const publicQueuePauseLookup = useMemo(
     () => buildTaskPauseLookup(publicQueueRaw),
     [publicQueueRaw],
@@ -5115,6 +5135,7 @@ export default function PhotographerPage() {
     [publicQueueDisplayTasks],
   );
   const areaTaskStats = useMemo(() => {
+    if (currentAreaSummary) return currentAreaSummary.taskStats;
     const nowMs = now.getTime();
     return areaTasks.reduce(
       (acc, task) => {
@@ -5132,8 +5153,9 @@ export default function PhotographerPage() {
       },
       { total: 0, queued: 0, assigned: 0, executing: 0, paused: 0, completed: 0, overtime: 0 },
     );
-  }, [areaTasks, now]);
+  }, [areaTasks, currentAreaSummary, now]);
   const assistantRankingRows = useMemo(() => {
+    if (currentAreaSummary) return currentAreaSummary.assistantRankingRows;
     const nowMs = now.getTime();
     const areaAssistantIds = new Set(assistants.map((assistant) => assistant.id));
     const areaCompletedAssistantIds = new Set<string>();
@@ -5204,7 +5226,7 @@ export default function PhotographerPage() {
         a.assistantName.localeCompare(b.assistantName)
       )
       .slice(0, 10);
-  }, [assistantDockById, assistants, buildingNameById, now, profileById, publicQueueBuildingId, publicQueueRaw]);
+  }, [assistantDockById, assistants, buildingNameById, currentAreaSummary, now, profileById, publicQueueBuildingId, publicQueueRaw]);
   const areaAssistantStats = useMemo(() => assistants.reduce(
     (acc, assistant) => {
       if (assistant.onlineStatus === "offline") acc.offline += 1;
@@ -5433,7 +5455,8 @@ export default function PhotographerPage() {
 		      return acc;
 		    }, {});
 		  }, [assistantRankingRows]);
-	  const areaPublishedTaskTypeBreakdown = useMemo(() => {
+		  const areaPublishedTaskTypeBreakdown = useMemo(() => {
+	    if (currentAreaSummary) return currentAreaSummary.publishedTaskTypes;
 	    const counts = new Map<string, number>();
 	    for (const task of areaTasks) {
 	      const name = displayTaskTypeGroupName(task.category?.name, task.priority);
@@ -5450,12 +5473,13 @@ export default function PhotographerPage() {
 	        };
 	      })
 	      .filter((item): item is { name: string; count: number; color: string } => item !== null);
-	  }, [areaTasks]);
+	  }, [areaTasks, currentAreaSummary]);
 	  const areaPublishedTaskTypeTotal = useMemo(
 	    () => areaPublishedTaskTypeBreakdown.reduce((sum, item) => sum + item.count, 0),
 	    [areaPublishedTaskTypeBreakdown],
 	  );
 		  const areaTaskTypeBreakdown = useMemo(() => {
+    if (currentAreaSummary) return currentAreaSummary.completedTaskTypes;
     const counts = new Map<string, {
       count: number;
       assistants: Map<string, { id: string; name: string; avatar: string | null; count: number }>;
@@ -5488,14 +5512,14 @@ export default function PhotographerPage() {
         assistants: Array.from(row.assistants.values())
           .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name)),
         };
-      })
-      .filter((item): item is {
-        name: string;
+	      })
+	      .filter((item): item is {
+	        name: string;
         count: number;
         color: string;
         assistants: { id: string; name: string; avatar: string | null; count: number }[];
-      } => item !== null);
-  }, [areaTasks, profileById]);
+	      } => item !== null);
+	  }, [areaTasks, currentAreaSummary, profileById]);
   const areaTaskTypeCompletedTotal = useMemo(
     () => areaTaskTypeBreakdown.reduce((sum, item) => sum + item.count, 0),
     [areaTaskTypeBreakdown],
@@ -10986,12 +11010,17 @@ export default function PhotographerPage() {
           const selectedStatsDayStart = new Date(selectedStatsDate.getFullYear(), selectedStatsDate.getMonth(), selectedStatsDate.getDate());
           const selectedStatsDayEnd = new Date(selectedStatsDayStart.getTime() + 24 * 60 * 60 * 1000);
           const areaBuildingId = publicQueueBuildingId ?? activeBuildingId;
-          const areaCompletedTodayTasks = areaTasks.filter((task) => task.status === "completed");
-          const areaCompletedWeekTasks = areaCompletedWeeklyTasks.filter((task) => (
-            areaBuildingId != null &&
-            taskLocationBuildingId(task) === areaBuildingId &&
-            task.status === "completed"
-          ));
+	          const areaCompletedWeekTasks = areaCompletedWeeklyTasks.filter((task) => (
+	            areaBuildingId != null &&
+	            taskLocationBuildingId(task) === areaBuildingId &&
+	            task.status === "completed"
+	          ));
+	          const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+	          const todayEnd = new Date(todayStart.getTime() + 24 * 60 * 60 * 1000);
+	          const areaCompletedTodayTasks = areaCompletedWeekTasks.filter((task) => {
+	            const created = new Date(task.createdAt);
+	            return created >= todayStart && created < todayEnd;
+	          });
           const selectedStatsRawTasks = areaCompletedWeekTasks.filter((task) => {
             const created = new Date(task.createdAt);
             return created >= selectedStatsDayStart && created < selectedStatsDayEnd;

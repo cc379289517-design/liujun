@@ -6996,6 +6996,26 @@
 - 不变量审查通过：同助理多个执行/暂停根任务 0、重复 current primary 0、熨烫 `using` 槽位超容量 0。
 - 结论：full 校准降频是安全收益项，继续降低长时在线累计大包和前端 JSON 解析压力。下一步建议把区域统计/排行做成服务端摘要，随后让 full 校准只保留公共队列首屏详情和按需任务详情。
 
+#### 阶段 E 第十二批计划：区域统计服务端摘要化
+
+- [x] `/api/workbench/sync` 新增 `areaSummary`：服务端按当前楼座今日任务计算区域任务计数、已发布任务类型分布、已完成任务类型分布和助理排行摘要。
+- [x] 摄影师工作台优先消费 `areaSummary` 展示区域任务数据、任务类型图和助理排行；缺失或截断时继续回退现有 `publicQueueRaw` 本地计算，避免口径突然变化。
+- [x] 高频 `publicQueue` 区域详情不再返回已完成任务；已完成统计、任务类型和排行由 `areaSummary` 提供，完成明细弹窗继续使用既有周统计接口。
+- [x] 不改变派单、优先级、熨烫机、移交、协作阈值和任务状态命令；本批只移动统计计算位置、减少前端重复计算和压缩同步详情。
+- [x] 验证 TypeScript、生产构建、同步接口字段与响应体；如果条件允许，用隔离库跑 smoke 或短同步压测。
+
+#### 阶段 E 第十二批评审：区域统计服务端摘要化
+
+- 改动范围：`/api/workbench/sync` 新增 `areaSummary`，包含区域任务计数、已发布任务类型、已完成任务类型和助理排行；服务端摘要使用 1 秒楼座级短缓存，避免多客户端同秒重复计算。
+- 前端消费：工作台区域任务数据、任务类型图和助理排行优先读取 `areaSummary`；摘要缺失时回退原 `publicQueueRaw` 本地计算。摘要存在时相关 `useMemo` 直接早返回，不再每轮扫描完整区域任务。
+- 同步瘦身：`publicQueue` 高频详情只保留未完成区域任务，已完成任务不再跟随 3 秒同步广播；完成明细弹窗改用既有 `payload=stats` 周统计数据源。
+- 排行体积控制：助理排行分数、完成数、总工时按全量任务计算；展开明细只随摘要返回最近 8 条，完整明细后续应按需接口获取，避免每 3 秒广播长历史。
+- 行为保持：开始、完成、暂停、优先级、熨烫机槽位、移交、协作阈值和任务状态命令均未改变；本批属于等价性能和数据体积优化。
+- 验证通过：`npx prisma validate`、`npx tsc --noEmit --pretty false --incremental false`、`git diff --check -- src/app/api/workbench/sync/route.ts src/app/photographer/page.tsx src/app/photographer/types.ts tasks/todo.md`、`DATABASE_URL=file:./prisma/loadtest.db npm run build`。
+- 本地接口验证：隔离 `loadtest.db` 下 `/photographer` 200 / 37866 bytes；`/api/workbench/sync?...&full=1` 200 / 63326 bytes，`areaSummary.taskStats` 为总 84、完成 52，`publicQueue` 仅 32 条未完成详情；delta 200 / 15951 bytes。
+- Smoke：`phase-e12-area-summary-smoke-60s`，9 会话 60 秒，254 请求，0 错误；`/api/workbench/sync` p50 23.1ms、p95 32.6ms、p99 39ms；full 平均 68591.8 bytes，delta 平均 17329.9 bytes。
+- 待后续：把助理排行完整明细、公共队列任务详情和区域完成明细继续拆成按需接口；随后跑 115 会话 10 分钟只读和 3 分钟混合短测，确认 full 详情裁剪对长时体积和业务 409 无负面影响。
+
 ### 阶段 A 评审
 
 - 已完成压测工具：新增 `scripts/loadtest/seed.ts`、`run.ts`、`report.ts`、`common.ts`，不引入 k6/artillery 等新依赖；使用 Node 内置 `fetch`、现有 `tsx` 和 Prisma/SQLite。

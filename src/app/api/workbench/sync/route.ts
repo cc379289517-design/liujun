@@ -8,13 +8,20 @@ import {
   eatingTotalElapsedSeconds,
   parseEatingOvertimeAlertMin,
 } from "@/lib/eatingPresence";
-import { effectiveWorkMinutesFromApi, overtimeMinutesBeyondSlot, taskSlotCapMinutes } from "@/lib/taskEffectiveTime";
+import { effectiveWorkMinutesFromApi, overtimeMinutesBeyondSlot, taskSlotCapMinutes, totalEffectiveWorkSecondsFromApi } from "@/lib/taskEffectiveTime";
 import {
   AVATAR_PROFILE_SELECT,
   PUBLIC_PROFILE_SELECT,
   serializeProfileForJson,
   serializeTaskAssistantAvatars,
 } from "@/lib/profilePayload";
+import {
+  assistantTaskScoreFactor,
+  assistantTaskScoreFromSeconds,
+  displayTaskCategoryName,
+  EXTERNAL_MODEL_ASSIST_DISPLAY_NAME,
+  isExternalModelAssistTaskName,
+} from "@/lib/assistantScore";
 
 const VISIBLE_PRIORITY_UPGRADE_REQUEST_STATUSES: PriorityUpgradeRequestStatus[] = [
   PriorityUpgradeRequestStatus.pending,
@@ -24,6 +31,34 @@ const VISIBLE_ASSISTANT_TRANSFER_REQUEST_STATUSES = ["confirming", "pending", "p
 const AREA_TASK_LIMIT = 500;
 const SCOPED_TASK_LIMIT = 200;
 const RELATED_CHANGE_ID_LIMIT = 1000;
+const AREA_SUMMARY_CACHE_TTL_MS = 1000;
+const AREA_SUMMARY_RANKING_DETAIL_LIMIT = 8;
+const DISPLAY_TASK_TYPE_ORDER = ["手持", "服装穿戴", "手工DIY", "熨烫", EXTERNAL_MODEL_ASSIST_DISPLAY_NAME, "其他"];
+const DISPLAY_TASK_TYPE_SOLID_HEX: Record<string, string> = {
+  "手持": "#f87171",
+  "服装穿戴": "#fb923c",
+  "手工DIY": "#fbbf24",
+  "熨烫": "#34d399",
+  [EXTERNAL_MODEL_ASSIST_DISPLAY_NAME]: "#a855f7",
+  "其他": "#60a5fa",
+};
+const TASK_CATEGORY_GROUP: Record<string, string> = {
+  "短时手持": "手持",
+  "手持": "手持",
+  "服装穿戴": "服装穿戴",
+  "穿戴对角度": "服装穿戴",
+  "手工DIY协助": "手工DIY",
+  "手工DIY制作": "手工DIY",
+  "手工DIY": "手工DIY",
+  "短时熨烫": "熨烫",
+  "长时熨烫": "熨烫",
+  "熨烫": "熨烫",
+  "外模跟拍协助": "其他",
+  "协助外模拍摄": "其他",
+  "协助外模跟拍": "其他",
+  "其他长时任务": "其他",
+  "其他": "其他",
+};
 
 const FULL_TASK_INCLUDE = {
   photographer: { select: { id: true, name: true, currentRoom: true, buildingId: true } },
@@ -286,6 +321,12 @@ type AssistantProfileRow = Prisma.ProfileGetPayload<{
 }>;
 type QueueTask = Prisma.BookingTaskGetPayload<{ include: typeof QUEUE_TASK_INCLUDE }>;
 type QueueParticipant = QueueTask["collaborators"][number];
+type AreaSummaryResult = {
+  summary: ReturnType<typeof buildAreaSummary>;
+  truncated: boolean;
+};
+
+const areaSummaryCache = new Map<number, { expiresAtMs: number; promise: Promise<AreaSummaryResult> }>();
 
 const ACTIVE_PARTICIPANT_STATUSES = ["waiting", "executing", "paused"];
 
@@ -671,6 +712,258 @@ function compactAssistantStatus(
   });
 }
 
+function taskTypeGroupName(name: string | null | undefined): string {
+  if (!name) return "其他";
+  return TASK_CATEGORY_GROUP[name] || "其他";
+}
+
+function displayTaskTypeGroupName(name: string | null | undefined, priority?: number | null): string {
+  return isExternalModelAssistTaskName(name, priority)
+    ? EXTERNAL_MODEL_ASSIST_DISPLAY_NAME
+    : taskTypeGroupName(name);
+}
+
+function taskLocationBuildingId(task: QueueTask): number | null {
+  return task.locationBuildingId ?? task.photographer?.buildingId ?? null;
+}
+
+function completedAtMsForRanking(task: QueueTask, participant?: QueueParticipant | null): number {
+  const raw = participant?.completedAt ?? task.completedAt ?? task.createdAt;
+  const ms = new Date(raw).getTime();
+  return Number.isFinite(ms) ? ms : 0;
+}
+
+function totalEffectiveWorkSecondsForRanking(
+  task: QueueTask | QueueParticipant,
+  nowMs: number,
+): number {
+  return totalEffectiveWorkSecondsFromApi(
+    { ...task, status: "completed" },
+    nowMs,
+  );
+}
+
+function completedRankingContributions(task: QueueTask, nowMs: number) {
+  const rows: Array<{
+    assistantId: string;
+    assistantName: string;
+    taskId: string;
+    taskName: string;
+    roomNumber: string;
+    buildingId: number | null;
+    completedAtMs: number;
+    workSeconds: number;
+  }> = [];
+  const seenAssistantIds = new Set<string>();
+  const taskName = displayTaskCategoryName(task.category?.name, task.priority);
+
+  if (task.assistantId && task.status === "completed") {
+    const primary = taskParticipantForProfile(task, task.assistantId);
+    rows.push({
+      assistantId: task.assistantId,
+      assistantName: task.assistant?.name ?? "未命名助理",
+      taskId: task.id,
+      taskName,
+      roomNumber: task.roomNumber,
+      buildingId: taskLocationBuildingId(task),
+      completedAtMs: completedAtMsForRanking(task, primary),
+      workSeconds: totalEffectiveWorkSecondsForRanking(primary ?? task, nowMs),
+    });
+    seenAssistantIds.add(task.assistantId);
+  }
+
+  for (const participant of taskParticipants(task)) {
+    if (participant.status !== "completed") continue;
+    if (seenAssistantIds.has(participant.assistantId)) continue;
+    rows.push({
+      assistantId: participant.assistantId,
+      assistantName: participant.assistant.name,
+      taskId: task.id,
+      taskName,
+      roomNumber: task.roomNumber,
+      buildingId: taskLocationBuildingId(task),
+      completedAtMs: completedAtMsForRanking(task, participant),
+      workSeconds: totalEffectiveWorkSecondsForRanking(participant, nowMs),
+    });
+    seenAssistantIds.add(participant.assistantId);
+  }
+
+  return rows;
+}
+
+function orderedTaskTypeSummary(counts: Map<string, number>) {
+  return DISPLAY_TASK_TYPE_ORDER
+    .map((name) => {
+      const count = counts.get(name) ?? 0;
+      if (count <= 0) return null;
+      return {
+        name,
+        count,
+        color: DISPLAY_TASK_TYPE_SOLID_HEX[name] ?? DISPLAY_TASK_TYPE_SOLID_HEX["其他"],
+      };
+    })
+    .filter((item): item is { name: string; count: number; color: string } => item !== null);
+}
+
+function buildAreaSummary(profiles: AssistantProfileRow[], tasks: QueueTask[]) {
+  const nowMs = Date.now();
+  const profileById = new Map(
+    profiles.map((profile) => {
+      const jsonProfile = serializeProfileForJson(profile);
+      return [profile.id, jsonProfile];
+    }),
+  );
+  const areaAssistantIds = new Set(profiles.map((profile) => profile.id));
+  const taskStats = { total: 0, queued: 0, assigned: 0, executing: 0, paused: 0, completed: 0, overtime: 0 };
+  const publishedTypeCounts = new Map<string, number>();
+  const completedTypeCounts = new Map<string, {
+    count: number;
+    assistants: Map<string, { id: string; name: string; avatar: string | null; count: number }>;
+  }>();
+  const areaCompletedAssistantIds = new Set<string>();
+  const contributionMap = new Map<string, ReturnType<typeof completedRankingContributions>>();
+
+  for (const task of tasks) {
+    taskStats.total += 1;
+    const participants = activeTaskParticipants(task);
+    const hasAssignedPerson = !!task.assistantId || participants.length > 0;
+    if (overtimeMinutesBeyondSlot(task, nowMs) != null) taskStats.overtime += 1;
+    if (task.status === "completed") taskStats.completed += 1;
+    else if (task.status === "executing") taskStats.executing += 1;
+    else if (task.status === "paused") taskStats.paused += 1;
+    else if (hasAssignedPerson) taskStats.assigned += 1;
+    else taskStats.queued += 1;
+
+    const publishedName = displayTaskTypeGroupName(task.category?.name, task.priority);
+    publishedTypeCounts.set(publishedName, (publishedTypeCounts.get(publishedName) ?? 0) + 1);
+
+    if (task.status === "completed" && task.assistantId) {
+      const completedName = displayTaskTypeGroupName(task.category?.name, task.priority);
+      const row = completedTypeCounts.get(completedName) ?? { count: 0, assistants: new Map<string, { id: string; name: string; avatar: string | null; count: number }>() };
+      row.count += 1;
+      const profile = profileById.get(task.assistantId);
+      const assistant = row.assistants.get(task.assistantId) ?? {
+        id: task.assistantId,
+        name: profile?.name ?? task.assistant?.name ?? "未命名助理",
+        avatar: profile?.avatar ?? null,
+        count: 0,
+      };
+      assistant.count += 1;
+      row.assistants.set(task.assistantId, assistant);
+      completedTypeCounts.set(completedName, row);
+    }
+
+    for (const entry of completedRankingContributions(task, nowMs)) {
+      areaCompletedAssistantIds.add(entry.assistantId);
+      const current = contributionMap.get(entry.assistantId) ?? [];
+      current.push(entry);
+      contributionMap.set(entry.assistantId, current);
+    }
+  }
+
+  const completedTaskTypes = DISPLAY_TASK_TYPE_ORDER
+    .map((name) => {
+      const row = completedTypeCounts.get(name);
+      if (!row) return null;
+      return {
+        name,
+        count: row.count,
+        color: DISPLAY_TASK_TYPE_SOLID_HEX[name] ?? DISPLAY_TASK_TYPE_SOLID_HEX["其他"],
+        assistants: Array.from(row.assistants.values())
+          .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name)),
+      };
+    })
+    .filter((item): item is {
+      name: string;
+      count: number;
+      color: string;
+      assistants: { id: string; name: string; avatar: string | null; count: number }[];
+    } => item !== null);
+
+  const assistantRankingRows = Array.from(contributionMap.entries())
+    .filter(([assistantId]) => areaAssistantIds.has(assistantId) || areaCompletedAssistantIds.has(assistantId))
+    .map(([assistantId, entries]) => {
+      const orderedEntries = [...entries].sort((a, b) => a.completedAtMs - b.completedAtMs);
+      const completedCount = orderedEntries.length;
+      const workSeconds = orderedEntries.reduce((sum, entry) => sum + entry.workSeconds, 0);
+      const detailEntries = orderedEntries.slice(-AREA_SUMMARY_RANKING_DETAIL_LIMIT);
+      const details = detailEntries.map((entry) => {
+        const scoreFactor = assistantTaskScoreFactor(entry.taskName);
+        const serviceScore = assistantTaskScoreFromSeconds(entry.workSeconds, entry.taskName);
+        return {
+          taskId: entry.taskId,
+          taskTitle: `${entry.roomNumber}室 · ${entry.taskName}`,
+          serviceSeconds: entry.workSeconds,
+          scoreFactor,
+          serviceScore,
+          totalScore: serviceScore,
+        };
+      });
+      const profile = profileById.get(assistantId);
+      const assistantName = profile?.name ?? orderedEntries.at(-1)?.assistantName ?? "未命名助理";
+      return {
+        assistantId,
+        assistantName,
+        avatar: profile?.avatar ?? null,
+        score: details.reduce((sum, detail) => sum + detail.totalScore, 0),
+        completedCount,
+        workSeconds,
+        lastCompletedAtMs: orderedEntries.at(-1)?.completedAtMs ?? 0,
+        details,
+      };
+    })
+    .sort((a, b) =>
+      b.score - a.score ||
+      b.completedCount - a.completedCount ||
+      b.workSeconds - a.workSeconds ||
+      a.lastCompletedAtMs - b.lastCompletedAtMs ||
+      a.assistantName.localeCompare(b.assistantName)
+    )
+    .slice(0, 10);
+
+  return {
+    taskStats,
+    publishedTaskTypes: orderedTaskTypeSummary(publishedTypeCounts),
+    completedTaskTypes,
+    assistantRankingRows,
+  };
+}
+
+function areaSummaryFromTasks(profiles: AssistantProfileRow[], tasks: QueueTask[]): AreaSummaryResult {
+  const visibleTasks = tasks.slice(0, AREA_TASK_LIMIT);
+  return {
+    summary: buildAreaSummary(profiles, visibleTasks),
+    truncated: tasks.length > AREA_TASK_LIMIT,
+  };
+}
+
+async function getCachedAreaSummary(
+  buildingId: number,
+  profiles: AssistantProfileRow[],
+  areaTaskWhere: Prisma.BookingTaskWhereInput,
+  fallbackTasks?: QueueTask[],
+): Promise<AreaSummaryResult> {
+  if (fallbackTasks) return areaSummaryFromTasks(profiles, fallbackTasks);
+  const nowMs = Date.now();
+  const cached = areaSummaryCache.get(buildingId);
+  if (cached && cached.expiresAtMs > nowMs) return cached.promise;
+  const promise = prisma.bookingTask.findMany({
+    where: areaTaskWhere,
+    include: QUEUE_TASK_INCLUDE,
+    orderBy: [{ priority: "asc" }, { createdAt: "asc" }],
+    take: AREA_TASK_LIMIT + 1,
+  }).then((tasks) => areaSummaryFromTasks(profiles, tasks));
+  areaSummaryCache.set(buildingId, {
+    expiresAtMs: nowMs + AREA_SUMMARY_CACHE_TTL_MS,
+    promise,
+  });
+  promise.catch(() => {
+    const existing = areaSummaryCache.get(buildingId);
+    if (existing?.promise === promise) areaSummaryCache.delete(buildingId);
+  });
+  return promise;
+}
+
 export async function GET(request: NextRequest) {
   try {
     const { searchParams } = request.nextUrl;
@@ -724,6 +1017,13 @@ export async function GET(request: NextRequest) {
       createdAt,
       AND: [areaWhere],
     };
+    const areaDetailTaskWhere: Prisma.BookingTaskWhereInput = {
+      createdAt,
+      AND: [
+        areaWhere,
+        { status: { not: "completed" } },
+      ],
+    };
     const scopedTaskWhere: Prisma.BookingTaskWhereInput = {
       createdAt,
       AND: taskFilters,
@@ -742,10 +1042,10 @@ export async function GET(request: NextRequest) {
       ],
     };
     const [areaRelatedChanges, scopedRelatedChanges] = await Promise.all([
-      relatedChangedTaskIdsSince(since, areaTaskWhere),
+      relatedChangedTaskIdsSince(since, areaDetailTaskWhere),
       relatedChangedTaskIdsSince(since, scopedTaskWhere),
     ]);
-    const areaChangedWhere = taskDeltaWhere(areaTaskWhere, since, areaRelatedChanges.ids);
+    const areaChangedWhere = taskDeltaWhere(areaDetailTaskWhere, since, areaRelatedChanges.ids);
     const scopedChangedWhere = taskDeltaWhere(scopedTaskWhere, since, scopedRelatedChanges.ids);
     const taskOrderBy = [{ priority: "asc" as const }, { createdAt: "asc" as const }];
     const changedTaskOrderBy = since
@@ -765,7 +1065,7 @@ export async function GET(request: NextRequest) {
         orderBy: [{ role: "asc" }, { name: "asc" }],
       }),
       prisma.bookingTask.findMany({
-        where: areaTaskWhere,
+        where: areaDetailTaskWhere,
         select: { id: true },
         orderBy: taskOrderBy,
         take: AREA_TASK_LIMIT + 1,
@@ -857,6 +1157,11 @@ export async function GET(request: NextRequest) {
         ),
       );
     }
+    const areaSummaryResult = await getCachedAreaSummary(
+      buildingId,
+      profiles,
+      areaTaskWhere,
+    );
     const syncTruncated = Boolean(since) && (
       areaTasksTruncated ||
       scopedTasksTruncated ||
@@ -877,6 +1182,7 @@ export async function GET(request: NextRequest) {
       maintenance,
       profiles: responseProfiles.map(serializeProfileForJson),
       assistantStatus,
+      areaSummary: areaSummaryResult.summary,
       tasks: visibleTasks.map(serializeTaskAssistantAvatars),
       taskIds: visibleTaskIds.map((task) => task.id),
       publicQueue: visibleAreaTasks.map(serializeTaskAssistantAvatars),
@@ -889,6 +1195,7 @@ export async function GET(request: NextRequest) {
         scopedIdListTruncated: scopedTaskIdsTruncated,
         scopedTaskListTruncated: scopedTasksTruncated,
         assistantStatusTruncated,
+        areaSummaryTruncated: areaSummaryResult.truncated,
       },
       notices,
     });
