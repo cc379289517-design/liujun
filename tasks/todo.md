@@ -6432,6 +6432,23 @@
 - 验证通过：`npx tsc --noEmit --pretty false --incremental false`、`git diff --check -- src/app/photographer/page.tsx tasks/todo.md tasks/lessons.md`、`DATABASE_URL=file:./prisma/loadtest.db npm run build`、本地隔离服务 `http://localhost:3100/photographer` 200、`/api/config` 200、`/api/workbench/sync?role=photographer&buildingId=1&full=1` 200。
 - 待后续：继续把插入/删除类路径、移交响应这类带可见性变化的任务源更新分批收口；完整 reducer/store 仍未完成。
 
+#### 阶段 D 第七批计划：插入/删除任务源 helper 收口
+
+- [x] 新增 `removeLocalTaskSources` 和 `upsertLocalTaskSource`：统一删除/插入任务时同步 raw refs、当前任务卡、展示列表和必要的公共队列源。
+- [x] 第一批替换低风险路径：摄影师取消任务、桌面快捷发单成功/失败、手机快捷发单成功/失败。
+- [x] 保持临时任务卡动画、发布上限提示、指定助理选择清理和刷新助理状态等现有交互不变。
+- [x] 本批不改变创建/取消 API、摄影师发布上限、指定助理、优先级、派单或数据库结构；长期业务文档无需更新。
+- [x] 验证 `tsc`、`git diff --check`、`DATABASE_URL=file:./prisma/loadtest.db npm run build`，并记录评审与经验。
+
+#### 阶段 D 第七批评审：插入/删除任务源 helper 收口
+
+- 已完成：新增 `removeLocalTaskSources()` 和 `upsertLocalTaskSource()`，删除/插入任务时同步 `taskListRawRef`、`assistantRawTasksRef`、当前任务卡、展示任务列表和必要的公共队列源。
+- 已替换：摄影师取消任务、桌面快捷发单成功/失败、手机快捷发单成功/失败，临时任务卡动画、发布上限提示、指定助理清理和 `refreshAssistants()` 保持原行为。
+- 已追加：助理楼座切换、切换在线状态前暂停、确认转派提醒、手动暂停后的全量任务刷新改走 `applyTaskDataForProfile()`，不再重复手写拆分 current/paused/pending/deferred。
+- 业务边界：本批只做前端任务源插入/删除和全量刷新收口，不改变创建/取消 API、摄影师发布上限、指定助理、优先级、派单、熨烫机、移交或数据库结构；长期业务文档无需新增规则。
+- 验证通过：`npx tsc --noEmit --pretty false --incremental false`、`git diff --check -- src/app/photographer/page.tsx tasks/todo.md tasks/lessons.md`、`DATABASE_URL=file:./prisma/loadtest.db npm run build`、本地隔离服务 `http://localhost:3100/photographer` 200、`/api/config` 200、`/api/workbench/sync?role=photographer&buildingId=1&full=1` 200。
+- 待后续：移交/互换响应仍有带可见性判断的手写任务源更新，应单独抽 `replaceVisibleTaskSetForProfile` 或进入 reducer/store，避免把业务可见性变化和普通补丁混在一起。
+
 ### 阶段 E：验收与对抗审查
 
 - [ ] 基线压测完成后，先根据报告排序瓶颈，再决定是否进入 B/C/D 的第一批代码改动。

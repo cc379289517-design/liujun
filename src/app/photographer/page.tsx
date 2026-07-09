@@ -1422,6 +1422,91 @@ export default function PhotographerPage() {
     }
   }, [profile?.id, profile?.role]);
 
+  const removeLocalTaskSources = useCallback((
+    taskId: string,
+    options?: {
+      updateDisplay?: boolean;
+      updatePublicQueue?: boolean;
+    },
+  ) => {
+    const removeFromList = (list: TaskFromAPI[]) => {
+      const next = list.filter((task) => task.id !== taskId);
+      return next.length === list.length ? list : next;
+    };
+
+    const nextTaskList = removeFromList(taskListRawRef.current);
+    if (nextTaskList !== taskListRawRef.current) {
+      taskListRawRef.current = nextTaskList;
+      setTaskListRaw(nextTaskList);
+    }
+
+    const nextAssistantTasks = removeFromList(assistantRawTasksRef.current);
+    if (nextAssistantTasks !== assistantRawTasksRef.current) {
+      assistantRawTasksRef.current = nextAssistantTasks;
+      setAssistantRawTasks(nextAssistantTasks);
+    }
+
+    if (options?.updatePublicQueue) {
+      const nextPublicQueue = removeFromList(publicQueueRawRef.current);
+      if (nextPublicQueue !== publicQueueRawRef.current) {
+        publicQueueRawRef.current = nextPublicQueue;
+        setPublicQueueRaw(nextPublicQueue);
+      }
+    }
+
+    const clearIfTarget = (task: TaskFromAPI | null) => task?.id === taskId ? null : task;
+    setCurrentRawTask((prev) => clearIfTarget(prev));
+    setPausedRawTask((prev) => clearIfTarget(prev));
+    setPendingRawTask((prev) => {
+      const next = clearIfTarget(prev);
+      pendingRawTaskRef.current = next;
+      return next;
+    });
+    setDeferredWaitingRawTask((prev) => clearIfTarget(prev));
+
+    if (options?.updateDisplay) {
+      setTasks((prev) => prev.filter((task) => task.id !== taskId));
+    }
+  }, []);
+
+  const upsertLocalTaskSource = useCallback((
+    task: TaskFromAPI,
+    options?: {
+      replaceDisplayId?: string;
+      updatePublicQueue?: boolean;
+    },
+  ) => {
+    const upsertList = (list: TaskFromAPI[]) => [
+      ...list.filter((item) => item.id !== task.id),
+      task,
+    ];
+    const nextTaskList = upsertList(taskListRawRef.current);
+    taskListRawRef.current = nextTaskList;
+    setTaskListRaw(nextTaskList);
+
+    if (assistantRawTasksRef.current.some((item) => item.id === task.id)) {
+      const nextAssistantTasks = upsertList(assistantRawTasksRef.current);
+      assistantRawTasksRef.current = nextAssistantTasks;
+      setAssistantRawTasks(nextAssistantTasks);
+    }
+
+    if (options?.updatePublicQueue) {
+      const nextPublicQueue = upsertList(publicQueueRawRef.current);
+      publicQueueRawRef.current = nextPublicQueue;
+      setPublicQueueRaw(nextPublicQueue);
+    }
+
+    setTasks((prev) => {
+      const display = apiTaskToDisplay(task, isAssistantRole(profile?.role) ? profile?.id : undefined);
+      const replaceId = options?.replaceDisplayId ?? task.id;
+      const withoutTask = prev.filter((item) => item.id !== task.id);
+      const replaced = withoutTask.some((item) => item.id === replaceId)
+        ? withoutTask.map((item) => item.id === replaceId ? display : item)
+        : [display, ...withoutTask];
+      return sortTasksByStatus(replaced);
+    });
+  }, [profile?.id, profile?.role]);
+
   const mergeAuthoritativeTaskForProfile = useCallback((
     updatedTask: TaskFromAPI,
     targetProfile = profile,
@@ -2944,21 +3029,17 @@ export default function PhotographerPage() {
       const taskRes = await fetch(`/api/tasks?assistantId=${profile.id}&todayOnly=true`, { cache: "no-store" });
       const taskData = await taskRes.json();
       if (Array.isArray(taskData)) {
-        const raw = taskData as TaskFromAPI[];
-        setTaskListRaw(raw);
-        setAssistantRawTasks(raw);
-        setTasks(sortTasksByStatus(raw.map((t) => apiTaskToDisplay(t, profile.id))));
-        const { current: active, paused, pending, deferredWaiting } = resolveAssistantTasks(raw, profile.id);
-        setCurrentRawTask(active);
-        setPausedRawTask(paused);
-        setPendingRawTask(pending);
-        setDeferredWaitingRawTask(deferredWaiting);
+        applyTaskDataForProfile(
+          taskData as TaskFromAPI[],
+          { ...profile, buildingId: updatedServiceBuildingId },
+          updatedServiceBuildingId,
+        );
       }
       refreshAssistants();
     } catch (err) {
       console.error("Failed to switch assistant building", err);
     }
-  }, [buildings, currentRawTask?.status, profile, refreshAssistants]);
+  }, [applyTaskDataForProfile, buildings, currentRawTask?.status, profile, refreshAssistants]);
 
   const handleCancelTask = useCallback(async (taskId: string) => {
     if (removingTaskId) return;
@@ -2984,9 +3065,7 @@ export default function PhotographerPage() {
         refreshAssistants();
       }
       setTimeout(() => {
-        setTasks((prev) => prev.filter((t) => t.id !== taskId));
-        setTaskListRaw((prev) => prev.filter((t) => t.id !== taskId));
-        setAssistantRawTasks((prev) => prev.filter((t) => t.id !== taskId));
+        removeLocalTaskSources(taskId, { updateDisplay: true, updatePublicQueue: true });
         setRemovingTaskId(null);
         setHoveredTagId(null);
         endWorkbenchPendingAction(actionKey);
@@ -2998,7 +3077,7 @@ export default function PhotographerPage() {
       setHoveredTagId(null);
       endWorkbenchPendingAction(actionKey);
     }
-  }, [beginWorkbenchPendingAction, endWorkbenchPendingAction, profile, removingTaskId, refreshAssistants, showTaskCreateError]);
+  }, [beginWorkbenchPendingAction, endWorkbenchPendingAction, profile, removingTaskId, refreshAssistants, removeLocalTaskSources, showTaskCreateError]);
 
   const canCancelSpecifiedAssistant = useCallback((task: TaskFromAPI | null | undefined) => {
     if (!task || !task.isSpecified || !task.assistantId) return false;
@@ -3136,15 +3215,7 @@ export default function PhotographerPage() {
           const taskRes = await fetch(`/api/tasks?assistantId=${profileId}&todayOnly=true`, { cache: "no-store" });
           const taskData = await taskRes.json();
           if (Array.isArray(taskData)) {
-            const raw = taskData as TaskFromAPI[];
-            setTaskListRaw(raw);
-            setAssistantRawTasks(raw);
-            setTasks(sortTasksByStatus(raw.map((t) => apiTaskToDisplay(t, profileId))));
-            const { current: active, paused, pending, deferredWaiting } = resolveAssistantTasks(raw, profileId);
-            setCurrentRawTask(active);
-            setPausedRawTask(paused);
-            setPendingRawTask(pending);
-            setDeferredWaitingRawTask(deferredWaiting);
+            applyTaskDataForProfile(taskData as TaskFromAPI[], profile, activeBuildingId ?? profile.buildingId);
           }
         } else if (targetRawTasks) {
           refreshAssistants();
@@ -3700,15 +3771,7 @@ export default function PhotographerPage() {
       const taskResponse = await fetch(`/api/tasks?assistantId=${profile.id}&todayOnly=true`, { cache: "no-store" });
       const taskData = await taskResponse.json();
       if (Array.isArray(taskData)) {
-        const raw = taskData as TaskFromAPI[];
-        setTaskListRaw(raw);
-        setAssistantRawTasks(raw);
-        setTasks(sortTasksByStatus(raw.map((task) => apiTaskToDisplay(task, profile.id))));
-        const { current: active, paused, pending, deferredWaiting } = resolveAssistantTasks(raw, profile.id);
-        setCurrentRawTask(active);
-        setPausedRawTask(paused);
-        setPendingRawTask(pending);
-        setDeferredWaitingRawTask(deferredWaiting);
+        applyTaskDataForProfile(taskData as TaskFromAPI[], profile, activeBuildingId ?? profile.buildingId);
       }
       refreshAssistants();
     } catch (error) {
@@ -3716,7 +3779,7 @@ export default function PhotographerPage() {
     } finally {
       setReassignmentNoticeSavingId(null);
     }
-  }, [profile, reassignmentNoticeSavingId, refreshAssistants]);
+  }, [activeBuildingId, applyTaskDataForProfile, profile, reassignmentNoticeSavingId, refreshAssistants]);
 
   const openCollaboratorModal = useCallback((task: TaskFromAPI) => {
     setCollabTaskId(task.id);
@@ -3833,15 +3896,7 @@ export default function PhotographerPage() {
       const taskRes = await fetch(`/api/tasks?assistantId=${profile.id}&todayOnly=true`);
       const taskData = await taskRes.json();
       if (Array.isArray(taskData)) {
-        const raw = taskData as TaskFromAPI[];
-        setTaskListRaw(raw);
-        setAssistantRawTasks(raw);
-        setTasks(sortTasksByStatus(raw.map((t) => apiTaskToDisplay(t, profile.id))));
-        const { current: active, paused, pending, deferredWaiting } = resolveAssistantTasks(raw, profile.id);
-        setCurrentRawTask(active);
-        setPausedRawTask(paused);
-        setPendingRawTask(pending);
-        setDeferredWaitingRawTask(deferredWaiting);
+        applyTaskDataForProfile(taskData as TaskFromAPI[], profile, activeBuildingId ?? profile.buildingId);
       }
       refreshAssistants();
     } catch (e) {
@@ -3851,7 +3906,7 @@ export default function PhotographerPage() {
       setManualPauseSlide(null);
       endWorkbenchPendingAction(actionKey);
     }
-  }, [beginWorkbenchPendingAction, currentRawTask, endWorkbenchPendingAction, manualPauseSlide, profile, refreshAssistants]);
+  }, [activeBuildingId, applyTaskDataForProfile, beginWorkbenchPendingAction, currentRawTask, endWorkbenchPendingAction, manualPauseSlide, profile, refreshAssistants]);
 
   // 助理：切换任务状态（targetTask 优先，避免界面展示任务与 currentRawTask 短暂不一致时点击无效）
   const handleAssistantStatusChange = useCallback(async (action: "start" | "complete", targetTask?: TaskFromAPI | null) => {
@@ -4036,8 +4091,7 @@ export default function PhotographerPage() {
             });
             if (res.ok) {
               const saved = await res.json() as TaskFromAPI;
-              setTasks((prev) => sortTasksByStatus(prev.map((t) => t.id === tempId ? apiTaskToDisplay(saved) : t)));
-              setTaskListRaw((prev) => [...prev.filter((t) => t.id !== tempId && t.id !== saved.id), saved]);
+              upsertLocalTaskSource(saved, { replaceDisplayId: tempId });
               setSpecifiedQuickBookAssistantId(null);
               setQuickBookAssistantPickerOpen(false);
               setMobileQuickBookAssistantPickerOpen(false);
@@ -4047,7 +4101,7 @@ export default function PhotographerPage() {
               refreshAssistants();
             } else {
               const data = await res.json().catch(() => null) as { code?: string; error?: string } | null;
-              setTasks((prev) => prev.filter((t) => t.id !== tempId));
+              removeLocalTaskSources(tempId, { updateDisplay: true });
               showTaskCreateError(
                 data?.error || "任务创建失败，请稍后重试",
                 data?.code === "PHOTOGRAPHER_ACTIVE_TASK_LIMIT_REACHED" ||
@@ -4055,7 +4109,7 @@ export default function PhotographerPage() {
               );
             }
           } catch (e) {
-            setTasks((prev) => prev.filter((t) => t.id !== tempId));
+            removeLocalTaskSources(tempId, { updateDisplay: true });
             showTaskCreateError("任务创建失败，请检查网络后重试");
             console.error("Failed to create task", e);
           }
@@ -4063,7 +4117,7 @@ export default function PhotographerPage() {
       }, 550);
       return () => clearTimeout(timer);
     }
-  }, [genie, photographerMaxActiveTasks, profile, profileCurrentWorkbenchRoom, refreshAssistants, showTaskCreateError, taskPublishBuilding, taskPublishBuildingId]);
+  }, [genie, photographerMaxActiveTasks, profile, profileCurrentWorkbenchRoom, refreshAssistants, removeLocalTaskSources, showTaskCreateError, taskPublishBuilding, taskPublishBuildingId, upsertLocalTaskSource]);
 
   const notePopupStyle = notePopupPosition(notePopupAnchor);
   const notePopupTaskIsExecuting = notePopupTaskId ? noteTaskIsExecuting(notePopupTaskId) : false;
@@ -5591,7 +5645,7 @@ export default function PhotographerPage() {
       });
       if (!response.ok) {
         const data = await response.json().catch(() => null) as { code?: string; error?: string } | null;
-        setTasks((prev) => prev.filter((task) => task.id !== tempId));
+        removeLocalTaskSources(tempId, { updateDisplay: true });
         showTaskCreateError(
           data?.error || "任务创建失败，请稍后重试",
           data?.code === "PHOTOGRAPHER_ACTIVE_TASK_LIMIT_REACHED" ||
@@ -5600,8 +5654,7 @@ export default function PhotographerPage() {
         return;
       }
       const saved = await response.json() as TaskFromAPI;
-      setTasks((prev) => sortTasksByStatus(prev.map((task) => task.id === tempId ? apiTaskToDisplay(saved) : task)));
-      setTaskListRaw((prev) => [...prev.filter((task) => task.id !== saved.id), saved]);
+      upsertLocalTaskSource(saved, { replaceDisplayId: tempId });
       setSpecifiedQuickBookAssistantId(null);
       setQuickBookAssistantPickerOpen(false);
       setMobileQuickBookAssistantPickerOpen(false);
@@ -5610,13 +5663,13 @@ export default function PhotographerPage() {
       }
       refreshAssistants();
     } catch (error) {
-      setTasks((prev) => prev.filter((task) => task.id !== tempId));
+      removeLocalTaskSources(tempId, { updateDisplay: true });
       showTaskCreateError("任务创建失败，请检查网络后重试");
       console.error("Failed to create mobile task", error);
     } finally {
       endWorkbenchPendingAction(actionKey);
     }
-  }, [beginWorkbenchPendingAction, endWorkbenchPendingAction, photographerMaxActiveTasks, profile, profileCurrentWorkbenchRoom, refreshAssistants, selectedQuickBookAssistant, selectedQuickBookAssistantCanSubmit, showTaskCreateError, taskPublishBuilding, taskPublishBuildingId]);
+  }, [beginWorkbenchPendingAction, endWorkbenchPendingAction, photographerMaxActiveTasks, profile, profileCurrentWorkbenchRoom, refreshAssistants, removeLocalTaskSources, selectedQuickBookAssistant, selectedQuickBookAssistantCanSubmit, showTaskCreateError, taskPublishBuilding, taskPublishBuildingId, upsertLocalTaskSource]);
 
   const mobileTaskStatusForProfile = useCallback((task: TaskFromAPI) => (
     deriveMobileTaskStatusForProfile(task, { isAssistantProfile, profileId: profile?.id })

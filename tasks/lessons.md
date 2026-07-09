@@ -122,3 +122,4 @@
 - 地图拖拽/缩放这类高频交互不要每个 pointer/wheel 事件都 `setState`；应把即时 pan/zoom 放进 ref，用 `requestAnimationFrame` 直接更新地图 transform，手势结束或滚轮停顿后再提交 React 状态。
 - Dock 这类密集头像 hover 不需要 React 状态驱动 tooltip 和阴影；用 CSS `group-hover` 处理显隐/层级/视觉反馈，鼠标移动曲线只用 rAF 合并坐标提交，能减少扫过多名助理时的无意义重渲染。
 - 工作台单任务局部补丁不要在每个操作里手写多组 `setTaskListRaw/setCurrentRawTask/setPublicQueueRaw`；应统一 helper 同步 raw refs、当前卡片、公共队列和展示列表，否则很容易漏掉让行任务或公共队列导致局部 UI 不一致。
+- 工作台创建/取消这种插入删除路径也要同步 raw refs 和展示列表；只更新 `tasks` 或只更新 `taskListRaw` 会让下一次本地合并、临时卡回滚或公共队列校准读到不一致的状态。
