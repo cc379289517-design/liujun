@@ -6953,6 +6953,28 @@
 - 不变量审查通过：同助理多个执行/暂停根任务 0、重复 current primary 0、熨烫 `using` 槽位超容量 0；raw 日志未见 500、timeout、SQLite locked/busy。
 - 结论：本批继续降低无效 start 请求，剩余 409 属于同步快照到点击之间发生新高优先级任务/机器槽位变化后的正确后端拦截。下一步重点不再是追求 409 归零，而是继续压缩同步响应体尾部、拆分工作台局部渲染和补充更长时段正式压测。
 
+#### 阶段 E 第十批计划：长时正式压测与同步尾部体积审计
+
+- [x] 使用隔离 `prisma/loadtest.db` 和本地 3100 服务，重新 seed 80 摄影师、30 助理、5 管理画像，避免污染 `prisma/dev.db` 或 Mac mini 生产库。
+- [x] 跑 10 分钟只读压测，确认 `/api/workbench/sync` 在 5 分钟 full 校准策略下的 p50/p95/p99、full/delta 次数、响应体总量、p95 bytes 和 500/locked/busy 情况。
+- [x] 跑 20 分钟混合写压测，确认写操作 p95、业务 409 分类、SQLite locked/busy、状态不变量、同步响应体尾部和公共队列体积是否仍有明显瓶颈。
+- [x] 若证据显示某个轻量 payload 或定时刷新路径仍偏大，优先做不改业务规则的小范围降载；若长测已经稳定，则把第十批作为正式验收证据记录。
+- [x] 更新 `tasks/todo.md` 评审和必要的 `tasks/lessons.md`，通过 `git diff --check`、TypeScript、生产 build 后再提交发布。
+
+#### 阶段 E 第十批评审：长时压测与 delta profile 补丁化
+
+- 长时只读压测：`phase-e10-readonly-115-10min`，80 摄影师、30 助理、5 管理，22224 请求，0 错误；`/api/workbench/sync` p50 9.4ms、p95 21.9ms、p99 190.1ms、max 484.7ms。
+- 只读体积：full 220 次共 21.75MB、平均 103668.7 bytes；delta 21753 次共 133MB、平均 6411.1 bytes、p95 6524 bytes；raw 日志未见 500、timeout、SQLite locked/busy。
+- 长时混合压测：`phase-e10-mixed-115-20min`，47727 请求；401 个非 2xx 全部为 `mixed-start` 业务 409，其中 282 次高优先级兜底、116 次熨烫机暂时无空位、3 次区域熨烫机使用中；无 500。
+- 混合延迟：`/api/workbench/sync` p50 9.5ms、p95 35.5ms、p99 119.7ms、max 916.2ms；`complete` p95 150.8ms、`create` p95 152.6ms、`start` p95 39.9ms；写操作 p95 远低于 1s 目标。
+- 混合体积：full 440 次共 86.77MB、平均 206790.4 bytes、p95 337798 bytes；delta 43541 次共 551.73MB、平均 13287 bytes、p95 21026 bytes；大包主要来自 5 分钟 full 下公共队列完整校准，delta 仍有固定 profile 开销。
+- 不变量审查通过：同助理多个执行/暂停根任务 0、重复 current primary 0、熨烫 `using` 槽位超容量 0；raw 中 `busy` 命中为业务文案/业务码，不是 SQLite locked/busy。
+- 附加优化：`/api/workbench/sync` 在 delta 模式下只返回 `updatedAt >= since` 的助理 profile 补丁；前端 `refreshAssistants()` 将 profile 补丁合并到既有 Dock，再叠加服务端 `assistantStatus`，避免 delta 补丁把助理列表裁小。
+- 验证：`npx prisma validate`、`npx tsc --noEmit --pretty false --incremental false`、`DATABASE_URL=file:./prisma/loadtest.db npm run build` 通过。
+- profile delta smoke：`phase-e10-profile-delta-smoke-60s`，254 请求，0 错误；delta 平均 profiles 从 6 降到约 0.004，delta 平均体积约 3377.6 bytes、p95 3262 bytes。
+- profile delta 混合短测：`phase-e10-profile-delta-mixed-115-3min`，7151 请求；15 个非 2xx 全部为高优先级业务 409；无系统错误、无 SQLite 异常、不变量全 0。delta 同步共 49.82MB、平均 8046.2 bytes、p95 15472 bytes，对比第九批 66.39MB 约下降 25%。
+- 结论：当前主链路已经经住 10 分钟只读和 20 分钟混合写验证，150 人级别的状态正确性和同步延迟基本达标。下一步剩余重点是 full 校准大包继续摘要化、管理员列表长时体积继续分页/详情按需，以及更细的前端局部 store/渲染拆分。
+
 ### 阶段 A 评审
 
 - 已完成压测工具：新增 `scripts/loadtest/seed.ts`、`run.ts`、`report.ts`、`common.ts`，不引入 k6/artillery 等新依赖；使用 Node 内置 `fetch`、现有 `tsx` 和 Prisma/SQLite。

@@ -864,6 +864,10 @@ export async function GET(request: NextRequest) {
       scopedRelatedChanges.truncated
     );
 
+    const responseProfiles = since
+      ? profiles.filter((profile) => profile.updatedAt >= since)
+      : profiles;
+
     return Response.json({
       serverTime: new Date().toISOString(),
       syncMode: since ? "delta" : "full",
@@ -871,7 +875,7 @@ export async function GET(request: NextRequest) {
       syncTruncated,
       nextPollMs: 3000,
       maintenance,
-      profiles: profiles.map(serializeProfileForJson),
+      profiles: responseProfiles.map(serializeProfileForJson),
       assistantStatus,
       tasks: visibleTasks.map(serializeTaskAssistantAvatars),
       taskIds: visibleTaskIds.map((task) => task.id),

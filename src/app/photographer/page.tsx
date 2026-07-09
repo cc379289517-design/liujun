@@ -2073,10 +2073,28 @@ export default function PhotographerPage() {
             .map((row) => [row.id, row]),
         );
         type AssistantProfileForDock = DockAssistant & { activeRoom?: string | null };
-        setAssistants((profiles as AssistantProfileForDock[]).map((p) => ({
-          ...profileToQuickBookAssistant(p),
-          ...statusById.get(p.id),
-        })));
+        const profilePatches = profiles as AssistantProfileForDock[];
+        setAssistants((prev) => {
+          const profilePatchById = new Map(profilePatches.map((p) => [p.id, p]));
+          const seen = new Set<string>();
+          const base = prev.length > 0
+            ? prev.map((item) => {
+                seen.add(item.id);
+                const patch = profilePatchById.get(item.id);
+                return patch ? { ...item, ...profileToQuickBookAssistant(patch) } : item;
+              })
+            : profilePatches.map((p) => {
+                seen.add(p.id);
+                return profileToQuickBookAssistant(p);
+              });
+          for (const patch of profilePatches) {
+            if (!seen.has(patch.id)) base.push(profileToQuickBookAssistant(patch));
+          }
+          return base.map((p) => ({
+            ...p,
+            ...statusById.get(p.id),
+          }));
+        });
         return allTasks;
       }
 
