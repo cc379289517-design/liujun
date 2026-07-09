@@ -6711,6 +6711,24 @@
 4. 若后端指标稳定但现场操作仍卡顿，优先做阶段 D 的局部 store、pending UI 和高频交互优化。
 5. 每完成一个小批次单独评审、单独 commit，继续排除 `prisma/dev.db`。
 
+#### 阶段 D 第二十二批计划：工作台同步 profile/头像瘦身
+
+- [x] `/api/workbench/sync` 的助理 `profiles` 改成显式 `select`，只返回工作台 Dock/地图/状态切换需要字段，避免高频同步继续带出 `password` 等无关字段。
+- [x] 将同步响应中的头像从原始 base64/data URL 改为轻量图片 URL；新增专用头像图片路由，保留浏览器缓存、ETag 和外链/站内路径兼容。
+- [x] 保持前端现有头像展示口径不变：工作台仍使用 `profile.avatar` 字段作为 `<img src>`，但值由大字符串变成可缓存 URL。
+- [x] 验证同步响应体、头像路由、`tsc`、`git diff --check` 和生产构建；本批只做高频同步体积与安全瘦身，不改派单/状态/优先级/熨烫业务规则。
+
+#### 阶段 D 第二十二批评审：工作台同步 profile/头像瘦身
+
+- 已完成：`/api/workbench/sync` 的助理 `profiles` 改为 `ASSISTANT_PROFILE_SELECT` 白名单字段，不再把 `password` 等无关字段带入 2-3 秒高频同步响应。
+- 已完成：工作台同步中的 profile 头像、任务协作者头像从 `data:image/...;base64` 转换为 `/api/profiles/:id/avatar?v=updatedAt` 短 URL；新增头像图片路由，支持外链/站内路径重定向、data URL 图片输出、`Content-Type`、`Content-Length` 和 ETag/304。
+- 已保持：前端继续读取 `profile.avatar` / `collaborator.assistant.avatar` 作为图片地址，不改 UI 组件、派单、状态切换、优先级、熨烫机或移交业务规则。
+- 验证通过：`npx prisma validate`、`npx tsc --noEmit --pretty false --incremental false`、`git diff --check -- src/app/api/workbench/sync/route.ts src/app/api/profiles/[id]/avatar/route.ts tasks/todo.md`、`DATABASE_URL=file:./prisma/loadtest.db npm run build`。
+- 本地隔离服务验证：`/api/workbench/sync?...&full=1` 返回 200 / 49720 bytes；profiles 中 `password` 不存在；测试头像从 data URL 变为 `/api/profiles/lt-assistant-001/avatar?v=...`；头像路由 200 / 68 bytes / `image/png`，带 ETag 后 304 / 0 bytes。
+- 页面冒烟：隔离 `loadtest.db` 下 `/photographer` 200 / 37866 bytes，`/admin` 200 / 13165 bytes，`/api/config` 200 / 2209 bytes。
+- 验证备注：本地仅 `prisma/loadtest.db` 写入了一个测试头像用于头像路由验证；`prisma/dev.db` 仍是运行态改动，继续排除提交。
+- 待后续：若头像数量和尺寸继续增大，下一批可把 `/api/profiles` 初始登录资料也改为 `avatarUrl` 模式，或者把头像从 SQLite 文本迁到文件/对象存储，进一步降低数据库读大字段压力。
+
 ### 阶段 A 评审
 
 - 已完成压测工具：新增 `scripts/loadtest/seed.ts`、`run.ts`、`report.ts`、`common.ts`，不引入 k6/artillery 等新依赖；使用 Node 内置 `fetch`、现有 `tsx` 和 Prisma/SQLite。
