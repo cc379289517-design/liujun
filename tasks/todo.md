@@ -7206,6 +7206,27 @@
 - 不变量结果：同助理多个执行/暂停根任务 0、重复 current primary 等价风险 0、熨烫 `using` 槽位超容量 0。
 - 验证通过：`npx tsc --noEmit --pretty false --incremental false`、`git diff --check`、`DATABASE_URL=file:./prisma/loadtest.db npm run loadtest:audit -- --dir=loadtest/results/20260709-221757-mixed`。
 
+#### 阶段 E 第二十六批计划：正式长时压测与瓶颈复核
+
+- [x] 使用隔离 `prisma/loadtest.db` 重新 seed，避免污染本机和 Mac mini 生产库。
+- [x] 启动本地生产构建服务，按 80 摄影师、30 助理、5 管理执行 10 分钟只读压测，记录同步延迟、响应体体积和错误分类。
+- [x] 在同一隔离库上执行 20 分钟混合压测，覆盖创建、开始、暂停、完成、移交/熨烫相关高频状态切换。
+- [x] 对混合结果执行 `npm run loadtest:audit -- --dir=...`，把 HTTP 500/timeout/SQLite locked/busy 和状态不变量作为硬门禁。
+- [x] 形成结论：判断下一瓶颈是前端 INP/局部渲染、服务端同步体积、SQLite 写锁、日志 IO、生产监控备份，还是可以阶段性收口到 97%+。
+
+#### 阶段 E 第二十六批评审：正式长时压测与瓶颈复核
+
+- 隔离库：`npm run loadtest:seed` 重建 `prisma/loadtest.db`，生成 115 个测试账号、360 个任务；本轮未使用本机 `prisma/dev.db` 或 Mac mini 生产库做写压测。
+- 只读长测：`loadtest/results/20260709-223418-readonly`，80 摄影师、30 助理、5 管理，10 分钟，22223 请求，0 错误，观测 RPS 37.04。
+- 只读同步表现：`/api/workbench/sync` p50 8.9ms、p95 20.4ms、p99 185.8ms；delta 21863 次，总 14.7 MB，平均 705.1 bytes，p95 1952 bytes。
+- 混合长测：`loadtest/results/20260709-224449-mixed`，20 分钟，47041 请求，149 个非 2xx，均为业务 409；系统失败 0。
+- 状态切换表现：`mixed-start` p95 28ms、`mixed-complete` p95 24.2ms、`mixed-pause` p95 23.2ms、`mixed-resume` p95 23.4ms；创建任务 p95 72.5ms。
+- 混合同步表现：`/api/workbench/sync` p50 9.7ms、p95 26.9ms、p99 64.6ms；delta 43764 次，总 392.94 MB，平均 9414.7 bytes，p95 16695 bytes。
+- 业务 409 分类：熨烫机暂无空位 96、助理已有执行/暂停任务 50、区域熨烫机使用中 3；这些是后端正确兜底，不是系统冲突。
+- 对抗性审计：修正 `loadtest:audit` 的系统异常识别，避免把业务码 `ironing_machine_busy` 误判为 SQLite busy；重跑后 PASS。
+- 不变量结果：同助理多个执行/暂停根任务 0、重复 current primary 等价风险 0、熨烫 `using` 槽位超容量 0。
+- 阶段结论：核心状态命令、同步延迟、SQLite 写锁和状态正确性已经通过 115 会话 30 分钟正式压测；下一瓶颈不再是后端状态命令，而是生产监控/备份告警、前端真实设备 INP 采集，以及混合场景 delta 体积在任务/提醒频繁变化时仍可继续瘦身。
+
 #### 阶段 E 第二十三批计划：开始/暂停状态切换维护降载
 
 - [x] `src/app/api/tasks/[id]/route.ts`：助理 `start` 和 `pause` 在完成原子状态写入、加载权威任务详情后，不再等待 `runTaskMaintenance()`；改为复用 `scheduleTaskMaintenance()` 异步触发普通维护。

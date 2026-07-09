@@ -39,10 +39,9 @@ function isRequestEvent(event: unknown): event is RequestLogEvent {
 }
 
 function isSystemFailure(request: RequestLogEvent): boolean {
-  const text = JSON.stringify(request);
-  return request.status >= 500 ||
-    request.timeout === true ||
-    /sqlite|locked|busy|timeout/i.test(text);
+  if (request.status >= 500 || request.timeout === true) return true;
+  const text = `${request.code ?? ""} ${request.error ?? ""}`;
+  return /\b(sqlite|sqlite_busy|sqlite_locked|database is locked|database locked|database busy|locked database|prisma.*timeout)\b/i.test(text);
 }
 
 function countBy<T>(items: T[], keyFor: (item: T) => string): Record<string, number> {
