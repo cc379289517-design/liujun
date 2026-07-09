@@ -1,7 +1,12 @@
 import { NextRequest } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { Role } from "@/generated/prisma/enums";
-import { PUBLIC_PROFILE_SELECT, serializeProfileForJson } from "@/lib/profilePayload";
+import {
+  IDENTITY_PROFILE_SELECT,
+  PUBLIC_PROFILE_SELECT,
+  STATS_PROFILE_SELECT,
+  serializeProfileForJson,
+} from "@/lib/profilePayload";
 
 /**
  * GET /api/profiles - 查询用户列表
@@ -13,6 +18,7 @@ export async function GET(request: NextRequest) {
     const role = searchParams.get("role");
     const buildingId = searchParams.get("buildingId");
     const status = searchParams.get("status");
+    const view = searchParams.get("view");
 
     const where: Record<string, unknown> = {};
     if (role) {
@@ -36,11 +42,12 @@ export async function GET(request: NextRequest) {
     }
     if (status) where.status = status;
 
-    const profiles = await prisma.profile.findMany({
-      where,
-      select: PUBLIC_PROFILE_SELECT,
-      orderBy: [{ role: "asc" }, { name: "asc" }],
-    });
+    const orderBy = [{ role: "asc" as const }, { name: "asc" as const }];
+    const profiles = view === "identity"
+      ? await prisma.profile.findMany({ where, select: IDENTITY_PROFILE_SELECT, orderBy })
+      : view === "stats"
+        ? await prisma.profile.findMany({ where, select: STATS_PROFILE_SELECT, orderBy })
+        : await prisma.profile.findMany({ where, select: PUBLIC_PROFILE_SELECT, orderBy });
 
     return Response.json(profiles.map(serializeProfileForJson));
   } catch (error) {

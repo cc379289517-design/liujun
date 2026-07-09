@@ -6749,6 +6749,24 @@
 - 验证备注：隔离压测库因头像和 PATCH 冒烟产生运行态变化；`prisma/dev.db` 仍是运行态改动，继续排除提交。
 - 待后续：如果继续追求极致轻量，可将初始 `/api/profiles` 按页面场景拆成 `view=identity/admin/stats`，让摄影师入口只拿身份选择需要字段，后台人员页再按需拿管理字段。
 
+#### 阶段 D 第二十四批计划：profile 场景化 view
+
+- [x] `/api/profiles` 增加 `view=identity/admin/stats`：默认保持现有公开字段兼容，`identity` 给工作台身份选择，`stats` 给统计参考数据，`admin` 给人员管理。
+- [x] 摄影师工作台初始身份选择和助理兜底刷新改用 `view=identity`，减少非必要字段；后台管理首页改用 `view=admin`；统计页改用 `view=stats`。
+- [x] 保持头像短 URL、无 `password`、角色/楼座/部门/在线状态展示不变；不改创建、删除、状态切换、派单、熨烫或移交业务规则。
+- [x] 验证各 view 响应体、字段、页面冒烟、TypeScript、生产构建，并记录体积对比。
+
+#### 阶段 D 第二十四批评审：profile 场景化 view
+
+- 已完成：`/api/profiles` 支持 `view=identity/admin/stats`；默认和 `admin` 保持公开全字段兼容，`identity` 去掉后台管理才需要的字段，`stats` 只保留统计引用需要的姓名、角色、部门、小组、楼座和头像短 URL。
+- 已完成：摄影师工作台初始身份选择和助理兜底刷新改用 `view=identity`；后台首页改用 `view=admin`；统计页参考数据改用 `view=stats`。
+- 已保持：所有 profile 响应继续不含 `password`，头像继续为 `/api/profiles/:id/avatar?v=updatedAt`；未改创建、删除、状态切换、派单、优先级、熨烫或移交业务规则。
+- 验证通过：`npx prisma validate`、`npx tsc --noEmit --pretty false --incremental false`、`git diff --check -- src/lib/profilePayload.ts src/app/api/profiles/route.ts src/app/admin/page.tsx src/app/admin/StatsTab.tsx src/app/photographer/page.tsx tasks/todo.md tasks/lessons.md`、`DATABASE_URL=file:./prisma/loadtest.db npm run build`。
+- 体积验证：隔离 `loadtest.db` 115 人下，默认 `/api/profiles` 62973 bytes；`view=identity` 52618 bytes，约少 16.4%；`view=stats` 28007 bytes，约少 55.5%；`role=assistant&buildingId=1&view=identity` 2758 bytes，较上一批同场景 3299 bytes 继续下降约 16.4%。
+- 字段验证：`view=identity/admin/stats` 均无 `password`；`identity` 保留在线/吃饭/状态字段供身份弹层使用；`stats` 不返回 `currentRoom/isOnline/eating*` 等统计页无关字段。
+- 页面冒烟：隔离 `loadtest.db` 下 `/photographer` 200 / 37866 bytes，`/admin` 200 / 13165 bytes，`/stats` 200 / 9926 bytes，`/api/workbench/sync?...&full=1` 200 / 49724 bytes。
+- 待后续：继续追求极致轻量时，可把 `/api/buildings` 也按 `view=identity/map/admin/stats` 拆分；当前工作台初始加载仍会拿完整楼座、房间、地图和熨烫机信息。
+
 ### 阶段 A 评审
 
 - 已完成压测工具：新增 `scripts/loadtest/seed.ts`、`run.ts`、`report.ts`、`common.ts`，不引入 k6/artillery 等新依赖；使用 Node 内置 `fetch`、现有 `tsx` 和 Prisma/SQLite。

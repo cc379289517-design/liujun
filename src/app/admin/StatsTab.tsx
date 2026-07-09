@@ -332,7 +332,7 @@ export default function StatsTab() {
   const fetchReferenceData = useCallback(async () => {
     try {
       const [profileRes, buildingRes] = await Promise.all([
-        fetch("/api/profiles"),
+        fetch("/api/profiles?view=stats"),
         fetch("/api/buildings"),
       ]);
       if (profileRes.ok) {

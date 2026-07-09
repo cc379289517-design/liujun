@@ -76,7 +76,7 @@ export default function AdminPage() {
     setLoading(true);
     try {
       const [pRes, bRes, cRes, cfgRes] = await Promise.all([
-        fetch("/api/profiles"),
+        fetch("/api/profiles?view=admin"),
         fetch("/api/buildings"),
         fetch("/api/categories"),
         fetch("/api/config"),

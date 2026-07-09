@@ -2013,7 +2013,7 @@ export default function PhotographerPage() {
     const source = snapshot
       ? Promise.resolve([snapshot.profiles, snapshot.tasks])
       : Promise.all([
-        fetch(`/api/profiles?role=assistant&buildingId=${activeBuildingId}`, { cache: "no-store" }).then((r) => r.json()),
+        fetch(`/api/profiles?role=assistant&buildingId=${activeBuildingId}&view=identity`, { cache: "no-store" }).then((r) => r.json()),
         fetch("/api/tasks?todayOnly=true", { cache: "no-store" }).then((r) => r.json()).catch(() => []),
       ]);
     return source.then(async ([profilesData, tasksData]) => {
@@ -2757,7 +2757,7 @@ export default function PhotographerPage() {
       if (loginUser?.role) setLoginRole(loginUser.role);
     } catch {}
     // Fetch profiles, then pick current identity from URL or localStorage.
-    fetch("/api/profiles")
+    fetch("/api/profiles?view=identity")
       .then((r) => r.json())
       .then((data) => {
         if (Array.isArray(data)) {

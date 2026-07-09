@@ -24,6 +24,42 @@ export const PUBLIC_PROFILE_SELECT = {
   building: { select: { id: true, name: true, extraVenues: true } },
 } as const;
 
+export const IDENTITY_PROFILE_SELECT = {
+  id: true,
+  employeeId: true,
+  name: true,
+  avatar: true,
+  role: true,
+  department: true,
+  group: true,
+  buildingId: true,
+  currentRoom: true,
+  activeBuildingId: true,
+  activeRoom: true,
+  status: true,
+  subStatus: true,
+  eatingStartedAt: true,
+  eatingPausedAt: true,
+  eatingEndedAt: true,
+  eatingAccumulatedSeconds: true,
+  onlineStatus: true,
+  updatedAt: true,
+  building: { select: { id: true, name: true } },
+} as const;
+
+export const STATS_PROFILE_SELECT = {
+  id: true,
+  name: true,
+  avatar: true,
+  role: true,
+  department: true,
+  group: true,
+  buildingId: true,
+  activeBuildingId: true,
+  updatedAt: true,
+  building: { select: { id: true, name: true } },
+} as const;
+
 export const AVATAR_PROFILE_SELECT = {
   id: true,
   name: true,
@@ -34,6 +70,8 @@ export const AVATAR_PROFILE_SELECT = {
 } as const;
 
 export type PublicProfileRow = Prisma.ProfileGetPayload<{ select: typeof PUBLIC_PROFILE_SELECT }>;
+export type IdentityProfileRow = Prisma.ProfileGetPayload<{ select: typeof IDENTITY_PROFILE_SELECT }>;
+export type StatsProfileRow = Prisma.ProfileGetPayload<{ select: typeof STATS_PROFILE_SELECT }>;
 export type AvatarProfileLike = { id: string; avatar: string | null; updatedAt?: Date | string | null };
 
 export function avatarValueForJson(profile: AvatarProfileLike): string | null {
