@@ -1,6 +1,6 @@
 "use client";
 
-import { startTransition, useState, useEffect, useCallback, useMemo, useRef, type CSSProperties, type ReactNode } from "react";
+import { startTransition, useState, useEffect, useCallback, useLayoutEffect, useMemo, useRef, type CSSProperties, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import {
   assistantTaskScoreFactor,
@@ -549,6 +549,10 @@ function hasMissingVisibleTaskDetails(
 function getAutoTheme(): "light" | "dark" {
   const h = new Date().getHours();
   return h >= 6 && h < 18 ? "light" : "dark";
+}
+
+function mapMarkerInverseScaleForZoom(zoom: number): number {
+  return Math.round((1 / Math.pow(Math.max(0.01, zoom), 0.72)) * 1000) / 1000;
 }
 
 function canSpecifyQuickBookAssistant(assistant: DockAssistant): boolean {
@@ -1477,6 +1481,13 @@ export default function PhotographerPage() {
   const [mapPanning, setMapPanning] = useState<{
     startX: number; startY: number; origPanX: number; origPanY: number;
   } | null>(null);
+  const [mapTransformLive, setMapTransformLive] = useState(false);
+  const mapZoomRef = useRef(mapZoom);
+  const mapPanRef = useRef(mapPan);
+  const mapCoverZoomRef = useRef(mapCoverZoom);
+  const mapTransformLiveRef = useRef(false);
+  const mapTransformFrameRef = useRef<number | null>(null);
+  const mapWheelCommitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const mapUserInteractedRef = useRef(false);
   const mapAutoViewKeyRef = useRef("");
   const mapMarkerViewportScale = useMemo(
@@ -1487,12 +1498,74 @@ export default function PhotographerPage() {
     () => Math.max(0.9, Math.min(1, (mapViewportWidth || 1180) / 1180)),
     [mapViewportWidth],
   );
-  const mapMarkerInverseScale = Math.round((1 / Math.pow(Math.max(0.01, mapZoom), 0.72)) * 1000) / 1000;
+  const mapMarkerInverseScale = mapMarkerInverseScaleForZoom(mapZoom);
   const mapMarkerSizePx = Math.round((30 * mapMarkerViewportScale) * 10) / 10;
   const mapSlotGapPx = Math.round((24 * mapMarkerViewportScale) * 10) / 10;
   const mapAreaLabelFontPx = Math.round((13 * mapLabelViewportScale) * 10) / 10;
   const mapAreaLabelPadXPx = Math.round((10 * mapLabelViewportScale) * 10) / 10;
   const mapAreaLabelPadYPx = Math.round((5 * mapLabelViewportScale) * 10) / 10;
+  const applyMapTransformNow = useCallback((zoom: number, pan: { x: number; y: number }) => {
+    const container = mapContainerRef.current;
+    if (container) {
+      container.style.setProperty("--map-zoom", String(zoom));
+      container.style.setProperty("--map-marker-inverse-scale", String(mapMarkerInverseScaleForZoom(zoom)));
+    }
+    if (mapInnerRef.current) {
+      mapInnerRef.current.style.transform = `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`;
+    }
+  }, []);
+  const queueMapTransform = useCallback((zoom: number, pan: { x: number; y: number }) => {
+    mapZoomRef.current = zoom;
+    mapPanRef.current = pan;
+    if (mapTransformFrameRef.current != null) return;
+    mapTransformFrameRef.current = window.requestAnimationFrame(() => {
+      mapTransformFrameRef.current = null;
+      applyMapTransformNow(mapZoomRef.current, mapPanRef.current);
+    });
+  }, [applyMapTransformNow]);
+  const commitMapViewState = useCallback(() => {
+    const nextZoom = mapZoomRef.current;
+    const nextPan = mapPanRef.current;
+    setMapZoom((prev) => (prev === nextZoom ? prev : nextZoom));
+    setMapPan((prev) => (prev.x === nextPan.x && prev.y === nextPan.y ? prev : { ...nextPan }));
+  }, []);
+  const setCommittedMapView = useCallback((zoom: number, pan: { x: number; y: number }) => {
+    mapZoomRef.current = zoom;
+    mapPanRef.current = pan;
+    applyMapTransformNow(zoom, pan);
+    setMapZoom(zoom);
+    setMapPan(pan);
+  }, [applyMapTransformNow]);
+  const beginMapTransformLive = useCallback(() => {
+    if (mapTransformLiveRef.current) return;
+    mapTransformLiveRef.current = true;
+    setMapTransformLive(true);
+  }, []);
+  const endMapTransformLive = useCallback(() => {
+    if (!mapTransformLiveRef.current) return;
+    mapTransformLiveRef.current = false;
+    setMapTransformLive(false);
+  }, []);
+  const scheduleMapViewCommit = useCallback((delayMs = 90) => {
+    if (mapWheelCommitTimerRef.current) clearTimeout(mapWheelCommitTimerRef.current);
+    mapWheelCommitTimerRef.current = setTimeout(() => {
+      mapWheelCommitTimerRef.current = null;
+      commitMapViewState();
+      endMapTransformLive();
+    }, delayMs);
+  }, [commitMapViewState, endMapTransformLive]);
+  useLayoutEffect(() => {
+    applyMapTransformNow(mapZoomRef.current, mapPanRef.current);
+  });
+  useEffect(() => {
+    mapCoverZoomRef.current = mapCoverZoom;
+  }, [mapCoverZoom]);
+  useEffect(() => {
+    return () => {
+      if (mapTransformFrameRef.current != null) window.cancelAnimationFrame(mapTransformFrameRef.current);
+      if (mapWheelCommitTimerRef.current) clearTimeout(mapWheelCommitTimerRef.current);
+    };
+  }, []);
   const markMapUserInteracted = useCallback(() => {
     mapUserInteractedRef.current = true;
   }, []);
@@ -1677,9 +1750,8 @@ export default function PhotographerPage() {
       ? computeFocusedMapView(targetHeight) ?? computeGlobalMapView(targetHeight)
       : computeGlobalMapView(targetHeight);
     setMapCoverZoom(view.coverZoom);
-    setMapZoom(view.zoom);
-    setMapPan(view.pan);
-  }, [computeFocusedMapView, computeGlobalMapView, targetMapHeightForMode]);
+    setCommittedMapView(view.zoom, view.pan);
+  }, [computeFocusedMapView, computeGlobalMapView, setCommittedMapView, targetMapHeightForMode]);
 
   const resetMapView = useCallback(() => {
     mapUserInteractedRef.current = false;
@@ -1694,16 +1766,17 @@ export default function PhotographerPage() {
     const onResize = () => {
       if (mapUserInteractedRef.current) {
         const z = computeCoverZoom();
+        const nextZoom = Math.max(z, mapZoomRef.current);
+        const nextPan = clampMapPan(mapPanRef.current.x, mapPanRef.current.y, nextZoom);
         setMapCoverZoom(z);
-        setMapZoom((prevZoom) => Math.max(z, prevZoom));
-        setMapPan((prevPan) => clampMapPan(prevPan.x, prevPan.y, Math.max(z, mapZoom)));
+        setCommittedMapView(nextZoom, nextPan);
         return;
       }
       applyMapViewMode(areaDataPanelOpen ? "focused" : "global", { force: true });
     };
     window.addEventListener("resize", onResize);
     return () => window.removeEventListener("resize", onResize);
-  }, [applyMapViewMode, areaDataPanelOpen, clampMapPan, computeCoverZoom, mapZoom]);
+  }, [applyMapViewMode, areaDataPanelOpen, clampMapPan, computeCoverZoom, setCommittedMapView]);
 
   useEffect(() => {
     const container = mapContainerRef.current;
@@ -1718,9 +1791,8 @@ export default function PhotographerPage() {
   // Reset view when switching buildings
   useEffect(() => {
     setMapCoverZoom(MAP_BASE_MIN_ZOOM);
-    setMapZoom(MAP_BASE_MIN_ZOOM);
-    setMapPan({ x: 0, y: 0 });
-  }, [activeBuildingId]);
+    setCommittedMapView(MAP_BASE_MIN_ZOOM, { x: 0, y: 0 });
+  }, [activeBuildingId, setCommittedMapView]);
 
   // Switch between full-map and current-position focus when layout/data changes.
   useEffect(() => {
@@ -2340,28 +2412,36 @@ export default function PhotographerPage() {
       if (hasCrop) return;
       e.preventDefault();
       markMapUserInteracted();
+      beginMapTransformLive();
+      const currentPan = mapPanRef.current;
       setMapPanning({
         startX: e.clientX, startY: e.clientY,
-        origPanX: mapPan.x, origPanY: mapPan.y,
+        origPanX: currentPan.x, origPanY: currentPan.y,
       });
     },
-    [mapPan, hasCrop, markMapUserInteracted]
+    [beginMapTransformLive, hasCrop, markMapUserInteracted]
   );
 
   useEffect(() => {
     if (!mapPanning) return;
     const handleMove = (e: MouseEvent) => {
-      setMapPan(clampMapPan(
+      const currentZoom = mapZoomRef.current;
+      const nextPan = clampMapPan(
         mapPanning.origPanX + e.clientX - mapPanning.startX,
         mapPanning.origPanY + e.clientY - mapPanning.startY,
-        mapZoom
-      ));
+        currentZoom
+      );
+      queueMapTransform(currentZoom, nextPan);
     };
-    const handleUp = () => setMapPanning(null);
+    const handleUp = () => {
+      commitMapViewState();
+      endMapTransformLive();
+      setMapPanning(null);
+    };
     window.addEventListener("mousemove", handleMove);
     window.addEventListener("mouseup", handleUp);
     return () => { window.removeEventListener("mousemove", handleMove); window.removeEventListener("mouseup", handleUp); };
-  }, [mapPanning, mapZoom, clampMapPan]);
+  }, [mapPanning, clampMapPan, commitMapViewState, endMapTransformLive, queueMapTransform]);
 
   // Touch pan & pinch-zoom for mobile
   const touchRef = useRef<{ startX: number; startY: number; origPanX: number; origPanY: number; dist: number; origZoom: number } | null>(null);
@@ -2383,20 +2463,26 @@ export default function PhotographerPage() {
     });
 
     const onTouchStart = (e: TouchEvent) => {
+      const currentPan = mapPanRef.current;
+      const currentZoom = mapZoomRef.current;
+      latestPan = currentPan;
+      latestZoom = currentZoom;
       if (e.touches.length === 1) {
         markMapUserInteracted();
+        beginMapTransformLive();
         const t = e.touches[0];
-        touchRef.current = { startX: t.clientX, startY: t.clientY, origPanX: mapPan.x, origPanY: mapPan.y, dist: 0, origZoom: mapZoom };
+        touchRef.current = { startX: t.clientX, startY: t.clientY, origPanX: currentPan.x, origPanY: currentPan.y, dist: 0, origZoom: currentZoom };
       } else if (e.touches.length === 2) {
         e.preventDefault();
         markMapUserInteracted();
+        beginMapTransformLive();
         const dist = getTouchDist(e.touches);
-        touchRef.current = { startX: 0, startY: 0, origPanX: mapPan.x, origPanY: mapPan.y, dist, origZoom: mapZoom };
+        touchRef.current = { startX: 0, startY: 0, origPanX: currentPan.x, origPanY: currentPan.y, dist, origZoom: currentZoom };
       }
     };
 
-    let latestZoom = mapZoom;
-    let latestPan = mapPan;
+    let latestZoom = mapZoomRef.current;
+    let latestPan = mapPanRef.current;
 
     const onTouchMove = (e: TouchEvent) => {
       if (!touchRef.current) return;
@@ -2411,13 +2497,13 @@ export default function PhotographerPage() {
           latestZoom
         );
         latestPan = newPan;
-        setMapPan(newPan);
+        queueMapTransform(latestZoom, newPan);
       } else if (e.touches.length === 2 && touchRef.current.dist > 0) {
         // Pinch zoom
         const newDist = getTouchDist(e.touches);
         const scale = newDist / touchRef.current.dist;
         const rawZoom = touchRef.current.origZoom * scale;
-        const newZoom = Math.min(MAP_MAX_ZOOM, Math.max(mapCoverZoom, Math.round(rawZoom * 100) / 100));
+        const newZoom = Math.min(MAP_MAX_ZOOM, Math.max(mapCoverZoomRef.current, Math.round(rawZoom * 100) / 100));
         const center = getTouchCenter(e.touches, rect);
         const zoomScale = newZoom / latestZoom;
         const newPan = clampMapPan(
@@ -2427,22 +2513,27 @@ export default function PhotographerPage() {
         );
         latestZoom = newZoom;
         latestPan = newPan;
-        setMapZoom(newZoom);
-        setMapPan(newPan);
+        queueMapTransform(newZoom, newPan);
       }
     };
 
-    const onTouchEnd = () => { touchRef.current = null; };
+    const onTouchEnd = () => {
+      touchRef.current = null;
+      commitMapViewState();
+      endMapTransformLive();
+    };
 
     container.addEventListener("touchstart", onTouchStart, { passive: false });
     container.addEventListener("touchmove", onTouchMove, { passive: false });
     container.addEventListener("touchend", onTouchEnd);
+    container.addEventListener("touchcancel", onTouchEnd);
     return () => {
       container.removeEventListener("touchstart", onTouchStart);
       container.removeEventListener("touchmove", onTouchMove);
       container.removeEventListener("touchend", onTouchEnd);
+      container.removeEventListener("touchcancel", onTouchEnd);
     };
-  }, [mapZoom, mapPan, clampMapPan, mapCoverZoom, hasCrop, markMapUserInteracted]);
+  }, [beginMapTransformLive, clampMapPan, commitMapViewState, endMapTransformLive, hasCrop, markMapUserInteracted, queueMapTransform]);
 
   // Map wheel zoom
   useEffect(() => {
@@ -2454,17 +2545,20 @@ export default function PhotographerPage() {
       const rect = container.getBoundingClientRect();
       const mx = e.clientX - rect.left;
       const my = e.clientY - rect.top;
-      const oldZoom = mapZoom;
+      const oldZoom = mapZoomRef.current;
       const newZoom = clampMapZoom(oldZoom + (e.deltaY > 0 ? -MAP_ZOOM_STEP : MAP_ZOOM_STEP));
       if (newZoom === oldZoom) return;
       markMapUserInteracted();
+      beginMapTransformLive();
       const scale = newZoom / oldZoom;
-      setMapZoom(newZoom);
-      setMapPan(clampMapPan(mx - scale * (mx - mapPan.x), my - scale * (my - mapPan.y), newZoom));
+      const currentPan = mapPanRef.current;
+      const nextPan = clampMapPan(mx - scale * (mx - currentPan.x), my - scale * (my - currentPan.y), newZoom);
+      queueMapTransform(newZoom, nextPan);
+      scheduleMapViewCommit();
     };
     container.addEventListener("wheel", handleWheel, { passive: false });
     return () => container.removeEventListener("wheel", handleWheel);
-  }, [mapZoom, mapPan, clampMapZoom, clampMapPan, hasCrop, markMapUserInteracted]);
+  }, [beginMapTransformLive, clampMapZoom, clampMapPan, hasCrop, markMapUserInteracted, queueMapTransform, scheduleMapViewCommit]);
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -6478,6 +6572,8 @@ export default function PhotographerPage() {
 	            }`}
             style={{
               cursor: hasCrop ? "default" : mapPanning ? "grabbing" : "grab",
+              "--map-zoom": `${mapZoom}`,
+              "--map-marker-inverse-scale": `${mapMarkerInverseScale}`,
               "--map-marker-size": `${mapMarkerSizePx}px`,
               "--map-slot-gap": `${mapSlotGapPx}px`,
               "--map-area-label-font": `${mapAreaLabelFontPx}px`,
@@ -6668,7 +6764,7 @@ export default function PhotographerPage() {
           <div
             ref={mapInnerRef}
             className={`relative z-[2] will-change-transform ${
-              mapPanning ? "" : "transition-transform duration-[680ms] ease-[cubic-bezier(.22,1,.36,1)]"
+              mapPanning || mapTransformLive ? "" : "transition-transform duration-[680ms] ease-[cubic-bezier(.22,1,.36,1)]"
             }`}
             style={{
               transform: `translate(${mapPan.x}px, ${mapPan.y}px) scale(${mapZoom})`,
@@ -6722,7 +6818,7 @@ export default function PhotographerPage() {
                         style={{
                           left: `${center.x}%`,
                           top: `${center.y}%`,
-                          transform: `translate(-50%, -50%) scale(${mapMarkerInverseScale})`,
+                          transform: "translate(-50%, -50%) scale(var(--map-marker-inverse-scale))",
                           padding: "var(--map-area-label-pad-y) var(--map-area-label-pad-x)",
                           fontSize: "var(--map-area-label-font)",
                           backgroundColor: `${color}99`,
@@ -6810,7 +6906,7 @@ export default function PhotographerPage() {
                     style={{
                       left: `${px}%`,
                       top: `${py}%`,
-                      transform: `translate(calc(-50% + ${ox / Math.max(0.01, mapZoom)}px), -50%) scale(${mapMarkerInverseScale})`,
+                      transform: `translate(calc(-50% + ${ox / Math.max(0.01, mapZoom)}px), -50%) scale(var(--map-marker-inverse-scale))`,
                       zIndex: preemptHovered ? 50 : zb,
                     }}
                     onMouseEnter={(e) => {
@@ -6877,7 +6973,7 @@ export default function PhotographerPage() {
                     style={{
                       left: `${pX}%`,
                       top: `${pY}%`,
-                      transform: `translate(calc(-50% + ${oxP / Math.max(0.01, mapZoom)}px), -50%) scale(${mapMarkerInverseScale})`,
+                      transform: `translate(calc(-50% + ${oxP / Math.max(0.01, mapZoom)}px), -50%) scale(var(--map-marker-inverse-scale))`,
                       zIndex: pausedHovered ? 50 : zbP,
                     }}
                     onMouseEnter={(e) => { e.stopPropagation(); setHoveredMapAssistant(`${a.id}-paused`); }}
@@ -6941,7 +7037,7 @@ export default function PhotographerPage() {
                     style={{
                       left: `${px}%`,
                       top: `${py}%`,
-                      transform: `translate(calc(-50% + ${oxPen / Math.max(0.01, mapZoom)}px), -50%) scale(${mapMarkerInverseScale})`,
+                      transform: `translate(calc(-50% + ${oxPen / Math.max(0.01, mapZoom)}px), -50%) scale(var(--map-marker-inverse-scale))`,
                       zIndex: penHovered ? 50 : zbPen,
                     }}
                     onMouseEnter={(e) => { e.stopPropagation(); setHoveredMapAssistant(`${a.id}-pending`); }}
@@ -7002,7 +7098,7 @@ export default function PhotographerPage() {
                   style={{
                     left: `${posX}%`,
                     top: `${posY}%`,
-                    transform: `translate(calc(-50% + ${offset / Math.max(0.01, mapZoom)}px), -50%) scale(${mapMarkerInverseScale * (isHovered ? 1.35 : 1)})`,
+                    transform: `translate(calc(-50% + ${offset / Math.max(0.01, mapZoom)}px), -50%) scale(var(--map-marker-inverse-scale))${isHovered ? " scale(1.35)" : ""}`,
                     zIndex: isHovered ? 50 : zMain,
                     transition: "transform .3s cubic-bezier(.34,1.56,.64,1)",
                   }}

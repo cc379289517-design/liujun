@@ -6381,6 +6381,23 @@
 - 验证通过：`npx tsc --noEmit --pretty false --incremental false`、`git diff --check -- src/app/photographer/page.tsx tasks/todo.md`、`DATABASE_URL=file:./prisma/loadtest.db npm run build`。
 - 待后续：继续把更多散落的单任务局部更新收口到统一 helper/reducer，尤其是备注、反馈、提权、移交协作后的多组 setState。
 
+#### 阶段 D 第四批计划：地图拖拽/缩放 rAF 节流
+
+- [x] 鼠标拖拽、触摸拖拽和滚轮缩放不再每个 pointer/wheel 事件直接触发 React 整页状态更新；拖动中用 ref 保存最新视图，用 `requestAnimationFrame` 合并 DOM transform。
+- [x] 拖拽/缩放结束后再提交一次 `mapPan/mapZoom` 到 React 状态，保证自动适配、楼座切换、头像错位和后续渲染仍有一致的已提交状态。
+- [x] 地图头像/公共区域标签的反向缩放改用 CSS variable，让滚轮缩放时标记尺寸跟随 rAF 更新，避免缩放过程中头像暴涨或闪动。
+- [x] 本批只优化地图交互流畅度，不改变派单、任务状态、熨烫机、移交、同步接口或任何业务规则；长期业务文档无需更新。
+- [x] 验证 `tsc`、`git diff --check`、`DATABASE_URL=file:./prisma/loadtest.db npm run build`，并在评审中记录残余风险。
+
+#### 阶段 D 第四批评审：地图拖拽/缩放 rAF 节流
+
+- 已完成：新增地图视图 refs、rAF DOM transform 提交器和滚轮停顿后的状态提交；鼠标拖拽、触摸拖拽/捏合、滚轮缩放期间不再每个事件触发 React 整页重渲染。
+- 已完成：拖拽/触摸结束、滚轮停止后把最终 `mapPan/mapZoom` 回写 React 状态；自动适配、楼座切换、焦点视图和窗口 resize 继续走统一提交器，避免 ref 与 state 长期分叉。
+- 已完成：交互中临时关闭地图 transform 过渡，结束后恢复自动适配动画；地图头像和公共区域标签使用 `--map-marker-inverse-scale` 反向缩放变量，滚轮缩放时尺寸更稳定。
+- 业务边界：本批只做前端地图交互性能优化，不改变派单、优先级、熨烫机、移交、同步接口、任务状态或数据库结构；长期业务文档无需新增业务规则。
+- 验证通过：`npx tsc --noEmit --pretty false --incremental false`、`git diff --check -- src/app/photographer/page.tsx tasks/todo.md tasks/lessons.md`、`DATABASE_URL=file:./prisma/loadtest.db npm run build`、本地隔离服务 `http://localhost:3100/photographer` 200、`/api/config` 200、`/api/workbench/sync?role=photographer&buildingId=1&full=1` 200。
+- 待后续：阶段 D 总项中的 Dock hover 和更完整的本地 reducer/store 尚未完成；下一批建议继续做 Dock hover ref/CSS 化或先收口备注/反馈/提权/移交后的任务源 helper。
+
 ### 阶段 E：验收与对抗审查
 
 - [ ] 基线压测完成后，先根据报告排序瓶颈，再决定是否进入 B/C/D 的第一批代码改动。
