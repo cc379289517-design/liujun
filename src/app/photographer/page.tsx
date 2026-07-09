@@ -32,6 +32,12 @@ import {
 } from "./useWorkbenchPendingActions";
 import { useWorkbenchTaskOptimism } from "./useWorkbenchTaskOptimism";
 import {
+  removeTaskFromList,
+  replaceOrRemoveTaskInList,
+  updateTaskInList,
+  upsertTaskInList,
+} from "./workbenchTaskSources";
+import {
   mobileTaskStatusForProfile as deriveMobileTaskStatusForProfile,
   mobileTaskStatusMeta as deriveMobileTaskStatusMeta,
   mobileTaskSubtitle as deriveMobileTaskSubtitle,
@@ -1316,12 +1322,14 @@ export default function PhotographerPage() {
       assistantRawTasksRef.current = raw;
       setAssistantRawTasks(raw);
       const { current: active, paused, pending, deferredWaiting } = resolveAssistantTasks(raw, targetProfile.id);
+      pendingRawTaskRef.current = pending;
       setCurrentRawTask(active);
       setPausedRawTask(paused);
       setPendingRawTask(pending);
       setDeferredWaitingRawTask(deferredWaiting);
     } else {
       assistantRawTasksRef.current = [];
+      pendingRawTaskRef.current = null;
       setAssistantRawTasks([]);
       setDeferredWaitingRawTask(null);
       setCurrentRawTask(null);
@@ -1339,15 +1347,7 @@ export default function PhotographerPage() {
       updateAreaCompletedWeekly?: boolean;
     },
   ) => {
-    const updateList = (list: TaskFromAPI[]): TaskFromAPI[] => {
-      let changed = false;
-      const next = list.map((task) => {
-        if (task.id !== taskId) return task;
-        changed = true;
-        return updateRawTask(task);
-      });
-      return changed ? next : list;
-    };
+    const updateList = (list: TaskFromAPI[]): TaskFromAPI[] => updateTaskInList(list, taskId, updateRawTask);
     const updateNullable = (task: TaskFromAPI | null): TaskFromAPI | null =>
       task?.id === taskId ? updateRawTask(task) : task;
 
@@ -1401,10 +1401,7 @@ export default function PhotographerPage() {
       updatePublicQueue?: boolean;
     },
   ) => {
-    const removeFromList = (list: TaskFromAPI[]) => {
-      const next = list.filter((task) => task.id !== taskId);
-      return next.length === list.length ? list : next;
-    };
+    const removeFromList = (list: TaskFromAPI[]) => removeTaskFromList(list, taskId);
 
     const nextTaskList = removeFromList(taskListRawRef.current);
     if (nextTaskList !== taskListRawRef.current) {
@@ -1448,10 +1445,7 @@ export default function PhotographerPage() {
       updatePublicQueue?: boolean;
     },
   ) => {
-    const upsertList = (list: TaskFromAPI[]) => [
-      ...list.filter((item) => item.id !== task.id),
-      task,
-    ];
+    const upsertList = (list: TaskFromAPI[]) => upsertTaskInList(list, task, { moveExisting: true });
     const nextTaskList = upsertList(taskListRawRef.current);
     taskListRawRef.current = nextTaskList;
     setTaskListRaw(nextTaskList);
@@ -1507,10 +1501,8 @@ export default function PhotographerPage() {
       hideTaskForProfile(updatedTask.id, targetProfile.id, nowMs);
     }
 
-    const replaceOrRemove = (list: TaskFromAPI[]): TaskFromAPI[] => {
-      const withoutUpdated = list.filter((task) => task.id !== updatedTask.id);
-      return keepTask ? [...withoutUpdated, updatedTask] : withoutUpdated;
-    };
+    const replaceOrRemove = (list: TaskFromAPI[]): TaskFromAPI[] =>
+      replaceOrRemoveTaskInList(list, updatedTask, keepTask);
 
     const nextTaskList = replaceOrRemove(taskListRawRef.current);
     taskListRawRef.current = nextTaskList;
@@ -1567,12 +1559,10 @@ export default function PhotographerPage() {
           : participant
       ),
     };
-    const mergeTask = (list: TaskFromAPI[]) => {
-      const exists = list.some((item) => item.id === nextTask.id);
-      return exists
-        ? list.map((item) => item.id === nextTask.id ? { ...item, ...nextTask } : item)
-        : [nextTask, ...list];
-    };
+    const mergeTask = (list: TaskFromAPI[]) => upsertTaskInList(list, nextTask, {
+      mergeExisting: true,
+      position: "prepend",
+    });
     rememberTaskPatch(nextTask);
     const currentTaskList = taskListRawRef.current;
     const currentAssistantTasks = assistantRawTasksRef.current.length > 0
@@ -1586,6 +1576,7 @@ export default function PhotographerPage() {
     setAssistantRawTasks(nextAssistantTasks);
     setTasks(sortTasksByStatus(nextTaskList.map((t) => apiTaskToDisplay(t, profile.id))));
     const { current: active, paused, pending, deferredWaiting } = resolveAssistantTasks(nextAssistantTasks, profile.id);
+    pendingRawTaskRef.current = pending;
     setCurrentRawTask(active);
     setPausedRawTask(paused);
     setPendingRawTask(pending);

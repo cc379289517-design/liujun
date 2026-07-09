@@ -6517,6 +6517,24 @@
 - 验证备注：本地 dev 前先按既有安全脚本清理 `.next` 中 macOS `._*` 伴生文件和 Turbopack 缓存，不涉及数据库。
 - 待后续：继续把任务源列表更新 helpers 收敛到 `tasksById` reducer，减少多组数组状态并行更新。
 
+#### 阶段 D 第十二批计划：任务源列表纯函数收口
+
+- [x] 新增 `workbenchTaskSources` 纯函数模块，先抽出任务数组的 update/remove/upsert/replace-or-remove 变换，不直接重做大 reducer。
+- [x] `page.tsx` 的 `updateLocalTaskSources()`、`removeLocalTaskSources()`、`upsertLocalTaskSource()`、`replaceVisibleTaskForProfile()`、乐观开始/完成合并改用同一组列表变换函数，减少手写数组更新分叉。
+- [x] 保持现有 `taskListRaw/currentRawTask/pausedRawTask/pendingRawTask/deferredWaitingRawTask/publicQueueRaw` 状态结构和 UI 行为不变，为下一步 `tasksById` reducer 化铺路。
+- [x] 补记 Mac mini 同步探测：`192.168.31.171` 仍不可达，ping 丢包、SSH 22 超时、3000 `/api/config` 超时；本地优化继续推进，等待网络恢复后再同步。
+- [x] 验证 `tsc`、`git diff --check`、生产构建和本地轻量接口；本批只做前端状态源等价收口，不更新长期业务文档。
+
+#### 阶段 D 第十二批评审：任务源列表纯函数收口
+
+- 已完成：新增 `src/app/photographer/workbenchTaskSources.ts`，统一任务源数组的 update/remove/upsert/replace-or-remove 纯变换。
+- 已完成：`page.tsx` 中单任务更新、删除、插入、移交可见性替换、乐观开始/完成合并改用同一组纯函数，减少后续操作路径漏同步的风险。
+- 已补齐：`applyTaskDataForProfile()` 和 `applyOptimisticAssistantTaskStatus()` 解析出 `pending` 后同步 `pendingRawTaskRef`，降低同一事件循环内读取旧 pending 任务的概率。
+- 已保持：现有任务源状态结构、列表展示、公共队列、移交隐藏 TTL、乐观补丁 TTL 和业务状态命令均不变；本批不更新长期业务规则文档。
+- 验证通过：`npx tsc --noEmit --pretty false --incremental false`、`git diff --check -- src/app/photographer/page.tsx src/app/photographer/workbenchTaskSources.ts tasks/todo.md tasks/lessons.md`、`DATABASE_URL=file:./prisma/loadtest.db npm run build`、本地隔离服务 `http://localhost:3100/photographer` 200、`/api/config` 200、`/api/workbench/sync?role=photographer&buildingId=1&full=1` 200。
+- 验证备注：本地 dev 首启再次遇到 `.next` Turbopack 缓存被 macOS `._*` 污染，按既有安全脚本清理 880 个伴生文件和 Next 缓存后通过；`/api/workbench/sync` 维护日志只影响隔离 `loadtest.db`。
+- 待后续：进入 `tasksById` reducer 第一批时，应复用本批纯函数语义，逐步把多组数组状态并到一个本地任务源，再外派生当前/暂停/pending/公共队列。
+
 ### 阶段 E：验收与对抗审查
 
 - [ ] 基线压测完成后，先根据报告排序瓶颈，再决定是否进入 B/C/D 的第一批代码改动。
