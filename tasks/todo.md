@@ -6803,7 +6803,8 @@
 - 验证通过：`npx prisma validate`、`npx tsc --noEmit --pretty false --incremental false`、`git diff --check`、`DATABASE_URL=file:./prisma/loadtest.db npm run build`。
 - 本地隔离服务验证：给 1 号楼写入测试 data URL 后，`/api/buildings` 200 / 22381 bytes，首项 `floorPlanUrl=/api/buildings/1/floor-plan` 且不以 `data:` 开头；`/api/buildings/1/floor-plan` 200 / 68 bytes / image，带 ETag 后 304 / 0 bytes。
 - 页面冒烟：隔离 `loadtest.db` 下 `/admin` 200 / 13165 bytes，`/stats` 200 / 9926 bytes，`/photographer` 200 / 37866 bytes。
-- 生产证据：第二十五批发布后 Mac mini `/api/buildings` full 为 19813561 bytes、summary 为 134 bytes，说明生产平面图大字段是当前工作台首屏主要 JSON 负担；本批发布后应复核 full 是否降到 KB 级，平面图改由图片缓存承担。
+- 生产复核：第二十五批发布后 Mac mini `/api/buildings` full 为 19813561 bytes、summary 为 134 bytes；本批发布后 full 降到 17601 bytes、summary 仍为 134 bytes，首个平面图字段为 `/api/buildings/1/floor-plan` 且不再是 `data:`。
+- 生产图片路由复核：Mac mini `/api/buildings/1/floor-plan` 200 / 2132825 bytes / `image/png`，带 ETag 后 304 / 0 bytes；平面图大图改由浏览器图片缓存承担，不再进入每次楼座 JSON 解析。
 - 待后续：如果楼座平面图仍长期存在 SQLite 文本中，下一阶段可考虑把图片迁到 `public/uploads` 或对象存储；本批先解决高频 JSON 传输和解析压力。
 
 ### 阶段 A 评审
