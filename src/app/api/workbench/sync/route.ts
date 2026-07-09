@@ -128,14 +128,20 @@ const FULL_TASK_INCLUDE = {
   },
 } as const;
 
+const QUEUE_AVATAR_PROFILE_SELECT = {
+  id: true,
+  name: true,
+  avatar: true,
+  updatedAt: true,
+} as const;
+
 const QUEUE_TASK_INCLUDE = {
-  photographer: { select: { id: true, name: true, currentRoom: true, buildingId: true } },
-  assistant: { select: { id: true, name: true, currentRoom: true } },
+  photographer: { select: { id: true, name: true, buildingId: true } },
+  assistant: { select: { id: true, name: true } },
   category: {
     select: {
       id: true,
       name: true,
-      priorityLevel: true,
       estDuration: true,
       minDuration: true,
       maxDuration: true,
@@ -155,7 +161,7 @@ const QUEUE_TASK_INCLUDE = {
       completedAt: true,
       effectiveWorkSeconds: true,
       workSegmentStartedAt: true,
-      assistant: { select: AVATAR_PROFILE_SELECT },
+      assistant: { select: QUEUE_AVATAR_PROFILE_SELECT },
     },
   },
   priorityUpgradeRequests: {
@@ -327,6 +333,7 @@ type AreaSummaryResult = {
 const areaSummaryCache = new Map<number, { expiresAtMs: number; promise: Promise<AreaSummaryResult> }>();
 
 const ACTIVE_PARTICIPANT_STATUSES = ["waiting", "executing", "paused"];
+const FULL_QUEUE_FALSE_DEFAULT_KEYS = new Set(["isLocked", "isSpecified"]);
 
 function fmtMin(min: number): string {
   const m = Math.max(0, Math.round(Number(min) || 0));
@@ -925,6 +932,23 @@ function areaSummaryFromTasks(profiles: AssistantProfileRow[], tasks: QueueTask[
   };
 }
 
+function serializeQueueTaskForJson(task: QueueTask, compactFull: boolean): Record<string, unknown> {
+  const serialized = serializeTaskAssistantAvatars(task) as Record<string, unknown>;
+  if (!compactFull) {
+    const { updatedAt: _updatedAt, ...rest } = serialized;
+    return rest;
+  }
+  const compact: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(serialized)) {
+    if (key === "updatedAt") continue;
+    if (value == null) continue;
+    if (FULL_QUEUE_FALSE_DEFAULT_KEYS.has(key) && value === false) continue;
+    if (Array.isArray(value) && value.length === 0) continue;
+    compact[key] = value;
+  }
+  return compact;
+}
+
 async function getCachedAreaSummary(
   buildingId: number,
   profiles: AssistantProfileRow[],
@@ -1191,7 +1215,7 @@ export async function GET(request: NextRequest) {
       areaSummary: areaSummaryResult?.summary,
       tasks: visibleTasks.map(serializeTaskAssistantAvatars),
       taskIds: visibleTaskIds.map((task) => task.id),
-      publicQueue: visibleAreaTasks.map(serializeTaskAssistantAvatars),
+      publicQueue: visibleAreaTasks.map((task) => serializeQueueTaskForJson(task, !since)),
       publicQueueIds: visibleAreaTaskIds.map((task) => task.id),
       publicQueueSummary: {
         total: visibleAreaTaskIds.length,

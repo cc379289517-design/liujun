@@ -7054,6 +7054,26 @@
 - 不变量审查通过：同助理多个执行/暂停根任务 0、重复 current primary 0、熨烫 `using` 槽位超容量 0。
 - 验证通过：`git diff --check`、`npx prisma validate`、`npx tsc --noEmit --pretty false --incremental false`、`DATABASE_URL=file:./prisma/loadtest.db npm run build`。
 
+#### 阶段 E 第十五批计划：公共队列关系字段瘦身
+
+- [x] 审计 `/api/workbench/sync` 中 `publicQueue` 响应体字段占比，优先处理不影响业务规则的固定关系字段。
+- [x] `QUEUE_TASK_INCLUDE` 中摄影师关系只保留 `id/name/buildingId`，助理关系只保留 `id/name`，分类关系去掉队列未使用的 `priorityLevel`。
+- [x] 协作参与者头像资料只保留头像展示和姓名所需字段，避免把公共队列每条协作者的当前位置/楼座随 3 秒同步重复广播。
+- [x] full 校准时压缩公共队列任务的 null/false/空数组和队列未使用的 `updatedAt`；delta 仍保留 null 语义，避免字段清空时本地旧值残留。
+- [x] 不改变任务主表字段、公共队列排序、状态标签、地图位置、派单、优先级和熨烫规则；本批只减少 JSON 固定开销。
+- [x] 验证 TypeScript、生产 build、接口样本体积、smoke 压测和状态不变量。
+
+#### 阶段 E 第十五批评审：公共队列关系字段瘦身
+
+- 字段审计：隔离 `prisma/loadtest.db` 1 号楼样本中，`/api/workbench/sync?full=1` 总体 56608 bytes，其中 `publicQueue` 37301 bytes；最大固定开销来自协作参与、分类、摄影师/助理关系和大量 null/false/空数组默认字段。
+- 改动范围：`src/app/api/workbench/sync/route.ts` 中 `QUEUE_TASK_INCLUDE` 的摄影师关系裁到 `id/name/buildingId`，助理关系裁到 `id/name`，分类关系去掉 `priorityLevel`，协作者头像资料裁到 `id/name/avatar/updatedAt`。
+- full 压缩：新增公共队列序列化 helper，full 模式移除 `updatedAt`、null/undefined、默认 false 和空数组；delta 模式仍保留 null/false/空数组清空语义，只移除前端不消费的 `updatedAt`。
+- 样本收益：同一隔离库样本 full sync 从 56608 bytes 降到 41898 bytes，减少 14710 bytes / 25.99%；`publicQueue` 从 37301 bytes 降到 22591 bytes，减少 39.44%。
+- Smoke：`phase-e15-public-queue-compact-smoke-60s`，9 会话 60 秒，254 请求，0 错误；`/api/workbench/sync` p50 19.5ms、p95 28.6ms、p99 32.1ms；full 平均 48136.6 bytes，delta 平均 3634.6 bytes、p95 5512 bytes。
+- 异常审查：raw 266 行精确解析，未发现 HTTP 500、SQLite locked/busy 或 timeout。
+- 不变量审查通过：同助理多个执行/暂停根任务 0、重复 current primary 0、熨烫 `using` 槽位超容量 0。
+- 验证通过：`git diff --check`、`npx prisma validate`、`npx tsc --noEmit --pretty false --incremental false`、`DATABASE_URL=file:./prisma/loadtest.db npm run build`。
+
 ### 阶段 A 评审
 
 - 已完成压测工具：新增 `scripts/loadtest/seed.ts`、`run.ts`、`report.ts`、`common.ts`，不引入 k6/artillery 等新依赖；使用 Node 内置 `fetch`、现有 `tsx` 和 Prisma/SQLite。
