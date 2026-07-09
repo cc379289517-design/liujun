@@ -265,7 +265,7 @@ export async function PATCH(request: NextRequest, { params }: RouteContext) {
         }
         await updateTaskParticipantStatus(id, actorId, "executing", estMinutes);
         const updated = await loadTaskDetail(id);
-        await runTaskMaintenance();
+        scheduleTaskMaintenance();
 
         return Response.json(updated);
       }
@@ -285,7 +285,7 @@ export async function PATCH(request: NextRequest, { params }: RouteContext) {
         }
         await updateTaskParticipantStatus(id, actorId, "paused");
         const updated = await loadTaskDetail(id);
-        await runTaskMaintenance();
+        scheduleTaskMaintenance();
 
         return Response.json(updated);
       }

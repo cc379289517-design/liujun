@@ -7170,6 +7170,24 @@
 - 不变量审查通过：同助理多个执行/暂停根任务 0、重复 current primary 等价风险 0、熨烫 `using` 槽位超容量 0。
 - 验证通过：`git diff --check`、`npx tsc --noEmit --pretty false --incremental false`、`DATABASE_URL=file:./prisma/loadtest.db npm run build`、隔离库 seed、115 会话 3 分钟混合压测、raw 精查和 SQL 不变量审查。
 
+#### 阶段 E 第二十三批计划：开始/暂停状态切换维护降载
+
+- [x] `src/app/api/tasks/[id]/route.ts`：助理 `start` 和 `pause` 在完成原子状态写入、加载权威任务详情后，不再等待 `runTaskMaintenance()`；改为复用 `scheduleTaskMaintenance()` 异步触发普通维护。
+- [x] 保持业务规则不变：开始动作仍同步做优先级兜底、待就位准备、参与者校验、熨烫槽位校验、任务/人员状态写入；暂停动作仍同步做参与者校验、工时结算和人员状态校准。
+- [x] 暂不调整管理 `setStatus`、取消指定助理、移交等低频且语义更复杂路径，避免性能优化夹带业务规则变化。
+- [x] 验证 TypeScript、生产 build、隔离库 115 会话混合短测、raw 异常审查和状态不变量。
+- [x] 对比第二十二批基线，重点观察 `mixed-start`、`mixed-pause`、`mixed-resume` p95/p99，确认无 HTTP 500、SQLite locked/busy、重复 active primary 和熨烫 using 超容量。
+
+#### 阶段 E 第二十三批评审：开始/暂停状态切换维护降载
+
+- 改动范围：`src/app/api/tasks/[id]/route.ts` 的助理 `start` 和 `pause` 改为在完成原子状态写入、读取权威任务详情后调用 `scheduleTaskMaintenance()`，不再等待普通维护链返回。
+- 行为保持：`start` 仍同步执行优先级兜底、待就位准备、参与者校验、熨烫机槽位校验、任务/参与者/人员状态写入；`pause` 仍同步执行参与者校验、工时结算、任务聚合和人员状态校准。本批不调整管理直改、取消指定助理、移交等低频复杂路径。
+- 115 会话混合短测：`phase-e23-start-pause-maintenance-scheduled-mixed-115-3min`，80 摄影师、30 助理、5 管理，7119 请求、8 个业务 409，均为熨烫机暂无空位；无 HTTP 500、无 SQLite locked/busy、无 timeout。
+- 状态切换收益：对比第二十二批混合短测，`mixed-start` p50 从 14.3ms 降到 10.5ms，p95 从 130.3ms 降到 24.6ms；`mixed-pause` p95 从 126.3ms 降到 31.6ms；`mixed-resume` p95 从 108.2ms 降到 23.6ms。
+- 同步观察：`/api/workbench/sync` p50 9.2ms、p95 41.3ms、p99 144.7ms；delta 平均 10112.3 bytes、p95 16977 bytes。
+- 不变量审查通过：同助理多个执行/暂停根任务 0、重复 current primary 等价风险 0、熨烫 `using` 槽位超容量 0。
+- 验证通过：`git diff --check`、`npx tsc --noEmit --pretty false --incremental false`、`DATABASE_URL=file:./prisma/loadtest.db npm run build`、隔离库 seed、115 会话 3 分钟混合压测、raw 精查和 SQL 不变量审查。
+
 #### 阶段 E 第二十一批计划：创建任务前维护按需触发
 
 - [x] `POST /api/tasks` 在检查摄影师发布上限前，先用轻量 `findFirst` 判断该摄影师是否存在今天以前的 active 任务。
