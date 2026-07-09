@@ -7189,6 +7189,23 @@
 - 不变量审查通过：同助理多个执行/暂停根任务 0、重复 current primary 等价风险 0、熨烫 `using` 槽位超容量 0。
 - 验证通过：`git diff --check`、`npx tsc --noEmit --pretty false --incremental false`、`DATABASE_URL=file:./prisma/loadtest.db npm run build`、本地 `/photographer` 200、接口体积样本、115 会话 3 分钟混合压测、raw 精查和 SQL 不变量审查。
 
+#### 阶段 E 第二十五批计划：压测后对抗性审查工具化
+
+- [x] 新增 `scripts/loadtest/audit.ts`，读取指定 `loadtest/results/.../raw.jsonl`，自动分类 HTTP 5xx、timeout、SQLite locked/busy 与预期业务 409。
+- [x] 同一脚本连接当前 `DATABASE_URL`，自动检查同助理多个执行/暂停根任务、重复 current primary 等价风险、熨烫 `using` 槽位超容量。
+- [x] 新增 `npm run loadtest:audit -- --dir=...`，输出 `audit.json` / `audit.md`，遇到系统错误或状态不变量破坏时非零退出。
+- [x] 不改变业务规则、不改压测负载模型；本批只把人工对抗性审查固化为可复用验收门禁。
+- [x] 用最近 115 会话混合压测结果验证脚本，并记录审查结果。
+
+#### 阶段 E 第二十五批评审：压测后对抗性审查工具化
+
+- 改动范围：新增 `scripts/loadtest/audit.ts` 和 `npm run loadtest:audit`，不改业务规则、不改压测负载模型、不改变生产运行路径。
+- 审计口径：raw 日志统计总请求、非 2xx、HTTP 5xx、timeout、SQLite locked/busy/timeout，并按 scenario 和业务原因拆分 409；数据库侧检查同助理多个执行/暂停根任务、重复 current primary 等价风险、熨烫 `using` 槽位超容量。
+- 验证样本：`loadtest/results/20260709-221757-mixed`，80 摄影师、30 助理、5 管理，7098 请求。
+- 审计结果：PASS；非 2xx 共 3 个，均为 `mixed-start` 的预期熨烫机暂无空位 409；系统失败 0、HTTP 500/timeout/SQLite locked/busy 0。
+- 不变量结果：同助理多个执行/暂停根任务 0、重复 current primary 等价风险 0、熨烫 `using` 槽位超容量 0。
+- 验证通过：`npx tsc --noEmit --pretty false --incremental false`、`git diff --check`、`DATABASE_URL=file:./prisma/loadtest.db npm run loadtest:audit -- --dir=loadtest/results/20260709-221757-mixed`。
+
 #### 阶段 E 第二十三批计划：开始/暂停状态切换维护降载
 
 - [x] `src/app/api/tasks/[id]/route.ts`：助理 `start` 和 `pause` 在完成原子状态写入、加载权威任务详情后，不再等待 `runTaskMaintenance()`；改为复用 `scheduleTaskMaintenance()` 异步触发普通维护。
