@@ -211,6 +211,10 @@ function parseSince(value: string | null): Date | null {
   return Number.isFinite(parsed.getTime()) ? parsed : null;
 }
 
+function minuteBucket(date: Date): number {
+  return Math.floor(date.getTime() / 60_000);
+}
+
 function taskBuildingWhere(buildingId: number) {
   return {
     OR: [
@@ -1075,7 +1079,7 @@ export async function GET(request: NextRequest) {
       ? [{ updatedAt: "asc" as const }, { id: "asc" as const }]
       : taskOrderBy;
 
-    const [profiles, areaTaskIds, areaTasks, taskIds, tasks, notices, assistantStatusTasks, eatingOvertimeConfig] = await Promise.all([
+    const [profiles, areaTaskIds, areaTasks, taskIds, tasks, notices] = await Promise.all([
       prisma.profile.findMany({
         where: {
           role: { in: ["assistant", "assistant_leader"] },
@@ -1133,16 +1137,6 @@ export async function GET(request: NextRequest) {
             take: 5,
           })
         : Promise.resolve([]),
-      prisma.bookingTask.findMany({
-        where: assistantStatusTaskWhere,
-        include: QUEUE_TASK_INCLUDE,
-        orderBy: taskOrderBy,
-        take: AREA_TASK_LIMIT + 1,
-      }),
-      prisma.systemConfig.findUnique({
-        where: { key: EATING_OVERTIME_ALERT_CONFIG_KEY },
-        select: { value: true },
-      }),
     ]);
     const areaTaskIdsTruncated = areaTaskIds.length > AREA_TASK_LIMIT;
     const areaTasksTruncated = areaTasks.length > AREA_TASK_LIMIT;
@@ -1152,9 +1146,33 @@ export async function GET(request: NextRequest) {
     const visibleAreaTasks = areaTasks.slice(0, AREA_TASK_LIMIT);
     const visibleTaskIds = taskIds.slice(0, SCOPED_TASK_LIMIT);
     const visibleTasks = tasks.slice(0, SCOPED_TASK_LIMIT);
-    const assistantStatusTruncated = assistantStatusTasks.length > AREA_TASK_LIMIT;
+    const responseProfiles = since
+      ? profiles.filter((profile) => profile.updatedAt >= since)
+      : profiles;
+    const shouldSendAssistantStatus =
+      !since ||
+      minuteBucket(since) !== minuteBucket(syncStartedAt) ||
+      areaSummaryUpdatedTask != null ||
+      areaRelatedChanges.ids.length > 0 ||
+      areaRelatedChanges.truncated ||
+      responseProfiles.length > 0;
+    const [assistantStatusTasks, eatingOvertimeConfig] = shouldSendAssistantStatus
+      ? await Promise.all([
+          prisma.bookingTask.findMany({
+            where: assistantStatusTaskWhere,
+            include: QUEUE_TASK_INCLUDE,
+            orderBy: taskOrderBy,
+            take: AREA_TASK_LIMIT + 1,
+          }),
+          prisma.systemConfig.findUnique({
+            where: { key: EATING_OVERTIME_ALERT_CONFIG_KEY },
+            select: { value: true },
+          }),
+        ])
+      : [[], null] as const;
+    const assistantStatusTruncated = shouldSendAssistantStatus && assistantStatusTasks.length > AREA_TASK_LIMIT;
     let assistantStatus: ReturnType<typeof compactAssistantStatus> | null = null;
-    if (!assistantStatusTruncated) {
+    if (shouldSendAssistantStatus && !assistantStatusTruncated) {
       const assistantStatusTaskById = new Map(
         assistantStatusTasks.map((task) => [task.id, task]),
       );
@@ -1199,10 +1217,6 @@ export async function GET(request: NextRequest) {
       scopedRelatedChanges.truncated
     );
 
-    const responseProfiles = since
-      ? profiles.filter((profile) => profile.updatedAt >= since)
-      : profiles;
-
     return Response.json({
       serverTime: new Date().toISOString(),
       syncMode: since ? "delta" : "full",
@@ -1211,7 +1225,7 @@ export async function GET(request: NextRequest) {
       nextPollMs: 3000,
       maintenance,
       profiles: responseProfiles.map(serializeProfileForJson),
-      assistantStatus,
+      assistantStatus: shouldSendAssistantStatus ? assistantStatus : undefined,
       areaSummary: areaSummaryResult?.summary,
       tasks: visibleTasks.map(serializeTaskAssistantAvatars),
       taskIds: visibleTaskIds.map((task) => task.id),

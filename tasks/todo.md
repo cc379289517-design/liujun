@@ -7074,6 +7074,25 @@
 - 不变量审查通过：同助理多个执行/暂停根任务 0、重复 current primary 0、熨烫 `using` 槽位超容量 0。
 - 验证通过：`git diff --check`、`npx prisma validate`、`npx tsc --noEmit --pretty false --incremental false`、`DATABASE_URL=file:./prisma/loadtest.db npm run build`。
 
+#### 阶段 E 第十六批计划：assistantStatus delta 节流
+
+- [x] `/api/workbench/sync` 首轮 full 必带 `assistantStatus`；delta 只有在区域任务/关联记录变化、助理 profile 有补丁、跨分钟校准或截断时才下发。
+- [x] 纯 3 秒无变化 delta 不再查询和返回整栋助理状态，前端保留上一份 Dock/地图状态，减少固定 JSON 和解析成本。
+- [x] 前端 `refreshAssistants()` 在同步快照没有 `assistantStatus` 时只合并 profile 补丁，不用公共队列任务回退重算整栋助理状态，避免 delta patch 把 Dock 裁小。
+- [x] 不改变派单、状态命令、地图展示口径、吃饭/超时规则；跨分钟仍校准计时类状态。
+- [x] 验证 TypeScript、生产 build、接口 full/delta 样本、smoke 压测和状态不变量。
+
+#### 阶段 E 第十六批评审：assistantStatus delta 节流
+
+- 改动范围：`/api/workbench/sync` 在无变化 3 秒 delta 中不再查询和返回整栋 `assistantStatus`；首轮 full、区域任务/关联记录变化、profile 补丁、跨分钟校准和截断场景仍返回状态。
+- 前端保持：同步包缺少 `assistantStatus` 时，`refreshAssistants()` 只合并 profile 补丁并保留上一份 Dock/地图状态，不用 delta 的局部任务补丁重算整栋助理状态。
+- 样本验证：`full -> delta -> delta` 中第二个无变化 delta 为 1382 bytes，`assistantStatus` 不下发；构造跨分钟前 token 的 delta 会重新带回 6 行 `assistantStatus`，保留分钟级计时校准。
+- Smoke：`phase-e16-assistant-status-gated-smoke-60s`，9 会话 60 秒，255 请求，0 错误；`/api/workbench/sync` p50 16.8ms、p95 28.4ms；delta 平均 3296.8 bytes；231 个 delta 中 207 个不带 `assistantStatus`。
+- 115 会话只读短测：`phase-e16-assistant-status-gated-readonly-115-3min`，80 摄影师、30 助理、5 管理，6673 请求，0 错误；`/api/workbench/sync` p50 8.6ms、p95 19.4ms、p99 71.7ms；full 平均 45202.7 bytes，delta 平均 2171.4 bytes、p95 5194 bytes。
+- 异常审查：raw 6709 行精确解析，未发现 HTTP 500、SQLite locked/busy 或 timeout；6488 个 delta 中 6157 个不带 `assistantStatus`。
+- 不变量审查通过：同助理多个执行/暂停根任务 0、重复 current primary 0、熨烫 `using` 槽位超容量 0。
+- 验证通过：`git diff --check`、`npx prisma validate`、`npx tsc --noEmit --pretty false --incremental false`、`DATABASE_URL=file:./prisma/loadtest.db npm run build`。
+
 ### 阶段 A 评审
 
 - 已完成压测工具：新增 `scripts/loadtest/seed.ts`、`run.ts`、`report.ts`、`common.ts`，不引入 k6/artillery 等新依赖；使用 Node 内置 `fetch`、现有 `tsx` 和 Prisma/SQLite。

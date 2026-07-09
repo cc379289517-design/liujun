@@ -2083,6 +2083,9 @@ export default function PhotographerPage() {
           return fresh ? { ...prev, ...fresh } : prev;
         });
       }
+      if (snapshot && !assistantStatus) {
+        return allTasks;
+      }
       if (assistantStatus) {
         const statusById = new Map(
           assistantStatus
