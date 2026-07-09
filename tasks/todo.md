@@ -6522,7 +6522,7 @@
 - [x] 新增 `workbenchTaskSources` 纯函数模块，先抽出任务数组的 update/remove/upsert/replace-or-remove 变换，不直接重做大 reducer。
 - [x] `page.tsx` 的 `updateLocalTaskSources()`、`removeLocalTaskSources()`、`upsertLocalTaskSource()`、`replaceVisibleTaskForProfile()`、乐观开始/完成合并改用同一组列表变换函数，减少手写数组更新分叉。
 - [x] 保持现有 `taskListRaw/currentRawTask/pausedRawTask/pendingRawTask/deferredWaitingRawTask/publicQueueRaw` 状态结构和 UI 行为不变，为下一步 `tasksById` reducer 化铺路。
-- [x] 补记 Mac mini 同步探测：`192.168.31.171` 仍不可达，ping 丢包、SSH 22 超时、3000 `/api/config` 超时；本地优化继续推进，等待网络恢复后再同步。
+- [x] 补记 Mac mini 同步探测：阶段开始时 `192.168.31.171` 不可达；提交后恢复可达，已完成同步部署并健康检查通过。
 - [x] 验证 `tsc`、`git diff --check`、生产构建和本地轻量接口；本批只做前端状态源等价收口，不更新长期业务文档。
 
 #### 阶段 D 第十二批评审：任务源列表纯函数收口
@@ -6533,7 +6533,14 @@
 - 已保持：现有任务源状态结构、列表展示、公共队列、移交隐藏 TTL、乐观补丁 TTL 和业务状态命令均不变；本批不更新长期业务规则文档。
 - 验证通过：`npx tsc --noEmit --pretty false --incremental false`、`git diff --check -- src/app/photographer/page.tsx src/app/photographer/workbenchTaskSources.ts tasks/todo.md tasks/lessons.md`、`DATABASE_URL=file:./prisma/loadtest.db npm run build`、本地隔离服务 `http://localhost:3100/photographer` 200、`/api/config` 200、`/api/workbench/sync?role=photographer&buildingId=1&full=1` 200。
 - 验证备注：本地 dev 首启再次遇到 `.next` Turbopack 缓存被 macOS `._*` 污染，按既有安全脚本清理 880 个伴生文件和 Next 缓存后通过；`/api/workbench/sync` 维护日志只影响隔离 `loadtest.db`。
+- 部署记录：已提交并推送 `a6e08c1 perf: consolidate workbench task source transforms`；Mac mini `/Users/lj/liujun-portable/liujun` 已快进到 `a6e08c1`，生产 SQLite 已恢复并备份，远端 `npm ci`、`npx prisma db push`、`npm run build` 通过，`com.spad.local` 已重载，`http://192.168.31.171:3000/api/config` 返回 200。
 - 待后续：进入 `tasksById` reducer 第一批时，应复用本批纯函数语义，逐步把多组数组状态并到一个本地任务源，再外派生当前/暂停/pending/公共队列。
+
+#### 老王追加：Mac mini 发布可靠性修复
+
+- [x] 修复 `scripts/release-to-mini.sh` 远端保护库流程：Mac mini SQLite 临时保护后设置退出 trap，若 pull/stash/build 任一步失败会自动恢复 `prisma/dev.db`。
+- [x] 修复远端 `REMOTE_DIRTY_ACTION=stash`：不再给 `git stash push -u` 传入容易触发 ignored pathspec 报错的 `database-backups/logs` exclude 参数。
+- [x] 验证：`bash -n scripts/release-to-mini.sh`、发布脚本再次完整跑通；Mac mini 当前 `HEAD=a6e08c1`，工作区仅保留生产 `prisma/dev.db` 改动。
 
 ### 阶段 E：验收与对抗审查
 

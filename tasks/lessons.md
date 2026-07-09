@@ -129,3 +129,5 @@
 - optimistic patch 和 hidden TTL 属于同一套闪回保护，必须集中在一个 hook/store 里同时清理过期项；分散在页面里会让权威快照、移交隐藏和乐观开始/完成互相绕开。
 - 抽任务源列表纯函数时要保留原有列表顺序语义：有的路径是原位合并避免状态卡闪动，有的路径是先删再追加匹配临时任务替换；统一 helper 必须显式表达这些差异。
 - 全量快照和乐观补丁重新解析当前/暂停/pending 任务后，要同步更新对应 ref；只等 React state 提交会让同一事件循环内的弱网连续操作读到旧任务源。
+- Mac mini 发布脚本只要临时保护过生产 SQLite，就必须用 `trap` 兜底恢复；否则远端 stash、pull 或 build 中途失败时，可能把 `prisma/dev.db` 停留在仓库版本而不是生产库。
+- `git stash push -u` 不要混用被忽略目录的 exclude pathspec 来处理远端脏工作区；被 `.gitignore` 忽略的 `database-backups/logs` 可能让 stash 直接失败，生产部署更稳的做法是先保护数据库，再 stash 非忽略变更。

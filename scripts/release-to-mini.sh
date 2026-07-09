@@ -118,10 +118,19 @@ command -v npm >/dev/null 2>&1 || {
 }
 
 PRESERVED_DB=""
+PRESERVED_DB_RESTORED=0
+restore_preserved_db() {
+  if [ "${PRESERVED_DB_RESTORED}" != "1" ] && [ -n "${PRESERVED_DB}" ] && [ -f "${PRESERVED_DB}" ]; then
+    cp "${PRESERVED_DB}" "prisma/dev.db"
+    PRESERVED_DB_RESTORED=1
+    echo "已恢复 Mac mini 原 SQLite 数据库。"
+  fi
+}
 if [ "${PRESERVE_REMOTE_DB}" = "1" ] && [ -f "prisma/dev.db" ]; then
   PRESERVED_DB="/tmp/spad-dev-db-preserve-$(date '+%Y%m%d-%H%M%S').db"
   cp "prisma/dev.db" "${PRESERVED_DB}"
   echo "已临时保护 Mac mini SQLite：${PRESERVED_DB}"
+  trap 'restore_preserved_db' EXIT
 fi
 
 if [ -n "$(git status --porcelain -- prisma/dev.db)" ]; then
@@ -135,7 +144,7 @@ fi
 DIRTY_NON_DB="$(git status --porcelain -- . ':(exclude)prisma/dev.db' ':(exclude)database-backups' ':(exclude)logs' || true)"
 if [ -n "${DIRTY_NON_DB}" ]; then
   if [ "${REMOTE_DIRTY_ACTION}" = "stash" ]; then
-    git stash push -u -m "release-to-mini pre-deploy $(date '+%Y-%m-%d %H:%M:%S')" -- . ':(exclude)prisma/dev.db' ':(exclude)database-backups' ':(exclude)logs'
+    git stash push -u -m "release-to-mini pre-deploy $(date '+%Y-%m-%d %H:%M:%S')"
   else
     echo "Mac mini 工作区存在非数据库本地改动，停止部署：" >&2
     echo "${DIRTY_NON_DB}" >&2
@@ -148,10 +157,8 @@ git fetch "${REMOTE}" "${BRANCH}"
 git checkout "${BRANCH}"
 git pull --ff-only "${REMOTE}" "${BRANCH}"
 
-if [ -n "${PRESERVED_DB}" ] && [ -f "${PRESERVED_DB}" ]; then
-  cp "${PRESERVED_DB}" "prisma/dev.db"
-  echo "已恢复 Mac mini 原 SQLite 数据库。"
-fi
+restore_preserved_db
+trap - EXIT
 
 ./scripts/backup-sqlite.sh
 npm install
