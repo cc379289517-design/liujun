@@ -46,6 +46,25 @@ function forbidden(error: string, code = "TASK_ACTION_FORBIDDEN") {
   return Response.json({ error, code }, { status: 403 });
 }
 
+const TASK_ACTION_BUSINESS_ERROR_MESSAGES = [
+  "熨烫机",
+  "当前助理",
+  "该熨烫任务",
+  "该任务已",
+  "多人协作任务",
+  "只有助理",
+  "移交",
+  "目标助理",
+  "不能使用交换",
+  "不能接手",
+  "更高优先级",
+] as const;
+
+function isTaskActionBusinessError(error: unknown): error is Error {
+  return error instanceof Error &&
+    TASK_ACTION_BUSINESS_ERROR_MESSAGES.some((message) => error.message.includes(message));
+}
+
 async function actorIsActiveTaskParticipant(
   taskId: string,
   actorId: string,
@@ -662,23 +681,10 @@ export async function PATCH(request: NextRequest, { params }: RouteContext) {
         );
     }
   } catch (error) {
-    console.error("[PATCH /api/tasks/[id]]", error);
-    const businessErrorMessages = [
-      "熨烫机",
-      "当前助理",
-      "该熨烫任务",
-      "该任务已",
-      "多人协作任务",
-      "只有助理",
-      "移交",
-      "目标助理",
-      "不能使用交换",
-      "不能接手",
-      "更高优先级",
-    ];
-    const isBusinessError =
-      error instanceof Error &&
-      businessErrorMessages.some((message) => error.message.includes(message));
+    const isBusinessError = isTaskActionBusinessError(error);
+    if (!isBusinessError) {
+      console.error("[PATCH /api/tasks/[id]]", error);
+    }
     const isDev = process.env.NODE_ENV === "development";
     let details: string | undefined;
     if (isDev) {
@@ -690,7 +696,7 @@ export async function PATCH(request: NextRequest, { params }: RouteContext) {
     }
     return Response.json(
       {
-        error: isBusinessError && error instanceof Error
+        error: isBusinessError
           ? error.message
           : "Failed to update task",
         ...(details ? { details } : {}),

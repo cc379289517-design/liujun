@@ -6842,6 +6842,19 @@
 - 不变量审查通过：短测后无重复 current primary、无同助理多个执行/暂停根任务、熨烫 `using` 未超机器容量；raw 日志未见 500、timeout、SQLite locked/busy。
 - 结论：定时 full 从 60 秒降到 5 分钟后，只读 p95 bytes 已稳定回落到 delta 级；混合场景 p95 bytes 也从 full 大包主导变成 delta 变化量主导。后续主要瓶颈转向混合写期间的 SQLite 读排队、管理端 `/api/tasks` 列表体积和业务 409 日志噪音。
 
+#### 阶段 E 第三批计划：降低业务 409 日志噪音
+
+- [x] 将 `PATCH /api/tasks/[id]` 中预期业务拒绝（高优先级兜底、已有执行/暂停任务、熨烫机槽位、移交资格等）识别为业务错误。
+- [x] 业务错误仍按 409 返回原提示给前端，但不再 `console.error` 打错误栈；真正系统异常仍打印日志并返回 500。
+- [x] 保持状态命令、优先级、熨烫机槽位和移交规则不变，只减少高压混合写场景下的无意义日志 IO 和误报噪音。
+- [x] 跑 `git diff --check`、Prisma validate、TypeScript、生产 build。
+
+#### 阶段 E 第三批评审：降低业务 409 日志噪音
+
+- 改动范围：`src/app/api/tasks/[id]/route.ts` 新增 `isTaskActionBusinessError()`，把原 catch 内联业务错误关键词收口成常量 helper。
+- 行为保持：业务 409 的响应状态和错误文案不变；非业务异常继续 `console.error("[PATCH /api/tasks/[id]]", error)`，便于追查真正系统问题。
+- 预期收益：80 摄影师、30 助理、5 管理混合压测中大量“当前助理已有执行中或暂停中的任务”“有更高优先级任务可开始”等正确拦截不再污染错误日志，降低日志 IO、控制台噪音和误报排查成本。
+
 ### 阶段 A 评审
 
 - 已完成压测工具：新增 `scripts/loadtest/seed.ts`、`run.ts`、`report.ts`、`common.ts`，不引入 k6/artillery 等新依赖；使用 Node 内置 `fetch`、现有 `tsx` 和 Prisma/SQLite。
