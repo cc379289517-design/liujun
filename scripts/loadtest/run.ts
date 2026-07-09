@@ -54,6 +54,8 @@ type TaskLike = {
   status?: "waiting" | "executing" | "paused" | "completed";
   ironingStage?: "none" | "waiting_machine" | "notified" | "using";
   parentTaskId?: string | null;
+  isLocked?: boolean | null;
+  lockReason?: string | null;
   roomNumber?: string;
   category?: { id: number; name: string; estDuration?: number; maxDuration?: number };
   collaborators?: Array<{ assistantId?: string; status?: string; role?: string }>;
@@ -90,6 +92,7 @@ const fullSyncIntervalMs = Math.max(10_000, numberArg(args, "full-sync-interval-
 const allowWrites = booleanArg(args, "allow-writes", false);
 const allowRemote = booleanArg(args, "allow-remote", false);
 const serverPid = Math.floor(numberArg(args, "server-pid", Number(process.env.SERVER_PID ?? "0"))) || undefined;
+const PHOTOGRAPHER_LIMIT_QUEUE_LOCK_REASON = "photographer_active_task_limit_queue";
 
 function isWriteMode(currentMode: LoadtestMode): boolean {
   return currentMode === "mixed" || currentMode === "sweep";
@@ -281,6 +284,15 @@ function isIroningTask(task: TaskLike): boolean {
   return task.category?.name?.includes("熨") === true;
 }
 
+function hasPhotographerLimitQueuedTask(tasks: TaskLike[], photographerId: string): boolean {
+  return tasks.some((task) =>
+    task.photographerId === photographerId &&
+    task.status === "waiting" &&
+    task.isLocked === true &&
+    task.lockReason === PHOTOGRAPHER_LIMIT_QUEUE_LOCK_REASON
+  );
+}
+
 function taskStatusForAssistant(task: TaskLike, assistantId: string): TaskLike["status"] | string | undefined {
   const participant = (task.collaborators ?? []).find((collaborator) =>
     collaborator.assistantId === assistantId &&
@@ -378,6 +390,7 @@ async function maybeCreateTask(
   const ticksPerMinute = 60_000 / visiblePollMs;
   const probability = writeRatePerMin / Math.max(1, photographerCount) / Math.max(1, ticksPerMinute);
   if (random() > probability) return;
+  if (hasPhotographerLimitQueuedTask(tasks, persona.profile.id)) return;
 
   const building = buildings.find((item) => item.id === persona.profile.buildingId) ?? pick(buildings, random);
   const rooms = building.rooms ?? [];

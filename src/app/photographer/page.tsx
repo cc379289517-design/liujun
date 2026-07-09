@@ -150,6 +150,7 @@ import {
 import {
   PHOTOGRAPHER_MAX_ACTIVE_TASKS_CONFIG_KEY,
   isPhotographerLimitQueuedTask,
+  photographerLimitQueueFullPrompt,
   photographerLimitQueuePrompt,
   parsePhotographerMaxActiveTasks,
 } from "@/lib/photographerTaskLimit";
@@ -1329,6 +1330,21 @@ export default function PhotographerPage() {
       setTaskCreateError((current) => current === message ? null : current);
     }, 3500);
   }, []);
+
+  const hasPhotographerLimitQueuedTask = useCallback(() => {
+    if (!profile || isAssistantRole(profile.role)) return false;
+    return taskListRawRef.current.some((task) =>
+      task.photographerId === profile.id &&
+      task.status === "waiting" &&
+      isPhotographerLimitQueuedTask(task)
+    );
+  }, [profile]);
+
+  const guardPhotographerLimitQueueFull = useCallback(() => {
+    if (!hasPhotographerLimitQueuedTask()) return false;
+    showTaskCreateError(photographerLimitQueueFullPrompt(photographerMaxActiveTasks), true);
+    return true;
+  }, [hasPhotographerLimitQueuedTask, photographerMaxActiveTasks, showTaskCreateError]);
 
   useEffect(() => {
     const urls = completionRegistrationFiles.map((file) => URL.createObjectURL(file));
@@ -4008,6 +4024,7 @@ export default function PhotographerPage() {
   const handleBook = useCallback(
     (catName: string, dur: BuiltCategory["durations"][number], e: React.MouseEvent) => {
       if (genie || !profile) return;
+      if (guardPhotographerLimitQueueFull()) return;
       if (selectedQuickBookAssistant && !selectedQuickBookAssistantCanSubmit) {
         showTaskCreateError("指定助理当前暂不可接单，请重新选择");
         setQuickBookAssistantPickerOpen(true);
@@ -4033,7 +4050,7 @@ export default function PhotographerPage() {
         pendingActionKey: actionKey,
       });
     },
-    [beginWorkbenchPendingAction, genie, profile, selectedQuickBookAssistant, selectedQuickBookAssistantCanSubmit, showTaskCreateError],
+    [beginWorkbenchPendingAction, genie, guardPhotographerLimitQueueFull, profile, selectedQuickBookAssistant, selectedQuickBookAssistantCanSubmit, showTaskCreateError],
   );
 
   const clampTaskListScroll = useCallback((next: number) => {
@@ -4066,6 +4083,11 @@ export default function PhotographerPage() {
         if (!room) {
           setGenie(null);
           showTaskCreateError("当前楼座没有可用场地，无法创建任务");
+          endWorkbenchPendingAction(genie.pendingActionKey);
+          return;
+        }
+        if (guardPhotographerLimitQueueFull()) {
+          setGenie(null);
           endWorkbenchPendingAction(genie.pendingActionKey);
           return;
         }
@@ -4148,7 +4170,7 @@ export default function PhotographerPage() {
       }, 550);
       return () => clearTimeout(timer);
     }
-  }, [endWorkbenchPendingAction, genie, photographerMaxActiveTasks, profile, profileCurrentWorkbenchRoom, refreshAssistants, removeLocalTaskSources, showTaskCreateError, taskPublishBuilding, taskPublishBuildingId, upsertLocalTaskSource]);
+  }, [endWorkbenchPendingAction, genie, guardPhotographerLimitQueueFull, photographerMaxActiveTasks, profile, profileCurrentWorkbenchRoom, refreshAssistants, removeLocalTaskSources, showTaskCreateError, taskPublishBuilding, taskPublishBuildingId, upsertLocalTaskSource]);
 
   const notePopupStyle = notePopupPosition(notePopupAnchor);
   const notePopupTaskIsExecuting = notePopupTaskId ? noteTaskIsExecuting(notePopupTaskId) : false;
@@ -5621,6 +5643,7 @@ export default function PhotographerPage() {
     dur: BuiltCategory["durations"][number],
   ) => {
     if (!profile) return;
+    if (guardPhotographerLimitQueueFull()) return;
     if (selectedQuickBookAssistant && !selectedQuickBookAssistantCanSubmit) {
       showTaskCreateError("指定助理当前暂不可接单，请重新选择");
       setMobileQuickBookAssistantPickerOpen(true);
@@ -5707,7 +5730,7 @@ export default function PhotographerPage() {
     } finally {
       endWorkbenchPendingAction(actionKey);
     }
-  }, [beginWorkbenchPendingAction, endWorkbenchPendingAction, photographerMaxActiveTasks, profile, profileCurrentWorkbenchRoom, refreshAssistants, removeLocalTaskSources, selectedQuickBookAssistant, selectedQuickBookAssistantCanSubmit, showTaskCreateError, taskPublishBuilding, taskPublishBuildingId, upsertLocalTaskSource]);
+  }, [beginWorkbenchPendingAction, endWorkbenchPendingAction, guardPhotographerLimitQueueFull, photographerMaxActiveTasks, profile, profileCurrentWorkbenchRoom, refreshAssistants, removeLocalTaskSources, selectedQuickBookAssistant, selectedQuickBookAssistantCanSubmit, showTaskCreateError, taskPublishBuilding, taskPublishBuildingId, upsertLocalTaskSource]);
 
   const mobileTaskStatusForProfile = useCallback((task: TaskFromAPI) => (
     deriveMobileTaskStatusForProfile(task, { isAssistantProfile, profileId: profile?.id })

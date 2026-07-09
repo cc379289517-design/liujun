@@ -6920,6 +6920,22 @@
 - 不变量审查通过：同助理多个执行/暂停根任务 0、重复 current primary 0、熨烫 `using` 槽位超容量 0；raw 日志未见 500、timeout、SQLite locked/busy。
 - 结论：本批把压测中最重的无效 start 409 去掉，同时补上后端状态正确性兜底；剩余 409 主要是摄影师发布上限和高优先级规则，属于业务保护。下一步可继续优化摄影师端发布按钮/压测创建节流，减少已满队列时的重复发单请求。
 
+#### 阶段 E 第八批计划：摄影师发布上限本地预检
+
+- [x] 摄影师工作台桌面快捷发单在本地已存在 `photographer_active_task_limit_queue` 个人队列任务时，直接提示队列已满，不再插入临时任务或发送 POST。
+- [x] 手机快捷发单复用同一预检，弱网/轮询刚更新时避免重复提交相同的发布上限请求。
+- [x] 压测脚本在虚拟摄影师缓存中已有发布上限个人队列任务时跳过 `mixed-create`，让混合压测更贴近真实 UI 行为。
+- [x] 验证 TypeScript、生产 build、短混合压测；重点观察 `mixed-create` 409 是否明显下降，同时保持后端 `PHOTOGRAPHER_LIMIT_QUEUE_FULL` 兜底不变。
+
+#### 阶段 E 第八批评审：摄影师发布上限本地预检
+
+- 改动范围：`src/app/photographer/page.tsx` 新增摄影师个人队列本地预检，桌面 genie 发单和手机快捷发单在已有 `photographer_active_task_limit_queue` 时直接提示队列已满，不再插入临时任务或发送 POST；`scripts/loadtest/run.ts` 同步让虚拟摄影师在缓存已有个人队列任务时跳过 `mixed-create`。
+- 行为保持：后端 `POST /api/tasks` 的发布上限和 `PHOTOGRAPHER_LIMIT_QUEUE_FULL` 兜底完全保留；本批只是提前减少真实 UI 和压测里的无效重复写请求，不改变摄影师发布上限业务口径。
+- 短混合压测：`photographer-create-guard-mixed-115-3min`，80 摄影师、30 助理、5 管理，7137 请求；总 409 从上一轮 119 降到 23，`mixed-create` 409 从 101 降到 0；剩余 23 次全部为 `mixed-start` 业务保护（17 次高优先级兜底、6 次熨烫机暂时无空位）。
+- 同步表现：`/api/workbench/sync` p50 10.2ms、p95 110ms、p99 216.3ms、max 539.3ms；delta 6476 次共 65.02MB、平均 10528.2 bytes、p95 16591 bytes。
+- 不变量审查通过：同助理多个执行/暂停根任务 0、重复 current primary 0、熨烫 `using` 槽位超容量 0；raw 日志未见 500、timeout、SQLite locked/busy。
+- 结论：摄影师端重复发单噪音已基本消除，混合写请求更贴近真实有效操作。下一步剩余主要是高优先级开始选择和熨烫机槽位 start 的少量 409，以及工作台前端局部渲染/store 继续拆细。
+
 ### 阶段 A 评审
 
 - 已完成压测工具：新增 `scripts/loadtest/seed.ts`、`run.ts`、`report.ts`、`common.ts`，不引入 k6/artillery 等新依赖；使用 Node 内置 `fetch`、现有 `tsx` 和 Prisma/SQLite。
