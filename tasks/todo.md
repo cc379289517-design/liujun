@@ -6365,6 +6365,22 @@
 - 验证通过：`npx tsc --noEmit --pretty false --incremental false`、`git diff --check -- src/app/photographer/page.tsx src/app/photographer/MobileTaskCard.tsx src/app/photographer/MobileQuickBookingPanel.tsx tasks/todo.md`、`DATABASE_URL=file:./prisma/loadtest.db npm run build`。
 - 待后续：继续推进本地 reducer/store，把 `taskListRaw/currentRawTask/pausedRawTask/tasks/publicQueueRaw` 的多组 setState 收口，减少弱网轮询和操作响应乱序导致的闪回。
 
+#### 阶段 D 第三批计划：任务源 refs 收口与闪回保护
+
+- [x] 收敛权威任务合并：`mergeAuthoritativeTaskForProfile()` 使用 `taskListRawRef/assistantRawTasksRef` 作为最新源，避免异步请求结束时读取旧闭包数组。
+- [x] 收敛乐观状态合并：`applyOptimisticAssistantTaskStatus()` 使用最新 refs 生成下一份任务列表，并把乐观任务写入 `recentTaskPatchesRef`，让短时间旧轮询快照让位。
+- [x] 抽出 recent patch TTL 常量，统一清理窗口；不改变任务状态业务规则，只减少前端闪回和重复派生。
+- [x] 验证 `tsc`、`git diff --check`、build；本批重点检查开始/完成后当前任务卡和列表状态不因旧轮询回退。
+
+#### 阶段 D 第三批评审：任务源 refs 收口与闪回保护
+
+- 已完成：`RECENT_TASK_PATCH_TTL_MS` 统一 recent patch 保护窗口，避免散落魔法数。
+- 已完成：`mergeAuthoritativeTaskForProfile()` 从 `taskListRawRef/assistantRawTasksRef` 读取最新任务源，减少异步操作结束时用旧闭包数组合并造成的闪回。
+- 已完成：`applyOptimisticAssistantTaskStatus()` 从 refs 生成下一份任务列表，并把乐观任务写入 `recentTaskPatchesRef`，让短时间旧轮询快照不能覆盖刚操作的开始/完成状态。
+- 业务边界：本批只调整前端本地任务源合并方式，不改变后端状态命令、API 参数、优先级、熨烫机、移交或取消规则。
+- 验证通过：`npx tsc --noEmit --pretty false --incremental false`、`git diff --check -- src/app/photographer/page.tsx tasks/todo.md`、`DATABASE_URL=file:./prisma/loadtest.db npm run build`。
+- 待后续：继续把更多散落的单任务局部更新收口到统一 helper/reducer，尤其是备注、反馈、提权、移交协作后的多组 setState。
+
 ### 阶段 E：验收与对抗审查
 
 - [ ] 基线压测完成后，先根据报告排序瓶颈，再决定是否进入 B/C/D 的第一批代码改动。

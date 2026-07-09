@@ -161,6 +161,7 @@ const COMPLETION_REGISTRATION_REASON_OPTIONS = ["超时过长", "耗时异常", 
 type CompletionRegistrationReasonType = typeof COMPLETION_REGISTRATION_REASON_OPTIONS[number];
 const PAGE_NOW_REFRESH_MS = 60_000;
 const LIVE_TIMER_REFRESH_MS = 1_000;
+const RECENT_TASK_PATCH_TTL_MS = 8_000;
 type WorkbenchPendingAction = "start" | "complete" | "pause" | "resume" | "cancel" | "create-mobile";
 const DISPLAY_TASK_TYPE_ORDER = ["手持", "服装穿戴", "手工DIY", "熨烫", EXTERNAL_MODEL_ASSIST_DISPLAY_NAME, "其他"];
 const DISPLAY_TASK_TYPE_SOLID_BG: Record<string, string> = {
@@ -1313,7 +1314,7 @@ export default function PhotographerPage() {
     const patchedTaskData = taskData.map((task) => {
       const patch = recentTaskPatchesRef.current.get(task.id);
       if (!patch) return task;
-      if (nowMs - patch.appliedAt > 5_000) {
+      if (nowMs - patch.appliedAt > RECENT_TASK_PATCH_TTL_MS) {
         recentTaskPatchesRef.current.delete(task.id);
         return task;
       }
@@ -1321,7 +1322,7 @@ export default function PhotographerPage() {
       return { ...task, ...patch.task };
     });
     for (const [taskId, patch] of recentTaskPatchesRef.current) {
-      if (nowMs - patch.appliedAt > 5_000) {
+      if (nowMs - patch.appliedAt > RECENT_TASK_PATCH_TTL_MS) {
         recentTaskPatchesRef.current.delete(taskId);
         continue;
       }
@@ -1360,13 +1361,13 @@ export default function PhotographerPage() {
     if (!targetProfile) return;
     recentTaskPatchesRef.current.set(updatedTask.id, { task: updatedTask, appliedAt: Date.now() });
     const byId = new Map<string, TaskFromAPI>();
-    for (const task of [...taskListRaw, ...assistantRawTasks]) {
+    for (const task of [...taskListRawRef.current, ...assistantRawTasksRef.current]) {
       byId.set(task.id, task);
     }
     const existing = byId.get(updatedTask.id);
     byId.set(updatedTask.id, existing ? { ...existing, ...updatedTask } : updatedTask);
     applyTaskDataForProfile([...byId.values()], targetProfile, activeBuildingId ?? targetProfile.buildingId);
-  }, [activeBuildingId, applyTaskDataForProfile, assistantRawTasks, profile, taskListRaw]);
+  }, [activeBuildingId, applyTaskDataForProfile, profile]);
 
   const applyOptimisticAssistantTaskStatus = useCallback((task: TaskFromAPI, action: "start" | "complete") => {
     if (!profile || !isAssistantRole(profile.role)) return;
@@ -1400,8 +1401,13 @@ export default function PhotographerPage() {
         ? list.map((item) => item.id === nextTask.id ? { ...item, ...nextTask } : item)
         : [nextTask, ...list];
     };
-    const nextTaskList = mergeTask(taskListRaw);
-    const nextAssistantTasks = mergeTask(assistantRawTasks.length > 0 ? assistantRawTasks : taskListRaw);
+    recentTaskPatchesRef.current.set(nextTask.id, { task: nextTask, appliedAt: Date.now() });
+    const currentTaskList = taskListRawRef.current;
+    const currentAssistantTasks = assistantRawTasksRef.current.length > 0
+      ? assistantRawTasksRef.current
+      : currentTaskList;
+    const nextTaskList = mergeTask(currentTaskList);
+    const nextAssistantTasks = mergeTask(currentAssistantTasks);
     taskListRawRef.current = nextTaskList;
     assistantRawTasksRef.current = nextAssistantTasks;
     setTaskListRaw(nextTaskList);
@@ -1412,7 +1418,7 @@ export default function PhotographerPage() {
     setPausedRawTask(paused);
     setPendingRawTask(pending);
     setDeferredWaitingRawTask(deferredWaiting);
-  }, [assistantRawTasks, profile, taskListRaw]);
+  }, [profile]);
 
   const applyWorkbenchProfile = useCallback((selected: typeof allProfiles[0]) => {
     originalRoomRef.current = selected.currentRoom;
