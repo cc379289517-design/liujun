@@ -6500,6 +6500,23 @@
 - 验证备注：本地 dev 首启再次遇到 `.next` Turbopack 缓存被 macOS `._*` 污染，按既有安全脚本清理 `.next` 缓存后通过，不涉及数据库。
 - 待后续：继续把任务源 helpers 抽成 `tasksById + optimisticPatches` reducer，逐步减少 `taskListRaw/currentRawTask/tasks/publicQueueRaw` 多组状态并行维护。
 
+#### 阶段 D 第十一批计划：optimisticPatches 本地 store 第一批
+
+- [x] 新增 `useWorkbenchTaskOptimism`：集中管理 recent task patch 和按身份生效的 hidden task TTL，保留同步 ref 读写能力。
+- [x] 将 `applyTaskDataForProfile()` 里的旧轮询闪回保护逻辑移入 hook，页面只负责接收已校准任务数据并派生当前身份视图。
+- [x] 将 `mergeAuthoritativeTaskForProfile()`、`replaceVisibleTaskForProfile()`、`applyOptimisticAssistantTaskStatus()` 的 patch/hide 写入改走 hook 方法。
+- [x] 验证 `tsc`、`git diff --check`、生产构建和本地轻量接口；本批只做前端 optimistic patch 边界拆分，不更新长期业务文档。
+
+#### 阶段 D 第十一批评审：optimisticPatches 本地 store 第一批
+
+- 已完成：新增 `src/app/photographer/useWorkbenchTaskOptimism.ts`，集中管理 recent task patch、按身份生效的 hidden task TTL、过期清理和旧轮询闪回保护。
+- 已完成：`applyTaskDataForProfile()` 不再直接读写 patch/hidden Map，只接收 hook 返回的已校准任务数据，再派生当前身份可见任务源。
+- 已完成：`mergeAuthoritativeTaskForProfile()`、`replaceVisibleTaskForProfile()`、`applyOptimisticAssistantTaskStatus()` 改走 `rememberTaskPatch / forgetTaskPatch / hideTaskForProfile`，保持原 TTL 和按身份隐藏口径。
+- 业务边界：本批只做前端 optimisticPatches 状态管理边界拆分，不改变创建任务、开始/完成、移交/互换、提权审批、优先级、熨烫机或数据库结构；长期业务文档无需新增规则。
+- 验证通过：`npx tsc --noEmit --pretty false --incremental false`、`git diff --check -- src/app/photographer/page.tsx src/app/photographer/useWorkbenchTaskOptimism.ts tasks/todo.md tasks/lessons.md`、`DATABASE_URL=file:./prisma/loadtest.db npm run build`、本地隔离服务 `http://localhost:3100/photographer` 200、`/api/config` 200、`/api/workbench/sync?role=photographer&buildingId=1&full=1` 200。
+- 验证备注：本地 dev 前先按既有安全脚本清理 `.next` 中 macOS `._*` 伴生文件和 Turbopack 缓存，不涉及数据库。
+- 待后续：继续把任务源列表更新 helpers 收敛到 `tasksById` reducer，减少多组数组状态并行更新。
+
 ### 阶段 E：验收与对抗审查
 
 - [ ] 基线压测完成后，先根据报告排序瓶颈，再决定是否进入 B/C/D 的第一批代码改动。
