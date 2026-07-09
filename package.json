@@ -9,6 +9,7 @@
     "start": "next start",
     "lint": "eslint",
     "clean:macos": "bash scripts/clean-macos-artifacts.sh",
+    "prod:check": "tsx scripts/production-check.ts",
     "loadtest:seed": "DATABASE_URL=file:./prisma/loadtest.db prisma db push && DATABASE_URL=file:./prisma/loadtest.db tsx scripts/loadtest/seed.ts",
     "loadtest:smoke": "tsx scripts/loadtest/run.ts --mode=smoke",
     "loadtest:readonly": "tsx scripts/loadtest/run.ts --mode=readonly",

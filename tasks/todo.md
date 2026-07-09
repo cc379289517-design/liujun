@@ -7227,6 +7227,23 @@
 - 不变量结果：同助理多个执行/暂停根任务 0、重复 current primary 等价风险 0、熨烫 `using` 槽位超容量 0。
 - 阶段结论：核心状态命令、同步延迟、SQLite 写锁和状态正确性已经通过 115 会话 30 分钟正式压测；下一瓶颈不再是后端状态命令，而是生产监控/备份告警、前端真实设备 INP 采集，以及混合场景 delta 体积在任务/提醒频繁变化时仍可继续瘦身。
 
+#### 阶段 E 第二十七批计划：生产巡检门禁
+
+- [x] 新增 `scripts/production-check.ts`，一键检查生产站点 `/api/config`、`/photographer`、工作台 full sync、工作台 delta sync 的状态码、耗时和响应体体积。
+- [x] 为 full/delta 同步设置可配置体积阈值，发现同步包异常回胖时直接失败，避免“能打开但越来越卡”的问题悄悄进入现场。
+- [x] 支持可选备份新鲜度检查：本地 `--backup-dir` 或远程 `--ssh-target --remote-backup-dir`，确认最近 SQLite `.db.gz` 备份没有过期。
+- [x] 新增 `npm run prod:check`，作为发布后、开店前、异常排查时的轻量巡检入口。
+- [x] 验证本地类型检查、生产 build、Mac mini 实际巡检，并记录评审结果；本批不改业务规则和任务状态逻辑。
+
+#### 阶段 E 第二十七批评审：生产巡检门禁
+
+- 改动范围：新增 `scripts/production-check.ts` 和 `npm run prod:check`，不改业务规则、不改任务状态逻辑、不写数据库。
+- 巡检内容：`/api/config` JSON、`/photographer` HTML、`/api/workbench/sync?full=1`、带 `since` 的 delta sync；每项记录 HTTP 状态、耗时和响应体体积。
+- 体积门禁：默认 full sync 阈值 100000 bytes、delta sync 阈值 10000 bytes，可通过 `--full-max-bytes` / `--delta-max-bytes` 调整；异常回胖直接失败。
+- 备份门禁：支持 `--backup-dir` 本地检查，也支持 `--ssh-target --remote-backup-dir` 远程检查；已复用 `.mini-deploy.env` 的 `SSH_OPTS`，避免 Mac mini 因默认尝试过多 SSH key 拒绝连接。
+- Mac mini 巡检结果：`npm run prod:check -- --ssh-target=lj@192.168.31.171 --remote-backup-dir=/Users/lj/liujun-portable/liujun/database-backups --backup-max-age-min=1440` PASS；`/api/config` 3095 bytes、`/photographer` 37866 bytes、full sync 8283 bytes、delta sync 483 bytes，远程备份存在。
+- 阶段结论：生产化剩余风险从“靠人工记得看”降为“发布后/开店前一条命令巡检”；下一步若继续推进，应补前端真实设备 INP 采集或把 `prod:check` 接入 launchd/定时提醒。
+
 #### 阶段 E 第二十三批计划：开始/暂停状态切换维护降载
 
 - [x] `src/app/api/tasks/[id]/route.ts`：助理 `start` 和 `pause` 在完成原子状态写入、加载权威任务详情后，不再等待 `runTaskMaintenance()`；改为复用 `scheduleTaskMaintenance()` 异步触发普通维护。
