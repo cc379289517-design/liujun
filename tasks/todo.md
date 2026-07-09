@@ -6975,6 +6975,27 @@
 - profile delta 混合短测：`phase-e10-profile-delta-mixed-115-3min`，7151 请求；15 个非 2xx 全部为高优先级业务 409；无系统错误、无 SQLite 异常、不变量全 0。delta 同步共 49.82MB、平均 8046.2 bytes、p95 15472 bytes，对比第九批 66.39MB 约下降 25%。
 - 结论：当前主链路已经经住 10 分钟只读和 20 分钟混合写验证，150 人级别的状态正确性和同步延迟基本达标。下一步剩余重点是 full 校准大包继续摘要化、管理员列表长时体积继续分页/详情按需，以及更细的前端局部 store/渲染拆分。
 
+#### 阶段 E 第十一批计划：full 校准降频与大包减半
+
+- [x] 工作台定时 full 校准从 5 分钟降频到 10 分钟；3 秒 delta 实时同步、首轮 full、截断/缺失立即 full 重拉仍保持不变。
+- [x] 压测脚本默认 `--full-sync-interval-ms` 同步改为 10 分钟，后续报告贴近真实前端策略。
+- [x] 不改变派单、优先级、熨烫机、移交、公共队列排序和区域统计口径；本批只减少长时在线时的周期性 full 大包。
+- [x] 验证 TypeScript、生产 build、10 分钟只读压测和 115 人短混合压测；重点观察 full 次数、响应体总量、系统错误和状态不变量。
+- [x] 评审后记录 `tasks/todo.md` 和必要的 `tasks/lessons.md`，通过后提交、推送并发布 Mac mini。
+
+#### 阶段 E 第十一批评审：full 校准降频与大包减半
+
+- 改动范围：`src/app/photographer/page.tsx` 将工作台定时 full 校准间隔从 5 分钟改为 10 分钟；`scripts/loadtest/run.ts` 默认 `--full-sync-interval-ms` 同步改为 10 分钟。
+- 正确性兜底保持：首轮没有 token 时仍 full；`syncTruncated`、缺失 `taskIds/publicQueueIds`、本地缺少可见任务详情、身份/楼座切换仍会清空 token 并立即 full 重拉；常规实时更新继续 3 秒 delta。
+- 放弃本轮区域摘要化原因：`publicQueueRaw` 同时承载公共队列、区域统计、助理排行、任务类型和气泡明细，直接裁剪 full 区域任务会降低体积但改变统计口径；应后续单独做服务端区域摘要和详情按需。
+- 验证通过：`npx prisma validate`、`npx tsc --noEmit --pretty false --incremental false`、`DATABASE_URL=file:./prisma/loadtest.db npm run build`、`git diff --check`。
+- 10 分钟只读压测：`phase-e11-full10-readonly-115-10min`，80 摄影师、30 助理、5 管理，22226 请求，0 错误；`/api/workbench/sync` p50 9ms、p95 21ms、p99 187.4ms、max 452.9ms。
+- 只读体积：full 110 次共 10.87MB、平均 103659.5 bytes、p95 107166 bytes；delta 21864 次共 66.14MB、平均 3172 bytes、p95 3266 bytes。对比第十批只读 full 220 次共 21.75MB，本批 full 大包次数和总量约减半。
+- 短混合压测：`phase-e11-full10-mixed-115-3min`，7117 请求；18 个非 2xx 全部为高优先级业务 409；无 500、无 timeout、无 SQLite locked/busy。
+- 混合表现：`/api/workbench/sync` p50 10.2ms、p95 113.3ms、p99 203.3ms、max 590.5ms；delta 6467 次共 49.34MB、平均 8000.9 bytes、p95 15788 bytes；full 110 次共 10.99MB。
+- 不变量审查通过：同助理多个执行/暂停根任务 0、重复 current primary 0、熨烫 `using` 槽位超容量 0。
+- 结论：full 校准降频是安全收益项，继续降低长时在线累计大包和前端 JSON 解析压力。下一步建议把区域统计/排行做成服务端摘要，随后让 full 校准只保留公共队列首屏详情和按需任务详情。
+
 ### 阶段 A 评审
 
 - 已完成压测工具：新增 `scripts/loadtest/seed.ts`、`run.ts`、`report.ts`、`common.ts`，不引入 k6/artillery 等新依赖；使用 Node 内置 `fetch`、现有 `tsx` 和 Prisma/SQLite。
