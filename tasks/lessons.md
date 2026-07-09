@@ -176,3 +176,4 @@
 - 审计脚本识别系统异常时不能对整条 JSON 粗暴匹配 `busy`；`ironing_machine_busy` 这类业务兜底码应归入业务 409，只有 HTTP 5xx、真实 timeout、SQLite/数据库锁相关错误才应打失败门禁。
 - 生产巡检要同时看“能访问”和“是否仍然轻量”：页面/API 200 只能证明活着，full/delta 同步体积、耗时和 SQLite 备份新鲜度也应进入发布后/开店前门禁。
 - 真实体验指标采集不要写业务数据库，也不要采集业务文本；用低频批量 beacon 写日志即可，避免观测系统反过来增加 SQLite 写锁或泄露 SKU/备注/姓名。
+- 真实体验日志必须配套报告门禁；只采 JSONL 不汇总，现场复盘仍会靠感觉。至少要输出 interaction/LCP/CLS/longtask 的 p75/p95、弱项占比和 path/role 热点。

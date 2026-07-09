@@ -7262,6 +7262,23 @@
 - 本地巡检验证：`npm run prod:check -- --base-url=http://127.0.0.1:3100 --full-max-bytes=100000 --delta-max-bytes=10000` PASS；`/photographer` 38576 bytes，full sync 23081 bytes，delta sync 484 bytes。
 - 验证通过：`npx tsc --noEmit --pretty false --incremental false`、`DATABASE_URL=file:./prisma/loadtest.db npm run build`。
 
+#### 阶段 E 第二十九批计划：真实体验指标报告门禁
+
+- [x] 新增 `scripts/client-metrics-report.ts`，读取 `logs/client-metrics-YYYYMMDD.jsonl` 或远程 Mac mini 日志，输出可读 Markdown 报告。
+- [x] 汇总 LCP、CLS、longtask、interaction/navigation 等指标的 count、p75、p95、max、poor/needs-improvement 占比，并按 path/role 拆分热点。
+- [x] 支持阈值门禁：interaction p75、LCP p75、CLS p75、longtask p95 超阈值时退出非 0，形成真实设备验收口径。
+- [x] 新增 `npm run client-metrics:report`，用于试运行一天后快速判断“真实设备是否真的流畅”。
+- [x] 验证本地样本和 Mac mini 远程日志读取；本批只读日志，不改业务规则、不写数据库。
+
+#### 阶段 E 第二十九批评审：真实体验指标报告门禁
+
+- 改动范围：新增 `scripts/client-metrics-report.ts` 和 `npm run client-metrics:report`；只读 JSONL 日志，不访问 Prisma，不写数据库，不改业务规则。
+- 报告口径：按指标汇总 count、p50、p75、p95、max、weak 占比；按 path/role 输出热点，便于定位哪个页面或角色真实设备卡顿。
+- 门禁阈值：默认 interaction p75 <= 200ms、LCP p75 <= 2500ms、CLS p75 <= 0.1、longtask p95 <= 250ms；超阈值退出非 0。
+- 本地样本验证：`npm run client-metrics:report -- --file=logs/client-metrics-20260709.jsonl` PASS；样本中 interaction p75 148.4ms、LCP p75 1800.2ms、longtask p95 131ms、CLS p75 0。
+- Mac mini 远程验证：`npm run client-metrics:report -- --ssh-target=lj@192.168.31.171 --remote-log-dir=/Users/lj/liujun-portable/liujun/logs` PASS；当前远程样本来自发布后模拟上报，interaction p75 120ms。
+- 阶段结论：真实体验采集从“有日志”升级为“有验收报告和失败门禁”；试运行一天后可直接用该报告判断手机/平板是否还需要最后一轮前端微调。
+
 #### 阶段 E 第二十三批计划：开始/暂停状态切换维护降载
 
 - [x] `src/app/api/tasks/[id]/route.ts`：助理 `start` 和 `pause` 在完成原子状态写入、加载权威任务详情后，不再等待 `runTaskMaintenance()`；改为复用 `scheduleTaskMaintenance()` 异步触发普通维护。
