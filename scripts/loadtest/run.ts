@@ -58,6 +58,7 @@ type TaskLike = {
   isLocked?: boolean | null;
   lockReason?: string | null;
   roomNumber?: string;
+  createdAt?: string;
   category?: { id: number; name: string; estDuration?: number; maxDuration?: number };
   collaborators?: Array<{ assistantId?: string; status?: string; role?: string }>;
 };
@@ -70,6 +71,7 @@ type Persona = {
   syncToken: string | null;
   lastFullSyncAtMs: number;
   taskCache: TaskLike[];
+  publicQueueCache: TaskLike[];
 };
 
 const execFileAsync = promisify(execFile);
@@ -285,6 +287,18 @@ function isIroningTask(task: TaskLike): boolean {
   return task.category?.name?.includes("熨") === true;
 }
 
+function taskDurationSortMinutes(task: TaskLike): number {
+  return task.category?.estDuration ?? task.category?.maxDuration ?? 999;
+}
+
+function taskMaxDurationSortMinutes(task: TaskLike): number {
+  return task.category?.maxDuration ?? task.category?.estDuration ?? 999;
+}
+
+function taskCreatedAtMs(task: TaskLike): number {
+  return task.createdAt ? new Date(task.createdAt).getTime() : 0;
+}
+
 function hasPhotographerLimitQueuedTask(tasks: TaskLike[], photographerId: string): boolean {
   return tasks.some((task) =>
     task.photographerId === photographerId &&
@@ -310,6 +324,15 @@ function assistantHasWorkingTask(tasks: TaskLike[], assistantId: string): boolea
   });
 }
 
+function hasActiveHelperParticipant(task: TaskLike): boolean {
+  return (task.collaborators ?? []).some((collaborator) =>
+    collaborator.role === "helper" &&
+    collaborator.status != null &&
+    collaborator.status !== "left" &&
+    collaborator.status !== "completed"
+  );
+}
+
 function canAttemptStartWaitingTask(task: TaskLike, assistantId: string, hasWorkingTask: boolean): boolean {
   const status = taskStatusForAssistant(task, assistantId);
   if (status !== "waiting") return false;
@@ -319,17 +342,53 @@ function canAttemptStartWaitingTask(task: TaskLike, assistantId: string, hasWork
   return true;
 }
 
-function startableWaitingTasksForAssistant(tasks: TaskLike[], assistantId: string, hasWorkingTask: boolean): TaskLike[] {
-  const candidates = tasks
-    .filter((task) => canAttemptStartWaitingTask(task, assistantId, hasWorkingTask))
-    .sort((a, b) =>
-      (a.priority ?? 999) - (b.priority ?? 999) ||
-      (isIroningTask(a) ? 0 : 1) - (isIroningTask(b) ? 0 : 1)
-    );
-  const highestPriority = candidates[0]?.priority;
-  return highestPriority == null
-    ? candidates
-    : candidates.filter((task) => task.priority === highestPriority);
+function canAttemptPublicIroningTask(task: TaskLike, assistantId: string, hasWorkingTask: boolean): boolean {
+  if (hasWorkingTask) return false;
+  if (taskBelongsToAssistant(task, assistantId)) return false;
+  if (!isIroningTask(task) || task.status !== "waiting") return false;
+  if (task.parentTaskId != null || task.isLocked) return false;
+  if (hasActiveHelperParticipant(task)) return false;
+  if (task.ironingStage === "waiting_machine") return false;
+  return true;
+}
+
+function compareStartCandidateTasks(a: TaskLike, b: TaskLike): number {
+  return (isIroningTask(a) ? 0 : 1) - (isIroningTask(b) ? 0 : 1) ||
+    (a.priority ?? 999) - (b.priority ?? 999) ||
+    taskDurationSortMinutes(a) - taskDurationSortMinutes(b) ||
+    taskMaxDurationSortMinutes(a) - taskMaxDurationSortMinutes(b) ||
+    taskCreatedAtMs(a) - taskCreatedAtMs(b);
+}
+
+function startableWaitingTasksForAssistant(
+  ownTasks: TaskLike[],
+  publicQueueTasks: TaskLike[],
+  assistantId: string,
+  hasWorkingTask: boolean,
+): TaskLike[] {
+  const ownCandidates = ownTasks.filter((task) => canAttemptStartWaitingTask(task, assistantId, hasWorkingTask));
+  const seen = new Set(ownCandidates.map((task) => task.id));
+  const publicIroningCandidates = publicQueueTasks.filter((task) =>
+    !seen.has(task.id) &&
+    canAttemptPublicIroningTask(task, assistantId, hasWorkingTask)
+  );
+  const priorityGuardCandidates = ownCandidates.concat(publicIroningCandidates);
+  const candidatePriorities = priorityGuardCandidates
+    .map((task) => task.priority)
+    .filter((priority): priority is number => typeof priority === "number");
+  const highestPriority = candidatePriorities.length > 0 ? Math.min(...candidatePriorities) : null;
+  const priorityFilteredOwnCandidates = (highestPriority == null
+    ? ownCandidates
+    : ownCandidates.filter((task) => task.priority === highestPriority))
+    .sort(compareStartCandidateTasks);
+
+  let keptIroningTaskId: string | null = null;
+  return priorityFilteredOwnCandidates.filter((task) => {
+    if (!isIroningTask(task)) return true;
+    if (keptIroningTaskId) return false;
+    keptIroningTaskId = task.id;
+    return true;
+  });
 }
 
 function stringIds(value: unknown): string[] | null {
@@ -373,12 +432,19 @@ function hasMissingVisibleTaskDetails(
 
 function applyPersonaSyncCache(persona: Persona, data: Record<string, unknown>): TaskLike[] {
   const incomingTasks = Array.isArray(data.tasks) ? data.tasks as TaskLike[] : [];
+  const incomingPublicQueue = Array.isArray(data.publicQueue) ? data.publicQueue as TaskLike[] : [];
   const syncMode = data.syncMode === "delta" ? "delta" : "full";
   const taskIds = stringIds(data.taskIds);
+  const publicQueueIds = stringIds(data.publicQueueIds);
 
   if (
     syncMode === "delta" &&
-    (!taskIds || data.syncTruncated === true || hasMissingVisibleTaskDetails(persona.taskCache, incomingTasks, taskIds))
+    (
+      !taskIds ||
+      data.syncTruncated === true ||
+      hasMissingVisibleTaskDetails(persona.taskCache, incomingTasks, taskIds) ||
+      hasMissingVisibleTaskDetails(persona.publicQueueCache, incomingPublicQueue, publicQueueIds)
+    )
   ) {
     persona.syncToken = null;
     persona.lastFullSyncAtMs = 0;
@@ -386,7 +452,9 @@ function applyPersonaSyncCache(persona: Persona, data: Record<string, unknown>):
   }
 
   const nextTasks = mergeIncrementalTasks(persona.taskCache, incomingTasks, taskIds, syncMode);
+  const nextPublicQueue = mergeIncrementalTasks(persona.publicQueueCache, incomingPublicQueue, publicQueueIds, syncMode);
   persona.taskCache = nextTasks;
+  persona.publicQueueCache = nextPublicQueue;
   persona.syncToken = typeof data.syncToken === "string" ? data.syncToken : null;
   if (syncMode === "full") {
     persona.lastFullSyncAtMs = Date.now();
@@ -424,7 +492,12 @@ async function maybeAssistantAction(persona: Persona, tasks: TaskLike[]): Promis
   if (persona.role !== "assistant" || random() > assistantActionChance) return;
   const ownTasks = tasks.filter((task) => taskBelongsToAssistant(task, persona.profile.id));
   const hasWorkingTask = assistantHasWorkingTask(ownTasks, persona.profile.id);
-  const waiting = startableWaitingTasksForAssistant(ownTasks, persona.profile.id, hasWorkingTask)[0];
+  const waiting = startableWaitingTasksForAssistant(
+    ownTasks,
+    persona.publicQueueCache,
+    persona.profile.id,
+    hasWorkingTask,
+  )[0];
   const paused = ownTasks.find((task) => taskStatusForAssistant(task, persona.profile.id) === "paused");
   const executing = ownTasks.find((task) => taskStatusForAssistant(task, persona.profile.id) === "executing");
 
@@ -557,6 +630,7 @@ async function main() {
       syncToken: null,
       lastFullSyncAtMs: 0,
       taskCache: [],
+      publicQueueCache: [],
     })),
     ...assistants.map((profile) => ({
       id: profile.id,
@@ -566,6 +640,7 @@ async function main() {
       syncToken: null,
       lastFullSyncAtMs: 0,
       taskCache: [],
+      publicQueueCache: [],
     })),
     ...admins.map((profile) => ({
       id: profile.id,
@@ -575,6 +650,7 @@ async function main() {
       syncToken: null,
       lastFullSyncAtMs: 0,
       taskCache: [],
+      publicQueueCache: [],
     })),
   ];
 

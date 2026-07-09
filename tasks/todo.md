@@ -7132,6 +7132,25 @@
 - 不变量审查通过：同助理多个执行/暂停根任务 0、重复 current primary 等价风险 0、熨烫 `using` 槽位超容量 0。
 - 验证通过：`git diff --check`、`npx prisma validate`、`npx tsc --noEmit --pretty false --incremental false`、`DATABASE_URL=file:./prisma/loadtest.db npm run build`。
 
+#### 阶段 E 第十九批计划：混合压测助理可开始池贴近真实 UI
+
+- [x] `scripts/loadtest/run.ts` 为每个虚拟用户维护 `publicQueue` 缓存，支持 full/delta 按 `publicQueueIds` 裁剪，避免助理动作只看个人任务。
+- [x] 助理 `mixed-start` 候选池用同楼座公共熨烫任务参与最高优先级过滤；压测脚本仍只真实开始自己的任务，避免制造公共队列抢接竞争。
+- [x] 对 `waiting_machine`、锁定任务、协作 helper、非熨烫公共任务保持不可开始，减少压测脚本制造的无效写请求。
+- [x] 不改变后端派单、开始、优先级、熨烫机槽位业务规则；本批只提升压测真实性和瓶颈判断可信度。
+- [x] 用 115 会话 3 分钟混合压测对比第十九批前基线：当前基线 7071 请求、83 个业务 409，其中 78 个为“更高优先级可开始”，无 500/locked/timeout，不变量通过。
+
+#### 阶段 E 第十九批评审：混合压测助理可开始池贴近真实 UI
+
+- 改动范围：`scripts/loadtest/run.ts` 为 persona 增加 `publicQueueCache`，按同步包 `publicQueue/publicQueueIds` 合并和裁剪公共队列缓存；助理动作选择时用公共熨烫任务参与最高优先级保护。
+- 行为收敛：压测脚本不直接开始公共队列任务，只把公共熨烫候选作为“有更高优先级可开始任务”的本地预检依据；真实开始仍限于该助理自己的 waiting 任务。
+- 反证记录：曾短暂尝试让压测脚本直接接公共熨烫任务，3 分钟混合压测 120 个业务 409，主要为“当前助理暂不可接手/熨烫机忙”；已收敛为只参与优先级过滤。
+- 基线：`phase-e19-current-mixed-baseline-115-3min`，80 摄影师、30 助理、5 管理，7071 请求、83 个业务 409；其中 78 个为“当前有更高优先级任务可开始”，5 个为熨烫机暂无空位，无 500/locked/timeout。
+- 后测：`phase-e19-priority-guarded-own-start-mixed-115-3min`，7125 请求、1 个业务 409；`mixed-start` 错误率从 45.36% 降到 0.66%，剩余 1 个为熨烫机暂无空位，无 500/locked/timeout。
+- 延迟观察：后测 `/api/workbench/sync` p50 10ms、p95 124.1ms、p99 207ms；写操作 `complete/create/start` p95 分别为 214.3ms、223.3ms、109.1ms，属于混合写 SQLite 排队和维护触发下的下一阶段优化对象。
+- 不变量审查通过：同助理多个执行/暂停根任务 0、重复 current primary 等价风险 0、熨烫 `using` 槽位超容量 0。
+- 验证通过：`npx tsc --noEmit --pretty false --incremental false`、`DATABASE_URL=file:./prisma/loadtest.db npm run build`、隔离库 seed、115 会话 3 分钟混合压测、raw 精查和 SQL 不变量审查。
+
 ### 阶段 A 评审
 
 - 已完成压测工具：新增 `scripts/loadtest/seed.ts`、`run.ts`、`report.ts`、`common.ts`，不引入 k6/artillery 等新依赖；使用 Node 内置 `fetch`、现有 `tsx` 和 Prisma/SQLite。
