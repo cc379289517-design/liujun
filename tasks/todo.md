@@ -6658,6 +6658,25 @@
 - 验证备注：本地 dev 首启仍需清理 `.next` 中 macOS `._*` 伴生文件和 Turbopack 缓存；本轮清理 919 个伴生文件。`/api/workbench/sync` 在隔离 `loadtest.db` 触发熨烫队列维护日志，不影响 `prisma/dev.db` 或生产库。
 - 待后续：继续推进公共队列首屏摘要/详情按需、服务端 `assistantStatus` 摘要补丁，或拆分页面级 `now` 对区域统计/列表的分钟级派生，进一步降低同步后的前端合并和重算成本。
 
+#### 阶段 D 第二十批计划：统计页任务查询降载
+
+- [x] `/api/tasks` 增加 `startDate/endDate` 查询窗口和 `payload=stats` 轻量关系集，保留默认深 include 兼容旧调用。
+- [x] 后台 `StatsTab` 按当前日期范围拉取任务，不再进入统计页就无条件拉取全量任务历史；切换预设/自定义日期时重新请求对应窗口。
+- [x] 统计页继续保留异常登记、协作贡献、摄影师/助理/楼座/类型/反馈等现有统计口径，不改变业务规则。
+- [x] 验证 `tsc`、`git diff --check`、生产构建、本地统计接口与页面冒烟；本批只做查询体积和前端处理范围优化，不更新长期业务文档。
+
+#### 阶段 D 第二十批评审：统计页任务查询降载
+
+- 已完成：`/api/tasks` 新增 `startDate/endDate` createdAt 查询窗口，日期参数非法或起止倒置时返回 400；未传日期时旧调用保持原行为。
+- 已完成：`/api/tasks?payload=stats` 使用统计页轻量关系集，保留摄影师、助理、类型、协作参与者、完成登记字段，去掉统计页不依赖的提权申请和移交请求关系。
+- 已完成：后台 `StatsTab` 根据当前日期预设/自定义范围请求任务，人员/楼座参考数据独立加载；刷新按钮只刷新当前窗口任务，页面内部时间刷新从 1 秒降到 60 秒。
+- 已保持：统计页异常登记、协作贡献、摄影师/助理/楼座/类型/反馈等口径不变；本批不改任务状态、派单、优先级、熨烫、移交业务规则，不更新长期业务文档。
+- 验证通过：`npx prisma validate`、`npx tsc --noEmit --pretty false --incremental false`、`git diff --check -- src/app/api/tasks/route.ts src/app/admin/StatsTab.tsx tasks/todo.md tasks/lessons.md`、`DATABASE_URL=file:./prisma/loadtest.db npm run build`。
+- 本地冒烟：隔离 `loadtest.db` 下 `/admin` 200 / 18225 bytes，`/stats` 200 / 14624 bytes，`/api/tasks?todayOnly=true&limit=5` 200 / 7685 bytes，非法日期窗口 400 / 44 bytes。
+- 体积验证：同一周窗口 511 条任务下，默认深对象 `/api/tasks?startDate=...&endDate=...` 为 673957 bytes；`payload=stats` 为 643297 bytes，并确认响应字段不再包含 `priorityUpgradeRequests/assistantTransferRequests`。`limit=5` stats 窗口 200 / 7490 bytes。
+- 验证备注：本地 dev 首启仍需清理 `.next` 中 macOS `._*` 伴生文件和 Turbopack 缓存；本轮清理 896 个伴生文件。
+- 待后续：统计页若要支持跨月/跨年大范围分析，应继续推进后端聚合接口或分页明细，避免自定义超长日期范围一次性拉取过多明细。
+
 ### 阶段 E：验收与对抗审查
 
 - [ ] 基线压测完成后，先根据报告排序瓶颈，再决定是否进入 B/C/D 的第一批代码改动。

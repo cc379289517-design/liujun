@@ -101,6 +101,30 @@ const TASK_INCLUDE_WITHOUT_COLLABORATORS = {
   assistantTransferRequests: TASK_INCLUDE.assistantTransferRequests,
 } as const;
 
+const STATS_TASK_INCLUDE = {
+  photographer: { select: { id: true, name: true, currentRoom: true, buildingId: true } },
+  assistant: { select: { id: true, name: true, currentRoom: true } },
+  category: TASK_INCLUDE.category,
+  collaborators: {
+    where: { status: { not: "left" } },
+    select: {
+      id: true,
+      taskId: true,
+      assistantId: true,
+      role: true,
+      status: true,
+      joinedAt: true,
+      leftAt: true,
+      startedAt: true,
+      completedAt: true,
+      effectiveWorkSeconds: true,
+      workSegmentStartedAt: true,
+      assistant: { select: { id: true, name: true, currentRoom: true, avatar: true, buildingId: true } },
+    },
+  },
+  completionRegistration: TASK_INCLUDE.completionRegistration,
+} as const;
+
 const TASK_QUERY_LIMIT_MAX = 500;
 
 function parsePositiveIntParam(value: string | null, name: string): { value?: number; error?: Response } {
@@ -108,6 +132,15 @@ function parsePositiveIntParam(value: string | null, name: string): { value?: nu
   const parsed = Number.parseInt(value, 10);
   if (!Number.isFinite(parsed) || parsed <= 0) {
     return { error: Response.json({ error: `${name} must be a positive integer` }, { status: 400 }) };
+  }
+  return { value: parsed };
+}
+
+function parseDateBoundParam(value: string | null, name: string): { value?: Date; error?: Response } {
+  if (value == null || value.trim() === "") return {};
+  const parsed = new Date(value);
+  if (!Number.isFinite(parsed.getTime())) {
+    return { error: Response.json({ error: `${name} must be a valid date` }, { status: 400 }) };
   }
   return { value: parsed };
 }
@@ -168,7 +201,7 @@ async function validateSpecifiedAssistant(
 
 /**
  * GET /api/tasks - 查询任务列表
- * 支持 ?status=waiting&priority=1&photographerId=xxx&assistantId=xxx&buildingId=1&limit=100
+ * 支持 ?status=waiting&priority=1&photographerId=xxx&assistantId=xxx&buildingId=1&limit=100&startDate=...&endDate=...
  */
 export async function GET(request: NextRequest) {
   try {
@@ -181,6 +214,7 @@ export async function GET(request: NextRequest) {
     const view = searchParams.get("view");
     const buildingIdParam = searchParams.get("buildingId");
     const limitParam = searchParams.get("limit");
+    const payload = searchParams.get("payload");
     const includeCollaborators = searchParams.get("includeCollaborators") !== "false";
 
     const todayOnly = searchParams.get("todayOnly");
@@ -196,6 +230,21 @@ export async function GET(request: NextRequest) {
     if (parsedLimit.error) return parsedLimit.error;
     const take = parsedLimit.value == null ? undefined : Math.min(parsedLimit.value, TASK_QUERY_LIMIT_MAX);
 
+    const parsedStartDate = parseDateBoundParam(searchParams.get("startDate"), "startDate");
+    if (parsedStartDate.error) return parsedStartDate.error;
+    const parsedEndDate = parseDateBoundParam(searchParams.get("endDate"), "endDate");
+    if (parsedEndDate.error) return parsedEndDate.error;
+    if (parsedStartDate.value && parsedEndDate.value) {
+      if (parsedStartDate.value >= parsedEndDate.value) {
+        return Response.json({ error: "startDate must be before endDate" }, { status: 400 });
+      }
+      where.createdAt = { gte: parsedStartDate.value, lt: parsedEndDate.value };
+    } else if (parsedStartDate.value) {
+      where.createdAt = { gte: parsedStartDate.value };
+    } else if (parsedEndDate.value) {
+      where.createdAt = { lt: parsedEndDate.value };
+    }
+
     const parsedBuildingId = parsePositiveIntParam(buildingIdParam, "buildingId");
     if (parsedBuildingId.error) return parsedBuildingId.error;
     if (parsedBuildingId.value != null) {
@@ -209,6 +258,9 @@ export async function GET(request: NextRequest) {
     }
     if ((view === "photographer" || view === "assistant") && !profileId && !photographerId && !assistantId) {
       return Response.json({ error: "profileId is required for photographer or assistant view" }, { status: 400 });
+    }
+    if (payload && !["stats"].includes(payload)) {
+      return Response.json({ error: "payload must be stats" }, { status: 400 });
     }
 
     if (scopedPhotographerId) where.photographerId = scopedPhotographerId;
@@ -238,7 +290,7 @@ export async function GET(request: NextRequest) {
     }
 
     // 只返回今天的任务（基于 createdAt，过了24点自动不显示昨天的）
-    if (todayOnly === "true") {
+    if (todayOnly === "true" && !where.createdAt) {
       const now = new Date();
       const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());
       const endOfDay = new Date(startOfDay.getTime() + 24 * 60 * 60 * 1000);
@@ -247,7 +299,7 @@ export async function GET(request: NextRequest) {
 
     // 返回本周任务（周一到周日）
     const weekOnly = searchParams.get("weekOnly");
-    if (weekOnly === "true") {
+    if (weekOnly === "true" && !where.createdAt) {
       const now = new Date();
       const dow = now.getDay(); // 0=周日
       const mondayOffset = dow === 0 ? -6 : 1 - dow;
@@ -262,9 +314,16 @@ export async function GET(request: NextRequest) {
       where.AND = [...(Array.isArray(where.AND) ? where.AND : []), ...andFilters];
     }
 
+    const include =
+      payload === "stats"
+        ? STATS_TASK_INCLUDE
+        : includeCollaborators
+          ? TASK_INCLUDE
+          : TASK_INCLUDE_WITHOUT_COLLABORATORS;
+
     const tasks = await prisma.bookingTask.findMany({
       where,
-      include: includeCollaborators ? TASK_INCLUDE : TASK_INCLUDE_WITHOUT_COLLABORATORS,
+      include,
       orderBy: [{ priority: "asc" }, { createdAt: "asc" }],
       take,
     });

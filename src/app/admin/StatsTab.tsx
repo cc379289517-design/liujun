@@ -320,18 +320,21 @@ export default function StatsTab() {
   const [detailRegistration, setDetailRegistration] = useState("");
   const [detailSku, setDetailSku] = useState("");
 
-  const fetchData = useCallback(async () => {
-    setLoading(true);
+  const range = useMemo(() => {
+    if (datePreset !== "custom") return presetRange(datePreset, new Date(nowMs));
+    const start = parseDateInput(customStart, defaultRange.start);
+    const endDay = parseDateInput(customEnd, addDays(defaultRange.end, -1));
+    return { start, end: addDays(endDay, 1) };
+  }, [customEnd, customStart, datePreset, defaultRange.end, defaultRange.start, nowMs]);
+  const rangeStartIso = range.start.toISOString();
+  const rangeEndIso = range.end.toISOString();
+
+  const fetchReferenceData = useCallback(async () => {
     try {
-      const [taskRes, profileRes, buildingRes] = await Promise.all([
-        fetch("/api/tasks"),
+      const [profileRes, buildingRes] = await Promise.all([
         fetch("/api/profiles"),
         fetch("/api/buildings"),
       ]);
-      if (taskRes.ok) {
-        const data = await taskRes.json();
-        setTasks(Array.isArray(data) ? data : []);
-      }
       if (profileRes.ok) {
         const data = await profileRes.json();
         setProfiles(Array.isArray(data) ? data : []);
@@ -341,23 +344,35 @@ export default function StatsTab() {
         setBuildings(Array.isArray(data) ? data : []);
       }
     } catch (error) {
+      console.error("Failed to fetch stats reference data", error);
+    }
+  }, []);
+
+  const fetchTasks = useCallback(async () => {
+    setLoading(true);
+    try {
+      const params = new URLSearchParams({
+        payload: "stats",
+        startDate: rangeStartIso,
+        endDate: rangeEndIso,
+      });
+      const taskRes = await fetch(`/api/tasks?${params.toString()}`, { cache: "no-store" });
+      if (taskRes.ok) {
+        const data = await taskRes.json();
+        setTasks(Array.isArray(data) ? data : []);
+      }
+    } catch (error) {
       console.error("Failed to fetch stats data", error);
     }
     setLoading(false);
-  }, []);
+  }, [rangeEndIso, rangeStartIso]);
 
-  useEffect(() => { fetchData(); }, [fetchData]);
+  useEffect(() => { fetchReferenceData(); }, [fetchReferenceData]);
+  useEffect(() => { fetchTasks(); }, [fetchTasks]);
   useEffect(() => {
-    const id = setInterval(() => setNowMs(Date.now()), 1000);
+    const id = setInterval(() => setNowMs(Date.now()), 60_000);
     return () => clearInterval(id);
   }, []);
-
-  const range = useMemo(() => {
-    if (datePreset !== "custom") return presetRange(datePreset, new Date(nowMs));
-    const start = parseDateInput(customStart, defaultRange.start);
-    const endDay = parseDateInput(customEnd, addDays(defaultRange.end, -1));
-    return { start, end: addDays(endDay, 1) };
-  }, [customEnd, customStart, datePreset, defaultRange.end, defaultRange.start, nowMs]);
 
   const profileById = useMemo(() => new Map(profiles.map((p) => [p.id, p])), [profiles]);
   const buildingNameById = useMemo(() => new Map(buildings.map((b) => [b.id, b.name])), [buildings]);
@@ -579,7 +594,7 @@ export default function StatsTab() {
               {rangeLabel} · {scopeType === "all" ? "全部范围" : scopeType === "department" ? scopeDepartment || "未选择部门" : buildingNameById.get(Number(scopeBuildingId)) || "未选择楼座"}
             </p>
           </div>
-          <button onClick={fetchData} className="rounded-xl bg-white/58 px-3 py-2 text-[12px] font-bold text-slate-600 shadow-sm ring-1 ring-white/70 transition-colors hover:bg-white/80">刷新数据</button>
+          <button onClick={fetchTasks} className="rounded-xl bg-white/58 px-3 py-2 text-[12px] font-bold text-slate-600 shadow-sm ring-1 ring-white/70 transition-colors hover:bg-white/80">刷新数据</button>
         </div>
 
         <div className="mt-4 grid gap-3 xl:grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)]">
