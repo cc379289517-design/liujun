@@ -867,6 +867,18 @@ export default function PhotographerPage() {
     () => new Map(assistants.map((assistant) => [assistant.id, assistant])),
     [assistants],
   );
+  const profileById = useMemo(
+    () => new Map(allProfiles.map((item) => [item.id, item])),
+    [allProfiles],
+  );
+  const buildingById = useMemo(
+    () => new Map(buildings.map((building) => [building.id, building])),
+    [buildings],
+  );
+  const buildingNameById = useMemo(
+    () => new Map(buildings.map((building) => [building.id, building.name])),
+    [buildings],
+  );
 
   const quickBookBuildingId = profile && !isAssistantRole(profile.role)
     ? photographerWorkbenchBuildingId ?? profile.buildingId
@@ -1718,8 +1730,8 @@ export default function PhotographerPage() {
     mapUserInteractedRef.current = true;
   }, []);
   const currentMapAssistant = useMemo(
-    () => assistants.find((assistant) => assistant.id === profile?.id) ?? null,
-    [assistants, profile?.id],
+    () => (profile?.id ? assistantDockById.get(profile.id) ?? null : null),
+    [assistantDockById, profile?.id],
   );
   const profileCurrentWorkbenchRoom = isAssistantRole(profile?.role) && profile
     ? profileServiceRoom({
@@ -1810,7 +1822,7 @@ export default function PhotographerPage() {
   }, [clampMapPan]);
 
   const computeGlobalMapView = useCallback((targetHeight?: number) => {
-    const building = buildings.find((b) => b.id === activeBuildingId);
+    const building = activeBuildingId != null ? buildingById.get(activeBuildingId) : null;
     const cropView =
       building?.cropX != null && building.cropY != null && building.cropW != null && building.cropH != null
         ? computeCropLikeView({
@@ -1826,11 +1838,11 @@ export default function PhotographerPage() {
       zoom: z,
       pan: cropView?.pan ?? clampMapPan(0, 0, z, targetHeight),
     };
-  }, [activeBuildingId, buildings, clampMapPan, computeCoverZoom, computeCropLikeView]);
+  }, [activeBuildingId, buildingById, clampMapPan, computeCoverZoom, computeCropLikeView]);
 
   const resolveCurrentMapFocusPoint = useCallback(() => {
     if (!profile || !activeBuildingId) return null;
-    const building = buildings.find((b) => b.id === activeBuildingId);
+    const building = buildingById.get(activeBuildingId);
     if (!building) return null;
 
     const liveRoom = currentMapAssistant?.currentRoom
@@ -1862,7 +1874,7 @@ export default function PhotographerPage() {
     }
 
     return null;
-  }, [activeBuildingId, buildings, currentMapAssistant, profile]);
+  }, [activeBuildingId, buildingById, currentMapAssistant, profile]);
 
   const computeFocusedMapView = useCallback((targetHeight?: number) => {
     const container = mapContainerRef.current;
@@ -2849,18 +2861,18 @@ export default function PhotographerPage() {
     const urlEmployeeId = params.get("employeeId")?.trim().toLowerCase();
     if (!urlProfileId && !urlEmployeeId) return;
     const selected = urlProfileId
-      ? allProfiles.find((p) => p.id === urlProfileId)
+      ? profileById.get(urlProfileId)
       : allProfiles.find((p) => p.employeeId?.toLowerCase() === urlEmployeeId);
     if (!selected) return;
     applyWorkbenchProfile(selected);
     params.set("profileId", selected.id);
     params.delete("employeeId");
     window.history.replaceState(null, "", `${window.location.pathname}?${params.toString()}`);
-  }, [allProfiles, applyWorkbenchProfile, profile]);
+  }, [allProfiles, applyWorkbenchProfile, profile, profileById]);
 
-  const activeBuilding = buildings.find((b) => b.id === activeBuildingId) || null;
+  const activeBuilding = activeBuildingId != null ? buildingById.get(activeBuildingId) ?? null : null;
   const photographerWorkbenchBuilding = profile && !isAssistantRole(profile.role)
-    ? buildings.find((b) => b.id === (photographerWorkbenchBuildingId ?? profile.buildingId)) ?? null
+    ? buildingById.get(photographerWorkbenchBuildingId ?? profile.buildingId) ?? null
     : null;
   const taskPublishBuilding = photographerWorkbenchBuilding ?? activeBuilding;
   const taskPublishBuildingId = taskPublishBuilding?.id ?? (
@@ -2963,7 +2975,7 @@ export default function PhotographerPage() {
 
   const switchPhotographerBuilding = useCallback(async (newBuildingId: number) => {
     if (!profile || isAssistantRole(profile.role)) return;
-    const bld = buildings.find((b) => b.id === newBuildingId);
+    const bld = buildingById.get(newBuildingId);
     if (!bld) return;
 
     const registeredBuildingId = originalBuildingIdRef.current ?? profile.buildingId;
@@ -2977,7 +2989,7 @@ export default function PhotographerPage() {
     setWorkbenchRoom(nextVenue);
     setPhotographerWorkbenchBuildingId(bld.id);
     setActiveBuildingId(bld.id);
-  }, [buildings, cancelLocationMenuClose, profile]);
+  }, [buildingById, cancelLocationMenuClose, profile]);
 
   const switchAssistantBuilding = useCallback(async (newBuildingId: number) => {
     if (!profile || !isAssistantRole(profile.role)) return;
@@ -2986,7 +2998,7 @@ export default function PhotographerPage() {
       return;
     }
 
-    const bld = buildings.find((b) => b.id === newBuildingId);
+    const bld = buildingById.get(newBuildingId);
     if (!bld) return;
     const nextVenue = null;
     setShowVenueMenu(false);
@@ -3037,7 +3049,7 @@ export default function PhotographerPage() {
     } catch (err) {
       console.error("Failed to switch assistant building", err);
     }
-  }, [applyTaskDataForProfile, buildings, currentRawTask?.status, profile, refreshAssistants]);
+  }, [applyTaskDataForProfile, buildingById, currentRawTask?.status, profile, refreshAssistants]);
 
   const handleCancelTask = useCallback(async (taskId: string) => {
     if (removingTaskId) return;
@@ -3146,7 +3158,7 @@ export default function PhotographerPage() {
     nextState: AssistantPresenceState,
     options?: { eatingExitMode?: "pause" | "end"; skipActiveTaskConfirm?: boolean }
   ) => {
-    const previousPresenceProfile = allProfiles.find((p) => p.id === profileId) ?? (profile?.id === profileId ? profile : null);
+    const previousPresenceProfile = profileById.get(profileId) ?? (profile?.id === profileId ? profile : null);
     const isSelfPresenceChange = profile?.id === profileId;
     if (!isSelfPresenceChange) {
       const statusLabel: Record<string, string> = {
@@ -3422,11 +3434,11 @@ export default function PhotographerPage() {
       showTaskCreateError("状态切换失败，请检查网络后重试");
       refreshAssistants();
     }
-  }, [allProfiles, currentRawTask, eatingReentryCooldownMin, profile, refreshAssistants, showEatingReentryHint, showTaskCreateError]);
+  }, [currentRawTask, eatingReentryCooldownMin, profile, profileById, refreshAssistants, showEatingReentryHint, showTaskCreateError]);
 
   // 在切换身份面板中更新助理的所属楼座
   const updateAssistantBuilding = useCallback(async (profileId: string, newBuildingId: number) => {
-    const bld = buildings.find((b) => b.id === newBuildingId);
+    const bld = buildingById.get(newBuildingId);
     if (!bld) return;
     const nextVenue = null;
     // 乐观更新本地
@@ -3456,7 +3468,7 @@ export default function PhotographerPage() {
     } catch (e) {
       console.error("Failed to update building", e);
     }
-  }, [buildings, profile?.id, refreshAssistants]);
+  }, [buildingById, profile?.id, refreshAssistants]);
 
   const noteTaskIsExecuting = useCallback((taskId: string) => {
     const task =
@@ -4212,11 +4224,11 @@ export default function PhotographerPage() {
       ? profile.activeBuildingId ?? profile.buildingId
       : photographerWorkbenchBuildingId ?? profile.buildingId
     : null;
-  const profileBuildingForDisplay = buildings.find((b) => b.id === profileDisplayBuildingId);
+  const profileBuildingForDisplay = profileDisplayBuildingId != null ? buildingById.get(profileDisplayBuildingId) : undefined;
   const profileBuildingName = profileBuildingForDisplay?.name ?? profile?.building?.name ?? "—";
   const assistantLocationBuilding =
     assistantLocationTask
-      ? buildings.find((b) => b.id === taskLocationBuildingId(assistantLocationTask))?.name ?? profile?.building?.name
+      ? buildingNameById.get(taskLocationBuildingId(assistantLocationTask) ?? -1) ?? profile?.building?.name
       : profileBuildingName;
   const isAtRegisteredBuilding =
     originalBuildingIdRef.current == null ||
@@ -4290,7 +4302,7 @@ export default function PhotographerPage() {
     ? allProfiles.filter((p) => {
         if (!isAssistantRole(p.role)) return false;
         if (p.id === collabTask.assistantId) return false;
-        const live = assistants.find((a) => a.id === p.id);
+        const live = assistantDockById.get(p.id);
         const selected = collabSelectedIds.includes(p.id) || collabCurrentIds.includes(p.id);
         if (selected) return true;
         if (collabNewHelpersDisabled) return false;
@@ -4403,6 +4415,10 @@ export default function PhotographerPage() {
       .filter((task) => publicQueueBuildingId != null && taskLocationBuildingId(task) === publicQueueBuildingId)
       .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()),
     [publicQueueBuildingId, publicQueueRaw],
+  );
+  const areaTaskById = useMemo(
+    () => new Map(areaTasks.map((task) => [task.id, task])),
+    [areaTasks],
   );
 
   const closeTransferModal = useCallback(() => {
@@ -4727,7 +4743,7 @@ export default function PhotographerPage() {
     const transferTaskWithRequest = [currentRawTask, pausedRawTask].find((task) => activeTransferForTask(task)) ?? null;
     const activeTransfer = activeTransferForTask(transferTaskWithRequest);
     const targetName = activeTransfer
-      ? allProfiles.find((item) => item.id === activeTransfer.targetAssistantId)?.name ?? "目标助理"
+      ? profileById.get(activeTransfer.targetAssistantId)?.name ?? "目标助理"
       : null;
     if (activeTransfer) {
       const label = activeTransfer.status === "confirming" ? "待确认" : "已预约";
@@ -4784,8 +4800,6 @@ export default function PhotographerPage() {
   );
   const activeIroningWorkItems = useMemo(() => {
     const nowMs = now.getTime();
-    const profileById = new Map(allProfiles.map((item) => [item.id, item]));
-    const dockAssistantById = new Map(assistants.map((item) => [item.id, item]));
 
     return areaTasks
       .filter((task) => isIroningTask(task) && task.status === "executing" && !!task.assistantId)
@@ -4801,7 +4815,7 @@ export default function PhotographerPage() {
           );
           const participant = taskParticipantForProfile(task, assistantId);
           const profileAssistant = profileById.get(assistantId);
-          const dockAssistant = dockAssistantById.get(assistantId);
+          const dockAssistant = assistantDockById.get(assistantId);
           const remainingMin = capMin == null ? null : Math.max(0, capMin - elapsedMin);
           return {
             task,
@@ -4820,11 +4834,8 @@ export default function PhotographerPage() {
           };
         });
       });
-  }, [allProfiles, areaTasks, assistants, now]);
+  }, [areaTasks, assistantDockById, now, profileById]);
   const waitingIroningWorkItems = useMemo(() => {
-    const profileById = new Map(allProfiles.map((item) => [item.id, item]));
-    const dockAssistantById = new Map(assistants.map((item) => [item.id, item]));
-
     return areaTasks
       .filter((task) =>
         isIroningTask(task) &&
@@ -4842,7 +4853,7 @@ export default function PhotographerPage() {
         return ironingSlotAssistantIds(task).map((assistantId) => {
           const participant = taskParticipantForProfile(task, assistantId);
           const profileAssistant = profileById.get(assistantId);
-          const dockAssistant = dockAssistantById.get(assistantId);
+          const dockAssistant = assistantDockById.get(assistantId);
           return {
             task,
             assistantId,
@@ -4858,7 +4869,7 @@ export default function PhotographerPage() {
           };
         });
       });
-  }, [allProfiles, areaTasks, assistants]);
+  }, [areaTasks, assistantDockById, profileById]);
   const ironingAssistantCapacity = availableIroningMachines.length;
   const claimedIroningMachineCount = waitingIroningWorkItems.filter((item) => item.task.ironingStage === "notified").length;
   const freeIroningMachineCount = Math.max(0, ironingAssistantCapacity - activeIroningWorkItems.length - claimedIroningMachineCount);
@@ -5073,15 +5084,14 @@ export default function PhotographerPage() {
     const nowMs = now.getTime();
     const areaAssistantIds = new Set(assistants.map((assistant) => assistant.id));
     const areaCompletedAssistantIds = new Set<string>();
-    const buildingNameById = new Map(buildings.map((building) => [building.id, building.name]));
     const contributionMap = new Map<string, AssistantRankingContribution[]>();
 
-	    const addContribution = (entry: AssistantRankingContribution, isAreaTask: boolean) => {
-	      if (isAreaTask) areaCompletedAssistantIds.add(entry.assistantId);
-	      const current = contributionMap.get(entry.assistantId) ?? [];
-	      current.push(entry);
-	      contributionMap.set(entry.assistantId, current);
-	    };
+    const addContribution = (entry: AssistantRankingContribution, isAreaTask: boolean) => {
+      if (isAreaTask) areaCompletedAssistantIds.add(entry.assistantId);
+      const current = contributionMap.get(entry.assistantId) ?? [];
+      current.push(entry);
+      contributionMap.set(entry.assistantId, current);
+    };
 
     for (const task of publicQueueRaw) {
       const isAreaTask = publicQueueBuildingId != null && taskLocationBuildingId(task) === publicQueueBuildingId;
@@ -5099,36 +5109,36 @@ export default function PhotographerPage() {
         const details = orderedEntries.map((entry): AssistantRankingDetail => {
           const scoreFactor = assistantTaskScoreFactor(entry.taskName);
           const serviceScore = assistantTaskScoreFromSeconds(entry.workSeconds, entry.taskName);
-	          const buildingName = entry.buildingId != null
-	            ? buildingNameById.get(entry.buildingId) ?? "未知楼座"
-	            : "未知楼座";
-	          const displayTaskName = displayTaskCategoryName(entry.taskName);
-	          return {
-	            taskId: entry.taskId,
-	            taskTitle: `${buildingName} · ${formatRoomOrVenue(entry.roomNumber)} · ${displayTaskName}`,
+          const buildingName = entry.buildingId != null
+            ? buildingNameById.get(entry.buildingId) ?? "未知楼座"
+            : "未知楼座";
+          const displayTaskName = displayTaskCategoryName(entry.taskName);
+          return {
+            taskId: entry.taskId,
+            taskTitle: `${buildingName} · ${formatRoomOrVenue(entry.roomNumber)} · ${displayTaskName}`,
             serviceSeconds: entry.workSeconds,
             scoreFactor,
             serviceScore,
             totalScore: serviceScore,
           };
         });
-	        const dockAssistant = assistants.find((assistant) => assistant.id === assistantId);
-	        const profileAssistant = allProfiles.find((assistant) => assistant.id === assistantId);
-	        const assistantName =
-	          dockAssistant?.name ??
-	          profileAssistant?.name ??
-	          orderedEntries.at(-1)?.assistantName ??
-	          "未命名助理";
-	        const avatar = dockAssistant?.avatar ?? profileAssistant?.avatar ?? null;
-	        const lastCompletedAtMs = orderedEntries.at(-1)?.completedAtMs ?? 0;
-	        const score = details.reduce((sum, detail) => sum + detail.totalScore, 0);
-	        return {
-	          assistantId,
-	          assistantName,
-	          avatar,
-	          score,
-	          completedCount,
-	          workSeconds,
+        const dockAssistant = assistantDockById.get(assistantId);
+        const profileAssistant = profileById.get(assistantId);
+        const assistantName =
+          dockAssistant?.name ??
+          profileAssistant?.name ??
+          orderedEntries.at(-1)?.assistantName ??
+          "未命名助理";
+        const avatar = dockAssistant?.avatar ?? profileAssistant?.avatar ?? null;
+        const lastCompletedAtMs = orderedEntries.at(-1)?.completedAtMs ?? 0;
+        const score = details.reduce((sum, detail) => sum + detail.totalScore, 0);
+        return {
+          assistantId,
+          assistantName,
+          avatar,
+          score,
+          completedCount,
+          workSeconds,
           lastCompletedAtMs,
           details,
         };
@@ -5141,9 +5151,9 @@ export default function PhotographerPage() {
         a.assistantName.localeCompare(b.assistantName)
       )
       .slice(0, 10);
-	  }, [allProfiles, assistants, buildings, now, publicQueueBuildingId, publicQueueRaw]);
-	  const areaAssistantStats = useMemo(() => assistants.reduce(
-	    (acc, assistant) => {
+  }, [assistantDockById, assistants, buildingNameById, now, profileById, publicQueueBuildingId, publicQueueRaw]);
+  const areaAssistantStats = useMemo(() => assistants.reduce(
+    (acc, assistant) => {
       if (assistant.onlineStatus === "offline") acc.offline += 1;
       else if (assistant.status === "executing" || assistant.status === "busy") acc.executing += 1;
       else if (assistant.status === "assigned") acc.assigned += 1;
@@ -5178,8 +5188,6 @@ export default function PhotographerPage() {
       offline: new Map(),
     });
     const maps = empty();
-    const profileById = new Map(allProfiles.map((item) => [item.id, item]));
-    const taskById = new Map(areaTasks.map((task) => [task.id, task]));
     const useAssistantPeople = isAssistantRole(profile?.role);
 
     const addPerson = (
@@ -5235,7 +5243,7 @@ export default function PhotographerPage() {
 
     const taskAssistantById = (assistantId: string, fallback?: { name?: string | null; avatar?: string | null }) => {
       const profileAssistant = profileById.get(assistantId);
-      const dockAssistant = assistants.find((assistant) => assistant.id === assistantId);
+      const dockAssistant = assistantDockById.get(assistantId);
       return {
         id: assistantId,
         name: profileAssistant?.name ?? dockAssistant?.name ?? fallback?.name ?? "未命名助理",
@@ -5266,7 +5274,7 @@ export default function PhotographerPage() {
     const executingAssistants = assistants.filter((assistant) => assistant.status === "executing" || assistant.status === "busy");
     for (const assistant of executingAssistants) {
       if (useAssistantPeople) {
-        const task = assistant.currentTaskId ? taskById.get(assistant.currentTaskId) : null;
+        const task = assistant.currentTaskId ? areaTaskById.get(assistant.currentTaskId) : null;
         const current = maps.executing.get(assistant.id) ?? {
           id: assistant.id,
           name: assistant.name || "未命名",
@@ -5283,7 +5291,7 @@ export default function PhotographerPage() {
         }
         maps.executing.set(assistant.id, current);
       } else {
-        const task = assistant.currentTaskId ? taskById.get(assistant.currentTaskId) : null;
+        const task = assistant.currentTaskId ? areaTaskById.get(assistant.currentTaskId) : null;
         if (task) {
           const person = taskPublisher(task);
           const current = maps.executing.get(person.id) ?? {
@@ -5364,7 +5372,7 @@ export default function PhotographerPage() {
         }),
       ]),
     ) as Record<AreaMetricKey, AreaMetricPerson[]>;
-  }, [allProfiles, areaTasks, assistants, now, profile?.role, publicQueueDisplayTasks]);
+  }, [areaTaskById, areaTasks, assistantDockById, assistants, now, profile?.role, profileById, publicQueueDisplayTasks]);
 		  const rankingCrownByAssistantId = useMemo(() => {
 		    const rows = assistantRankingRows.slice(0, 3);
 		    return rows.reduce<Record<string, { rank: 1 | 2 | 3 }>>((acc, row, index) => {
@@ -5399,7 +5407,6 @@ export default function PhotographerPage() {
       count: number;
       assistants: Map<string, { id: string; name: string; avatar: string | null; count: number }>;
     }>();
-    const profileById = new Map(allProfiles.map((p) => [p.id, p]));
     for (const task of areaTasks) {
       if (task.status !== "completed") continue;
       if (!task.assistantId) continue;
@@ -5435,7 +5442,7 @@ export default function PhotographerPage() {
         color: string;
         assistants: { id: string; name: string; avatar: string | null; count: number }[];
       } => item !== null);
-  }, [allProfiles, areaTasks]);
+  }, [areaTasks, profileById]);
   const areaTaskTypeCompletedTotal = useMemo(
     () => areaTaskTypeBreakdown.reduce((sum, item) => sum + item.count, 0),
     [areaTaskTypeBreakdown],
@@ -8429,7 +8436,7 @@ export default function PhotographerPage() {
               </div>
               <div className="rounded-3xl border border-purple-100 bg-purple-50/75 px-6 py-5">
                 <p className="whitespace-pre-wrap break-words text-[21px] leading-relaxed text-purple-950">
-                  {`是否确认接替「${allProfiles.find((item) => item.id === incomingConfirmingTransfer.fromAssistantId)?.name ?? "原助理"}」移交的当前任务？`}
+                  {`是否确认接替「${profileById.get(incomingConfirmingTransfer.fromAssistantId)?.name ?? "原助理"}」移交的当前任务？`}
                 </p>
                 <p className="mt-3 whitespace-pre-wrap break-words text-[15px] font-semibold leading-relaxed text-purple-950/72">
                   {incomingConfirmingTransferIsSwap
@@ -8556,7 +8563,7 @@ export default function PhotographerPage() {
                   <div className="space-y-2">
                     {collabCandidateProfiles.map((candidate) => {
                       const selected = collabSelectedIds.includes(candidate.id);
-                      const live = assistants.find((a) => a.id === candidate.id);
+                      const live = assistantDockById.get(candidate.id);
                       const statusLabel = selected
                         ? "已选择"
                         : live?.status === "idle"
@@ -9954,7 +9961,7 @@ export default function PhotographerPage() {
                 {false ? (
                   publicQueueTasks.length === 0 ? (
                     <div className="flex min-h-[160px] items-center justify-center rounded-xl border border-dashed border-gray-200/70 bg-white/35 px-3 py-8 text-center text-[10px] font-medium text-[--text-muted]">
-                      {buildings.find((b) => b.id === publicQueueBuildingId)?.name ?? "当前区域"}暂无未开始队列
+                      {buildingNameById.get(publicQueueBuildingId ?? -1) ?? "当前区域"}暂无未开始队列
                     </div>
                   ) : (
                     publicQueueDisplayTasks.map((queueTask, index) => {
@@ -10655,7 +10662,7 @@ export default function PhotographerPage() {
                   ? p.activeBuildingId ?? p.buildingId
                   : p.buildingId;
                 const displayBuildingName =
-                  buildings.find((b) => b.id === displayBuildingId)?.name ?? p.building.name;
+                  buildingNameById.get(displayBuildingId) ?? p.building.name;
                 if (!buildingMap.has(displayBuildingId)) {
                   buildingMap.set(displayBuildingId, { name: displayBuildingName, profiles: [] });
                 }
@@ -10736,7 +10743,7 @@ export default function PhotographerPage() {
                                 : null;
                               const assistantServiceBuildingId = isAssistant ? p.activeBuildingId ?? p.buildingId : p.buildingId;
                               const assistantServiceBuildingName =
-                                buildings.find((b) => b.id === assistantServiceBuildingId)?.name ?? p.building.name;
+                                buildingNameById.get(assistantServiceBuildingId) ?? p.building.name;
                               const otherBuildings = buildings.filter((b) => b.id !== assistantServiceBuildingId);
 
                               return (

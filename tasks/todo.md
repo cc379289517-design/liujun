@@ -6641,6 +6641,23 @@
 - 验证备注：本地 dev 首启仍需清理 `.next` 中 macOS `._*` 伴生文件和 Turbopack 缓存；本轮清理 898 个伴生文件。`/api/workbench/sync` 在隔离 `loadtest.db` 触发熨烫队列维护日志，不影响 `prisma/dev.db` 或生产库。
 - Mac mini 部署验证：生产默认 `/api/config` 从约 3.97MB 降到 3095 bytes；`/api/config?keys=workbench_page_background&includeLarge=1` 仍可取回约 3.97MB 原始 data URL；`/api/config/background` 返回 `image/jpeg`、约 2.98MB、带 ETag。`/photographer` 200，`com.spad.local` 正常运行。
 
+#### 阶段 D 第十九批计划：区域派生共享索引
+
+- [x] 页面层新增 `profileById`、`buildingById`、`buildingNameById`、`areaTaskById` 等共享 memo，避免区域统计、助理排行、熨烫面板、指标气泡反复建 Map 或循环 `find()`。
+- [x] 替换明确的 `id -> object/name` 查找；保留协作候选、权限筛选、列表渲染等复杂条件遍历，避免性能优化夹带业务规则变化。
+- [x] 保持区域统计、公共队列、助理排行、任务类型、熨烫机队列的展示口径和排序结果不变，只减少每轮同步/分钟 tick 的重复计算。
+- [x] 验证 `tsc`、`git diff --check`、生产构建、本地页面与轻量接口；本批只做前端派生索引等价优化，不更新长期业务文档。
+
+#### 阶段 D 第十九批评审：区域派生共享索引
+
+- 已完成：摄影师工作台页面层新增共享 `profileById`、`buildingById`、`buildingNameById`、`areaTaskById`，为地图当前助理、楼座切换、身份恢复、转派文案、协作候选、熨烫工作项、助理排行、区域指标和任务类型占比复用同一批索引。
+- 已完成：移除熨烫面板、助理排行、区域指标、任务类型统计内部反复构建 `Map(allProfiles)`、`Map(buildings)`、`Map(areaTasks)` 和多处纯 id `find()`；保留 `employeeId` 恢复身份、协作候选过滤、楼座列表过滤等真实条件遍历。
+- 已保持：区域统计、公共队列、助理排行、任务类型、熨烫机队列的展示口径、排序和状态文案不变；本批不改派单、优先级、熨烫机、移交或状态命令业务规则，不更新长期业务文档。
+- 验证通过：`npx tsc --noEmit --pretty false --incremental false`、`git diff --check -- src/app/photographer/page.tsx tasks/todo.md tasks/lessons.md`、`DATABASE_URL=file:./prisma/loadtest.db npm run build`。
+- 本地冒烟：隔离 `loadtest.db` 下 `http://localhost:3100/photographer` 200 / 43476 bytes，`/api/config` 200 / 2209 bytes，`/api/workbench/sync?role=photographer&buildingId=1&full=1` 200 / 93288 bytes。
+- 验证备注：本地 dev 首启仍需清理 `.next` 中 macOS `._*` 伴生文件和 Turbopack 缓存；本轮清理 919 个伴生文件。`/api/workbench/sync` 在隔离 `loadtest.db` 触发熨烫队列维护日志，不影响 `prisma/dev.db` 或生产库。
+- 待后续：继续推进公共队列首屏摘要/详情按需、服务端 `assistantStatus` 摘要补丁，或拆分页面级 `now` 对区域统计/列表的分钟级派生，进一步降低同步后的前端合并和重算成本。
+
 ### 阶段 E：验收与对抗审查
 
 - [ ] 基线压测完成后，先根据报告排序瓶颈，再决定是否进入 B/C/D 的第一批代码改动。
