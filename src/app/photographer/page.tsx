@@ -2547,7 +2547,10 @@ export default function PhotographerPage() {
         const publicQueueData = Array.isArray(syncData.publicQueue) ? syncData.publicQueue as TaskFromAPI[] : [];
         const taskData = Array.isArray(syncData.tasks) ? syncData.tasks as TaskFromAPI[] : [];
         const noticeData = Array.isArray(syncData.notices) ? syncData.notices as StandbyReassignmentNoticeFromAPI[] : [];
-        const nextAreaSummary = parseWorkbenchAreaSummary(syncData.areaSummary);
+        const hasAreaSummaryPayload = Object.prototype.hasOwnProperty.call(syncData, "areaSummary");
+        const nextAreaSummary = hasAreaSummaryPayload
+          ? parseWorkbenchAreaSummary(syncData.areaSummary)
+          : null;
         const serverSyncMode = syncData.syncMode === "delta" ? "delta" : "full";
         const taskIds = Array.isArray(syncData.taskIds)
           ? syncData.taskIds.filter((id): id is string => typeof id === "string")
@@ -2595,7 +2598,9 @@ export default function PhotographerPage() {
           workbenchLastFullSyncAtRef.current = Date.now();
         }
         startTransition(() => {
-          setWorkbenchAreaSummary(nextAreaSummary ? { buildingId, summary: nextAreaSummary } : null);
+          if (hasAreaSummaryPayload) {
+            setWorkbenchAreaSummary(nextAreaSummary ? { buildingId, summary: nextAreaSummary } : null);
+          }
           replacePublicQueueRaw(mergedPublicQueue);
           setReassignmentNotices(isAssistantRole(pollingProfile.role) ? noticeData : []);
           applyTaskDataForProfile(mergedTaskData, pollingProfile, buildingId);

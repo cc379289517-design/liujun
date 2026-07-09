@@ -7016,6 +7016,26 @@
 - Smoke：`phase-e12-area-summary-smoke-60s`，9 会话 60 秒，254 请求，0 错误；`/api/workbench/sync` p50 23.1ms、p95 32.6ms、p99 39ms；full 平均 68591.8 bytes，delta 平均 17329.9 bytes。
 - 待后续：把助理排行完整明细、公共队列任务详情和区域完成明细继续拆成按需接口；随后跑 115 会话 10 分钟只读和 3 分钟混合短测，确认 full 详情裁剪对长时体积和业务 409 无负面影响。
 
+#### 阶段 E 第十三批计划：areaSummary 后 115 会话正式复压
+
+- [x] 重新 seed 隔离 `prisma/loadtest.db`，使用 80 摄影师、30 助理、5 管理、360 初始任务画像，避免复用第十二批 smoke 后的脏库。
+- [x] 使用本地 3100 生产服务跑 10 分钟只读压测，记录 `/api/workbench/sync` p50/p95/p99、full/delta 次数、响应体总量、p95 bytes、错误率。
+- [x] 跑 3 分钟混合短测，重点观察 `areaSummary` 后 full 裁剪是否影响写操作、业务 409 分类、SQLite locked/busy 和状态不变量。
+- [x] 压测后执行 SQL 不变量审查：同助理多个执行/暂停根任务、重复 current primary、熨烫 `using` 超机器容量。
+- [x] 根据报告决定下一刀：公共队列首屏摘要/详情按需、排行完整明细按需、统计聚合接口，或前端局部渲染继续拆分。
+
+#### 阶段 E 第十三批评审：areaSummary delta 按需下发
+
+- 第一轮只读复压发现问题：`phase-e13-area-summary-readonly-115-10min`，115 会话 10 分钟 22229 请求、0 错误，`/api/workbench/sync` p95 22.5ms；但 delta 平均 10585.4 bytes、p95 10652 bytes，原因是 `areaSummary` 每轮 delta 重复下发。
+- 已修复：`/api/workbench/sync` 改为 full 必带 `areaSummary`，delta 只有区域任务或关联记录变化时才下发；前端未收到 `areaSummary` 时保留上一份摘要，不清空区域数据面板。
+- 快速接口验证：连续 `full -> delta -> delta` 中，无变化 delta 为 2787 bytes，`hasAreaSummary=false`，publicQueue changed=0。
+- 第二轮只读复压：`phase-e13-area-summary-delta-gated-readonly-115-10min`，115 会话 10 分钟 22225 请求、0 错误；`/api/workbench/sync` p50 9.5ms、p95 22.7ms、p99 179.1ms、max 511.1ms。
+- 只读体积：full 110 次共 7.52MB，平均 71703.5 bytes、p95 75304 bytes；delta 21864 次共 59.99MB，平均 2876.9 bytes、p95 2920 bytes。对比第十一批只读 delta 平均 3172 bytes，本批继续下降约 10%；对比第一轮错误策略 delta 平均 10585 bytes，下降约 73%。
+- 混合短测：`phase-e13-area-summary-delta-gated-mixed-115-3min`，7141 请求，18 个非 2xx 全部为 `mixed-start` 业务 409；无 500、无 timeout、无 SQLite locked/busy。
+- 混合延迟与体积：`/api/workbench/sync` p50 10.3ms、p95 133.6ms、p99 241.7ms；full 110 次共 7.53MB、平均 71808.1 bytes；delta 6475 次共 96.7MB、平均 15659.4 bytes、p95 24828 bytes。
+- 不变量审查通过：同助理多个执行/暂停根任务 0、重复 current primary 0、熨烫 `using` 槽位超容量 0；raw 日志未见 `locked/busy/timeout/500`。
+- 结论：`areaSummary` 摘要化现在达成“full 大包变小、只读 delta 保持极轻”的目标；混合 delta 仍随真实写入和队列变化放大，下一刀应继续做公共队列首屏详情/任务详情按需，或把 `areaSummary` 内排行明细彻底拆成按需详情。
+
 ### 阶段 A 评审
 
 - 已完成压测工具：新增 `scripts/loadtest/seed.ts`、`run.ts`、`report.ts`、`common.ts`，不引入 k6/artillery 等新依赖；使用 Node 内置 `fetch`、现有 `tsx` 和 Prisma/SQLite。

@@ -1041,9 +1041,20 @@ export async function GET(request: NextRequest) {
         },
       ],
     };
-    const [areaRelatedChanges, scopedRelatedChanges] = await Promise.all([
-      relatedChangedTaskIdsSince(since, areaDetailTaskWhere),
+    const [areaRelatedChanges, scopedRelatedChanges, areaSummaryUpdatedTask] = await Promise.all([
+      relatedChangedTaskIdsSince(since, areaTaskWhere),
       relatedChangedTaskIdsSince(since, scopedTaskWhere),
+      since
+        ? prisma.bookingTask.findFirst({
+            where: {
+              AND: [
+                areaTaskWhere,
+                { updatedAt: { gte: since } },
+              ],
+            },
+            select: { id: true },
+          })
+        : Promise.resolve(null),
     ]);
     const areaChangedWhere = taskDeltaWhere(areaDetailTaskWhere, since, areaRelatedChanges.ids);
     const scopedChangedWhere = taskDeltaWhere(scopedTaskWhere, since, scopedRelatedChanges.ids);
@@ -1157,11 +1168,18 @@ export async function GET(request: NextRequest) {
         ),
       );
     }
-    const areaSummaryResult = await getCachedAreaSummary(
-      buildingId,
-      profiles,
-      areaTaskWhere,
-    );
+    const shouldSendAreaSummary =
+      !since ||
+      areaSummaryUpdatedTask != null ||
+      areaRelatedChanges.ids.length > 0 ||
+      areaRelatedChanges.truncated;
+    const areaSummaryResult = shouldSendAreaSummary
+      ? await getCachedAreaSummary(
+          buildingId,
+          profiles,
+          areaTaskWhere,
+        )
+      : null;
     const syncTruncated = Boolean(since) && (
       areaTasksTruncated ||
       scopedTasksTruncated ||
@@ -1182,7 +1200,7 @@ export async function GET(request: NextRequest) {
       maintenance,
       profiles: responseProfiles.map(serializeProfileForJson),
       assistantStatus,
-      areaSummary: areaSummaryResult.summary,
+      areaSummary: areaSummaryResult?.summary,
       tasks: visibleTasks.map(serializeTaskAssistantAvatars),
       taskIds: visibleTaskIds.map((task) => task.id),
       publicQueue: visibleAreaTasks.map(serializeTaskAssistantAvatars),
@@ -1195,7 +1213,7 @@ export async function GET(request: NextRequest) {
         scopedIdListTruncated: scopedTaskIdsTruncated,
         scopedTaskListTruncated: scopedTasksTruncated,
         assistantStatusTruncated,
-        areaSummaryTruncated: areaSummaryResult.truncated,
+        areaSummaryTruncated: areaSummaryResult?.truncated ?? false,
       },
       notices,
     });
