@@ -423,8 +423,15 @@ export function assistantStartCandidateTasksForProfile(
       new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
   });
 
+  const highestStartablePriority = sortedCandidates.length > 0
+    ? Math.min(...sortedCandidates.map((task) => task.priority))
+    : null;
+  const priorityFilteredCandidates = highestStartablePriority == null
+    ? sortedCandidates
+    : sortedCandidates.filter((task) => task.priority === highestStartablePriority);
+
   let keptIroningTaskId: string | null = null;
-  return sortedCandidates.filter((task) => {
+  return priorityFilteredCandidates.filter((task) => {
     const isStartableIroning = isIroningTask(task) && canStartWaitingTaskWithIroningCapacity(task, profileId, freeIroningMachineCount);
     if (!isStartableIroning) return true;
     if (keptIroningTaskId) return false;

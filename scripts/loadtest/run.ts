@@ -52,6 +52,7 @@ type TaskLike = {
   photographerId?: string;
   assistantId?: string | null;
   status?: "waiting" | "executing" | "paused" | "completed";
+  priority?: number;
   ironingStage?: "none" | "waiting_machine" | "notified" | "using";
   parentTaskId?: string | null;
   isLocked?: boolean | null;
@@ -318,6 +319,19 @@ function canAttemptStartWaitingTask(task: TaskLike, assistantId: string, hasWork
   return true;
 }
 
+function startableWaitingTasksForAssistant(tasks: TaskLike[], assistantId: string, hasWorkingTask: boolean): TaskLike[] {
+  const candidates = tasks
+    .filter((task) => canAttemptStartWaitingTask(task, assistantId, hasWorkingTask))
+    .sort((a, b) =>
+      (a.priority ?? 999) - (b.priority ?? 999) ||
+      (isIroningTask(a) ? 0 : 1) - (isIroningTask(b) ? 0 : 1)
+    );
+  const highestPriority = candidates[0]?.priority;
+  return highestPriority == null
+    ? candidates
+    : candidates.filter((task) => task.priority === highestPriority);
+}
+
 function stringIds(value: unknown): string[] | null {
   return Array.isArray(value)
     ? value.filter((id): id is string => typeof id === "string")
@@ -410,7 +424,7 @@ async function maybeAssistantAction(persona: Persona, tasks: TaskLike[]): Promis
   if (persona.role !== "assistant" || random() > assistantActionChance) return;
   const ownTasks = tasks.filter((task) => taskBelongsToAssistant(task, persona.profile.id));
   const hasWorkingTask = assistantHasWorkingTask(ownTasks, persona.profile.id);
-  const waiting = ownTasks.find((task) => canAttemptStartWaitingTask(task, persona.profile.id, hasWorkingTask));
+  const waiting = startableWaitingTasksForAssistant(ownTasks, persona.profile.id, hasWorkingTask)[0];
   const paused = ownTasks.find((task) => taskStatusForAssistant(task, persona.profile.id) === "paused");
   const executing = ownTasks.find((task) => taskStatusForAssistant(task, persona.profile.id) === "executing");
 

@@ -6936,6 +6936,23 @@
 - 不变量审查通过：同助理多个执行/暂停根任务 0、重复 current primary 0、熨烫 `using` 槽位超容量 0；raw 日志未见 500、timeout、SQLite locked/busy。
 - 结论：摄影师端重复发单噪音已基本消除，混合写请求更贴近真实有效操作。下一步剩余主要是高优先级开始选择和熨烫机槽位 start 的少量 409，以及工作台前端局部渲染/store 继续拆细。
 
+#### 阶段 E 第九批计划：开始任务候选池优先级前置过滤
+
+- [x] 前端助理可开始任务池只保留当前最高优先级（priority 数值最小）的可开始候选；同优先级多个任务仍允许选择。
+- [x] 保留后端 `assertAssistantCanStartTaskByPriority()` 兜底；本批只减少低优先级候选误点，不改变业务规则。
+- [x] 压测脚本同步按当前助理可开始候选的最高优先级选择任务，减少不符合真实 UI 的 `mixed-start` 409。
+- [x] 验证 TypeScript、生产 build、短混合压测；重点观察“当前有更高优先级任务可开始”409 是否下降，状态不变量必须继续为 0。
+
+#### 阶段 E 第九批评审：开始任务候选池优先级前置过滤
+
+- 改动范围：`src/app/photographer/taskDisplay.ts` 的助理可开始任务候选池先按当前最高优先级裁剪，`scripts/loadtest/run.ts` 的虚拟助理动作选择同步该口径；同优先级多个任务仍保留，熨烫机可开始候选仍继续按槽位去重。
+- 行为保持：后端 `assertAssistantCanStartTaskByPriority()` 仍是权威兜底；本批只减少前端/压测发起层明知会被拒绝的低优先级开始动作，不改变优先级、熨烫机或插单业务规则。
+- 验证通过：`git diff --check`、`npx prisma validate`、`npx tsc --noEmit --pretty false --incremental false`、`DATABASE_URL=file:./prisma/loadtest.db npm run build`。
+- 短混合压测：`start-priority-guard-mixed-115-3min`，80 摄影师、30 助理、5 管理，7157 请求；总 409 从上一轮 23 降到 16，全部来自 `mixed-start` 业务保护，其中 14 次高优先级兜底、2 次熨烫机暂时无空位。
+- 同步表现：`/api/workbench/sync` p50 9.8ms、p95 114.7ms、p99 226.1ms、max 526.7ms；delta 6472 次共 66.39MB、平均 10757 bytes、p95 18235 bytes；full 110 次共 10.95MB。
+- 不变量审查通过：同助理多个执行/暂停根任务 0、重复 current primary 0、熨烫 `using` 槽位超容量 0；raw 日志未见 500、timeout、SQLite locked/busy。
+- 结论：本批继续降低无效 start 请求，剩余 409 属于同步快照到点击之间发生新高优先级任务/机器槽位变化后的正确后端拦截。下一步重点不再是追求 409 归零，而是继续压缩同步响应体尾部、拆分工作台局部渲染和补充更长时段正式压测。
+
 ### 阶段 A 评审
 
 - 已完成压测工具：新增 `scripts/loadtest/seed.ts`、`run.ts`、`report.ts`、`common.ts`，不引入 k6/artillery 等新依赖；使用 Node 内置 `fetch`、现有 `tsx` 和 Prisma/SQLite。
