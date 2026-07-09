@@ -7244,6 +7244,24 @@
 - Mac mini 巡检结果：`npm run prod:check -- --ssh-target=lj@192.168.31.171 --remote-backup-dir=/Users/lj/liujun-portable/liujun/database-backups --backup-max-age-min=1440` PASS；`/api/config` 3095 bytes、`/photographer` 37866 bytes、full sync 8283 bytes、delta sync 483 bytes，远程备份存在。
 - 阶段结论：生产化剩余风险从“靠人工记得看”降为“发布后/开店前一条命令巡检”；下一步若继续推进，应补前端真实设备 INP 采集或把 `prod:check` 接入 launchd/定时提醒。
 
+#### 阶段 E 第二十八批计划：真实设备体验指标采集
+
+- [x] 新增客户端性能采集组件，挂在全局 layout，采集 LCP、CLS、长任务、INP 近似交互耗时和页面可见性，不参与业务渲染状态。
+- [x] 新增 `/api/client-metrics` 只写日志接口，限制请求体大小、指标数量和字段白名单，追加到 `logs/client-metrics-YYYYMMDD.jsonl`，不写 Prisma、不影响业务数据库。
+- [x] 客户端批量、节流、使用 `sendBeacon`/`keepalive` 上报，避免指标采集反过来拖慢现场页面。
+- [x] 采集内容避免姓名、密码、SKU、备注等业务敏感文本，只记录角色、页面路径、设备视口和匿名会话 ID。
+- [x] 验证 TypeScript、生产 build、接口大小限制、线上巡检；记录真实体验可观测性进入阶段性收口。
+
+#### 阶段 E 第二十八批评审：真实设备体验指标采集
+
+- 改动范围：新增全局 `ClientPerformanceReporter`、新增 `/api/client-metrics` 只写日志接口，并在 `src/app/layout.tsx` 挂载；不改派单、状态切换、同步业务规则。
+- 客户端口径：采集 navigation、LCP、CLS、超过 100ms 的 longtask、Event Timing 得到的交互耗时近似值、页面可见时长；每 30 秒或页面隐藏时批量上报，优先 `sendBeacon`，失败再用 `fetch keepalive`。
+- 服务端口径：请求体最大 32KB、单批最多 50 条、指标名白名单；日志追加到 `logs/client-metrics-YYYYMMDD.jsonl`，不写 Prisma，不进入业务数据库。
+- 隐私边界：只记录匿名会话 ID、页面路径、角色、视口、网络粗略信息和指标数值；不记录姓名、工号、SKU、备注、密码、任务内容。
+- 本地接口验证：模拟上报 3 条指标返回 200 / accepted 3，并写入 JSONL；40KB 超大 payload 返回 413。
+- 本地巡检验证：`npm run prod:check -- --base-url=http://127.0.0.1:3100 --full-max-bytes=100000 --delta-max-bytes=10000` PASS；`/photographer` 38576 bytes，full sync 23081 bytes，delta sync 484 bytes。
+- 验证通过：`npx tsc --noEmit --pretty false --incremental false`、`DATABASE_URL=file:./prisma/loadtest.db npm run build`。
+
 #### 阶段 E 第二十三批计划：开始/暂停状态切换维护降载
 
 - [x] `src/app/api/tasks/[id]/route.ts`：助理 `start` 和 `pause` 在完成原子状态写入、加载权威任务详情后，不再等待 `runTaskMaintenance()`；改为复用 `scheduleTaskMaintenance()` 异步触发普通维护。

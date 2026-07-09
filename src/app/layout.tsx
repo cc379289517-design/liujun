@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
+import ClientPerformanceReporter from "./ClientPerformanceReporter";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -36,6 +37,7 @@ export default function RootLayout({
     >
       <body className="min-h-full">
         {children}
+        <ClientPerformanceReporter />
       </body>
     </html>
   );
