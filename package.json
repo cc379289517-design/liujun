@@ -19,6 +19,7 @@
     "loadtest:sweep": "tsx scripts/loadtest/run.ts --mode=sweep --allow-writes",
     "loadtest:report": "tsx scripts/loadtest/report.ts",
     "loadtest:audit": "tsx scripts/loadtest/audit.ts",
+    "test:business-invariants": "rm -f prisma/invariant-test.db prisma/invariant-test.db-shm prisma/invariant-test.db-wal && DATABASE_URL=file:./prisma/invariant-test.db prisma db push --force-reset && DATABASE_URL=file:./prisma/invariant-test.db tsx scripts/tests/business-invariants.ts",
     "db:generate": "prisma generate",
     "db:push": "prisma db push",
     "db:seed": "prisma db seed",

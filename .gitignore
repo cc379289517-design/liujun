@@ -54,6 +54,9 @@ prisma/dev.db-wal
 prisma/loadtest.db
 prisma/loadtest.db-shm
 prisma/loadtest.db-wal
+prisma/invariant-test.db
+prisma/invariant-test.db-shm
+prisma/invariant-test.db-wal
 
 # load test outputs
 /loadtest/results/

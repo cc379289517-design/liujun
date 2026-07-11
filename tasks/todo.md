@@ -1,3 +1,91 @@
+# 需求：补充业务多场景冲突测试
+
+## 当前阶段：扩展复杂业务组合场景测试
+
+### 本次问题
+
+- 用户要求：在已完成 7 条业务不变量测试后，继续补上更多多场景测试。
+- 当前目标：不是重写业务逻辑，而是把最容易互相冲突的组合场景固化成可重复跑的隔离测试。
+- 当前基础：`scripts/tests/business-invariants.ts` 已能使用 `prisma/invariant-test.db` 独立建库、造数、调用真实 scheduler 函数，并在每个用例后执行不变量审计。
+- 约束：本轮继续只补测试，不改 UI，不改生产数据，不重构派单实现；如测试发现真实 bug，再单独记录并按测试驱动修复。
+
+### 补充测试范围
+
+- [x] `scripts/tests/business-invariants.ts`：扩展多场景测试。
+  - [x] P1 执行中插单：低优先级执行中任务可被 P1 插入；子任务完成后父任务恢复待就位。
+  - [x] P1 待就位让行：已分配但未开始的低优先级任务可让行给 P1；父子关系正确，原任务不被误完成。
+  - [x] 待就位超时换人：原助理待就位超时后，系统换派给可用助理，并生成通知；原助理状态按规则释放/离线。
+  - [x] 指定助理成功路径：指定在线、同楼座、可用助理时，任务直接绑定该助理并创建 primary 参与记录。
+  - [x] 指定助理拒绝路径：指定离线/吃饭/跨楼座助理时，任务创建被拒绝且不产生脏任务。
+  - [x] 摄影师任务上限：超过上限时任务进入个人队列，队列容量满后拦截；完成活跃任务并维护扫描后队列任务释放。
+  - [x] 自动提权：超过阈值的未分配 waiting 任务和已分配待就位任务都会按当前代码规则提权。
+- [x] 新增小型 helper：`createPriorityCategory()` 与 `postTask()`，减少重复造数并复用真实 `POST /api/tasks` 入口。
+- [x] 每个新增场景后继续调用现有 `assertNoInvariantViolations()`，确保多场景不破坏核心底线。
+
+### 验证结果
+
+- [x] `npm run test:business-invariants` 通过，14/14 PASS。
+- [x] `npx tsc --noEmit --pretty false --incremental false` 通过。
+- [x] `npx prisma validate` 通过。
+- [x] `git diff --check` 通过。
+
+### 本轮评审
+
+- 已把测试矩阵从 7 个核心不变量扩展到 14 个业务组合场景，覆盖插单、让行、超时换人、指定助理、摄影师上限和自动提权。
+- 指定助理拒绝测试按当前真实规则覆盖离线、吃饭、跨楼座；当前代码并不拒绝“忙碌助理”指定，这属于后续需要业务确认的产品边界，本轮不擅自改规则。
+- 自动提权测试按当前 `scheduler.ts` 注释和实现覆盖“未分配 waiting + 已分配待就位 waiting 都参与提权”；这与早期历史记录可能不同，后续如要改变口径，应先改测试再改实现。
+- `assertNoInvariantViolations()` 已调整为理解 P1 插单父子任务：等待中的 `parentTaskId` 子任务不被误判为同一助理重复活跃任务。
+- 残余风险：当前仍是调度/API 层测试，不覆盖浏览器 UI 乐观更新、移动端点击顺序、多人真实并发竞态；这些应交给后续浏览器端回归和压测矩阵继续补。
+
+# 需求：业务运转冲突不变量测试矩阵
+
+## 当前阶段：补齐复杂业务规则冲突测试矩阵
+
+### 本次问题
+
+- 用户要求：当前业务运转逻辑很复杂，需要补上测试矩阵，验证规则之间不会互相冲突。
+- 当前判断：核心风险不在单条规则，而在任务状态、参与者状态、助理状态、在线/吃饭状态、熨烫机状态、转派状态同时变化时的不变量是否被破坏。
+- 当前工程状态：项目已有 `tsx`、Prisma、SQLite 隔离压测脚本和 `loadtest:audit`，但没有 Vitest/Jest/Playwright 测试框架；`npm run lint` 仍有既有错误，不适合作为本轮测试落地阻塞条件。
+- 约束：本轮只补业务测试与命令入口，不改派单业务规则、不改 UI、不动生产 `prisma/dev.db`。
+
+### 建议方案
+
+- 方案 A（推荐）：新增轻量 `tsx` 业务不变量测试脚本，使用独立 SQLite 文件运行，可直接调用 Prisma 和 `src/lib/scheduler.ts`。
+  - 优点：改动小、贴合当前项目脚本风格、不引入新测试框架、不影响生产库。
+  - 缺点：没有 Jest/Vitest 的测试报告生态，但足够覆盖当前冲突风险。
+- 方案 B：引入 Vitest，建立正式单测体系。
+  - 优点：长期更标准。
+  - 缺点：需要新增依赖、处理 Next/TS 路径和 Prisma 测试环境，范围明显变大。
+
+### 实施范围
+
+- [x] `package.json`：新增 `test:business-invariants` 命令，默认指向隔离数据库文件 `prisma/invariant-test.db`，每次运行前清理旧测试库并 `prisma db push --force-reset`。
+- [x] 新增 `scripts/tests/business-invariants.ts`：
+  - [x] 测试矩阵 1：同一助理最多只能有 1 个活跃非被动任务。
+  - [x] 测试矩阵 2：同一任务最多只有 1 个当前主助理。
+  - [x] 测试矩阵 3：熨烫 `using` 数不能超过正常机器容量。
+  - [x] 测试矩阵 4：已完成任务不能有活跃参与者。
+  - [x] 测试矩阵 5：离线/吃饭助理不能被新派普通任务。
+  - [x] 测试矩阵 6：协作任务未全员完成时，任务不能整体 completed；全员完成后必须 completed。
+  - [x] 测试矩阵 7：转派请求在任务完成或负责人变化后必须失效/不可继续响应。
+- [x] `.gitignore`：忽略测试数据库 `prisma/invariant-test.db*`，避免污染仓库。
+- [x] `tasks/todo.md`：实施后记录测试结果与残余风险。
+- [x] 本轮测试未暴露需要修改业务规则的真实 bug；只修正了测试审计口径与熨烫场景构造。
+
+### 验证结果
+
+- [x] `npm run test:business-invariants` 通过，7/7 PASS。
+- [x] `npx tsc --noEmit --pretty false --incremental false` 通过。
+- [x] `git diff --check` 通过。
+- [x] `npx prisma validate` 通过。
+
+### 本轮评审
+
+- 已新增轻量业务不变量测试矩阵，不引入 Vitest/Jest，符合当前项目脚本风格。
+- 测试使用独立 SQLite 文件，并在脚本内校验 `DATABASE_URL` 必须包含 `invariant-test`，避免误跑到生产或开发库。
+- 本轮固化了一个关键边界：`notified` 熨烫任务会占用机器使用权保护窗口，测试里使用 `waiting_machine` 验证“机器已被使用后第二个任务不能开始”。
+- 残余风险：当前矩阵覆盖核心冲突不变量，但还不是完整端到端测试；后续如果新增规则，应继续补充指定助理、待就位超时换人、P1 插单、摄影师任务上限、优先级提权这些组合场景。
+
 # 需求：熨烫机单机队列、助理预分配与空档任务匹配
 
 ## 当前阶段：全项目拆解与可维护性优化主控计划
@@ -7396,3 +7484,26 @@
 - 同步观察：`/api/workbench/sync` p50 9.6ms、p95 32.2ms、p99 119.6ms；delta 平均 10280.2 bytes、p95 17096 bytes，仍处于可接受区间。
 - 不变量审查通过：同助理多个执行/暂停根任务 0、重复 current primary 等价风险 0、熨烫 `using` 槽位超容量 0。
 - 验证通过：`git diff --check`、`npx tsc --noEmit --pretty false --incremental false`、`DATABASE_URL=file:./prisma/loadtest.db npm run build`、隔离库 seed、115 会话 3 分钟混合压测、raw 精查和 SQL 不变量审查。
+
+#### 本机迁移计划：从移动固态迁到 Mac 用户目录
+
+- [x] 源目录：`/Volumes/PortableSSD/liujun-portable`；目标目录：`/Users/ljuuuu/liujun-portable`。迁移只复制，不删除移动固态源目录。
+- [x] 迁移范围：复制项目仓库 `liujun/`、外层 `database-backups/`、`generated-assets/`、`tasks/`、小型外层锁文件等；排除用户确认不需要的旧完整快照 `liujun-working-snapshot-2026-06-15.tar.gz`、旧便携运行说明 `README-便携运行.md`、旧缓存 `.next-cache-backups/` 和 macOS `._*` 伴生文件。
+- [x] 迁移前检查：记录 `git status --short`、源目录体积、Mac 剩余空间、关键运行态文件，包括 `.env`、`.mini-deploy.env`、`prisma/dev.db*`、`database-backups/`、`logs/`、`ops-reports/`、`public/uploads/`。
+- [x] 停止可能正在运行的本地服务，避免复制 SQLite 时 WAL/SHM 正在变化；复制前执行一次 `scripts/backup-sqlite.sh` 生成安全备份。
+- [x] 使用 `rsync` 复制到 `/Users/ljuuuu/liujun-portable/`，保留隐藏文件、权限、Git 历史和运行态数据；不使用移动/删除。实际环境为 macOS 旧版 rsync，不支持 `--info=progress2`，已改用 `rsync -aHE --progress --stats`。
+- [x] 复制后校验：对比源/目标文件数量和体积，检查目标 `git status --short` 与源目录一致，确认 `prisma/dev.db`、`.env`、`.mini-deploy.env`、上传目录和备份目录存在。
+- [x] 在目标仓库 `/Users/ljuuuu/liujun-portable/liujun` 执行 `npm ci`、`DATABASE_URL=file:./prisma/dev.db npm run build`、`npm run ops:daily-check`；必要时用 3100 端口本地启动验证 `/photographer` 和 `/api/config`。
+- [x] 验证通过后只切换日常开发路径到 `/Users/ljuuuu/liujun-portable/liujun`；移动固态上的旧目录保留至少 3-7 天作为回滚备份，确认无误后再考虑归档或删除。
+
+##### 迁移验收评审（2026-07-11）
+
+- 已完成 SQLite 安全备份：`database-backups/dev-20260711-175717.db.gz`。
+- 已完成复制：目标目录 `/Users/ljuuuu/liujun-portable`；明确排除 `.next-cache-backups/`、`liujun-working-snapshot-2026-06-15.tar.gz`、`README-便携运行.md`。
+- 目标目录未发现 `._*` 伴生文件；不带扩展属性的 rsync dry-run 差异为 0。
+- 文件数差异为 2，符合已排除的旧完整快照和旧便携运行说明；目标体积约 4.1G，源目录约 46G，差异主要来自移动盘对 `node_modules`、`.next`、`.git` 等大量小文件的占用放大和已排除旧缓存。
+- 目标关键文件存在：`.env`、`.mini-deploy.env`、`prisma/dev.db*`、`database-backups/`、`public/uploads/`。
+- 源/目标 Git 状态一致：`.gitignore`、`package.json`、`prisma/dev.db`、`tasks/todo.md` 为修改状态，`scripts/tests/` 未跟踪；本轮未提交 `prisma/dev.db`。
+- 新目录验证通过：`npm ci`、`DATABASE_URL=file:./prisma/dev.db npm run build`、本地 `PORT=3100 DATABASE_URL=file:./prisma/dev.db npm start`、`/photographer` 200、`/api/config` 200。
+- `npm run ops:daily-check` 在新目录执行但失败，失败原因为 Mac mini `192.168.31.171:22` SSH 连接超时；该失败不影响本机迁移完整性，报告已生成到 `ops-reports/daily-check-20260711-180417.md`。
+- 日常开发入口切换为 `/Users/ljuuuu/liujun-portable/liujun`；移动固态旧目录至少保留 3-7 天，不立即删除。
