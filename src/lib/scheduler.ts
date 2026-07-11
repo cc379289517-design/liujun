@@ -1298,7 +1298,7 @@ export async function syncTaskAggregateFromParticipants(taskId: string): Promise
         taskId,
         role: "primary",
         assistantId: { not: task.assistantId },
-        status: { not: "left" },
+        status: { notIn: ["left", "completed"] },
       },
       data: { status: "left", leftAt: new Date() },
     });
@@ -1554,6 +1554,9 @@ export async function updateTaskParticipantStatus(
 type ManualTransferMode = "immediate" | "reserved";
 type AssistantTransferKind = "handoff" | "swap";
 type AssistantTransferResponseMode = "pause_and_go" | "after_complete";
+const ACTIVE_ASSISTANT_TRANSFER_STATUSES = ["confirming", "pending", "pending_after_complete", "ready_to_takeover"];
+
+type ManualTransferDb = Pick<Prisma.TransactionClient, "bookingTask" | "profile" | "taskCollaborator">;
 
 type ManualTransferTargetEligibility = {
   ok: boolean;
@@ -1565,7 +1568,15 @@ async function manualTransferTargetEligibility(
   targetAssistantId: string,
   taskBuildingId: number,
 ): Promise<ManualTransferTargetEligibility> {
-  const target = await prisma.profile.findUnique({
+  return manualTransferTargetEligibilityWithClient(prisma, targetAssistantId, taskBuildingId);
+}
+
+async function manualTransferTargetEligibilityWithClient(
+  db: ManualTransferDb,
+  targetAssistantId: string,
+  taskBuildingId: number,
+): Promise<ManualTransferTargetEligibility> {
+  const target = await db.profile.findUnique({
     where: { id: targetAssistantId },
     select: {
       id: true,
@@ -1587,11 +1598,44 @@ async function manualTransferTargetEligibility(
     return { ok: false, reason: "目标助理不在当前任务区域" };
   }
 
-  const dispatchable = await dispatchableAssistantIds([targetAssistantId]);
-  if (dispatchable.has(targetAssistantId)) return { ok: true, mode: "immediate" };
-
-  const working = await activeWorkingAssistantIds([targetAssistantId]);
-  if (working.has(targetAssistantId)) return { ok: true, mode: "reserved" };
+  const [blockingTask, blockingParticipant, workingTask, workingParticipant] = await Promise.all([
+    db.bookingTask.findFirst({
+      where: {
+        assistantId: targetAssistantId,
+        status: { in: [...ACTIVE_TASK_STATUSES] },
+        AND: [NOT_PASSIVE_IRONING_WAIT_WHERE],
+      },
+      select: { id: true },
+    }),
+    db.taskCollaborator.findFirst({
+      where: {
+        assistantId: targetAssistantId,
+        status: { in: ACTIVE_PARTICIPANT_STATUSES },
+        task: {
+          status: { in: [...ACTIVE_TASK_STATUSES] },
+          AND: [NOT_PASSIVE_IRONING_WAIT_WHERE],
+        },
+      },
+      select: { id: true },
+    }),
+    db.bookingTask.findFirst({
+      where: {
+        assistantId: targetAssistantId,
+        status: { in: [TaskStatus.executing, TaskStatus.paused] },
+      },
+      select: { id: true },
+    }),
+    db.taskCollaborator.findFirst({
+      where: {
+        assistantId: targetAssistantId,
+        status: { in: WORKING_PARTICIPANT_STATUSES },
+        task: { status: { in: [TaskStatus.executing, TaskStatus.paused] } },
+      },
+      select: { id: true },
+    }),
+  ]);
+  if (!blockingTask && !blockingParticipant) return { ok: true, mode: "immediate" };
+  if (workingTask || workingParticipant) return { ok: true, mode: "reserved" };
 
   return { ok: false, reason: "目标助理已有待就位任务，暂不能接手" };
 }
@@ -1600,7 +1644,15 @@ async function validateManualTransferTask(
   taskId: string,
   fromAssistantId: string,
 ) {
-  const task = await prisma.bookingTask.findUnique({
+  return validateManualTransferTaskWithClient(prisma, taskId, fromAssistantId);
+}
+
+async function validateManualTransferTaskWithClient(
+  db: ManualTransferDb,
+  taskId: string,
+  fromAssistantId: string,
+) {
+  const task = await db.bookingTask.findUnique({
     where: { id: taskId },
     include: {
       photographer: { select: { buildingId: true } },
@@ -1615,9 +1667,8 @@ async function validateManualTransferTask(
   });
   if (!task) throw new Error("任务不存在");
   if (task.assistantId !== fromAssistantId) throw new Error("只有当前主助理可以发起移交");
-  if (task.status === TaskStatus.completed) throw new Error("已完成任务不能移交");
+  if (task.status === TaskStatus.completed || task.completedAt) throw new Error("已完成任务不能移交");
   if (!task.startedAt) throw new Error("任务尚未开始，不能使用交换/移交");
-  if (isIroningTaskCategory(task.category)) throw new Error("熨烫任务暂不支持交换/移交");
   if (isExternalModelFollowTask(task)) throw new Error("外模协助跟拍任务暂不支持交换/移交");
   if (task.parentTaskId || task.interruptTasks.length > 0) throw new Error("插单流程中的任务暂不支持交换/移交");
   if (task.collaborators.some((participant) => participant.role !== "primary")) {
@@ -1626,33 +1677,6 @@ async function validateManualTransferTask(
   const taskBuildingId = taskEffectiveBuildingId(task);
   if (taskBuildingId == null) throw new Error("无法确认任务区域，不能移交");
   return { task, taskBuildingId };
-}
-
-async function activePrimaryWorkingTaskForAssistant(assistantId: string) {
-  return prisma.bookingTask.findFirst({
-    where: {
-      assistantId,
-      status: { in: [TaskStatus.executing, TaskStatus.paused] },
-      collaborators: {
-        some: {
-          assistantId,
-          role: "primary",
-          status: { in: WORKING_PARTICIPANT_STATUSES },
-        },
-      },
-    },
-    include: {
-      photographer: { select: { buildingId: true } },
-      assistant: { select: { id: true, name: true } },
-      category: { select: { name: true } },
-      collaborators: { where: { status: { not: "left" } } },
-      interruptTasks: {
-        where: { status: { in: [TaskStatus.waiting, TaskStatus.executing, TaskStatus.paused] } },
-        select: { id: true },
-      },
-    },
-    orderBy: [{ status: "asc" }, { createdAt: "asc" }],
-  });
 }
 
 function flushPrimaryParticipant(
@@ -1680,6 +1704,24 @@ function flushTaskWorkSegment(task: Awaited<ReturnType<typeof validateManualTran
   });
 }
 
+function manualTransferWaitingTaskData(
+  task: Awaited<ReturnType<typeof validateManualTransferTask>>["task"],
+  effectiveWorkSeconds: number,
+  now: Date,
+) {
+  const isIroning = isIroningTaskCategory(task.category);
+  return {
+    status: TaskStatus.waiting,
+    pausedAt: null,
+    effectiveWorkSeconds,
+    workSegmentStartedAt: null,
+    ironingStage: isIroning ? IroningTaskStage.notified : undefined,
+    ironingQueuedAt: isIroning ? task.ironingQueuedAt ?? now : undefined,
+    ironingNotifiedAt: isIroning ? now : undefined,
+    ironingStartedAt: isIroning ? null : undefined,
+  };
+}
+
 async function executePrimaryAssistantTransfer(
   taskId: string,
   fromAssistantId: string,
@@ -1687,17 +1729,48 @@ async function executePrimaryAssistantTransfer(
   transferRequestId?: string,
 ): Promise<"immediate"> {
   if (fromAssistantId === targetAssistantId) throw new Error("不能移交给自己");
-  const { task, taskBuildingId } = await validateManualTransferTask(taskId, fromAssistantId);
-  const targetEligibility = await manualTransferTargetEligibility(targetAssistantId, taskBuildingId);
-  if (!targetEligibility.ok || targetEligibility.mode !== "immediate") {
-    throw new Error(targetEligibility.reason ?? "目标助理当前不能立即接手");
-  }
+  const result = await prisma.$transaction(async (tx) => {
+    const now = new Date();
+    const expire = async (message: string, reason: string) => {
+      if (transferRequestId) {
+        await tx.taskAssistantTransferRequest.updateMany({
+          where: { id: transferRequestId, status: { in: ACTIVE_ASSISTANT_TRANSFER_STATUSES } },
+          data: { status: "expired", canceledAt: now, reason },
+        });
+      }
+      return { error: message } as const;
+    };
+    if (transferRequestId) {
+      const request = await tx.taskAssistantTransferRequest.findUnique({ where: { id: transferRequestId } });
+      if (!request || !["pending", "ready_to_takeover"].includes(request.status)) {
+        return { error: "移交请求已处理，不能重复执行" } as const;
+      }
+    }
 
-  const now = new Date();
-  const flushedTask = flushTaskWorkSegment(task);
-  const flushedPrimary = flushPrimaryParticipant(task, fromAssistantId);
+    let validated: Awaited<ReturnType<typeof validateManualTransferTaskWithClient>>;
+    try {
+      validated = await validateManualTransferTaskWithClient(tx, taskId, fromAssistantId);
+    } catch (error) {
+      return expire(error instanceof Error ? error.message : String(error), "任务状态已变化，移交请求失效");
+    }
+    const { task, taskBuildingId } = validated;
+    const targetEligibility = await manualTransferTargetEligibilityWithClient(tx, targetAssistantId, taskBuildingId);
+    if (!targetEligibility.ok || targetEligibility.mode !== "immediate") {
+      return expire(
+        targetEligibility.reason ?? "目标助理当前不能立即接手",
+        `目标助理不可用，移交请求失效：${targetEligibility.reason ?? "不能立即接手"}`,
+      );
+    }
 
-  await prisma.$transaction(async (tx) => {
+    const flushedTask = flushTaskWorkSegment(task);
+    const flushedPrimary = flushPrimaryParticipant(task, fromAssistantId);
+    if (transferRequestId) {
+      const completed = await tx.taskAssistantTransferRequest.updateMany({
+        where: { id: transferRequestId, status: { in: ["pending", "ready_to_takeover"] } },
+        data: { status: "completed", completedAt: now },
+      });
+      if (completed.count !== 1) return { error: "移交请求已处理，不能重复执行" } as const;
+    }
     await tx.taskCollaborator.updateMany({
       where: {
         taskId,
@@ -1735,22 +1808,13 @@ async function executePrimaryAssistantTransfer(
       where: { id: taskId },
       data: {
         assistantId: targetAssistantId,
-        status: TaskStatus.waiting,
-        pausedAt: null,
-        effectiveWorkSeconds: flushedTask.effectiveWorkSeconds,
-        workSegmentStartedAt: null,
+        ...manualTransferWaitingTaskData(task, flushedTask.effectiveWorkSeconds, now),
       },
     });
-    if (transferRequestId) {
-      await tx.taskAssistantTransferRequest.update({
-        where: { id: transferRequestId },
-        data: { status: "completed", completedAt: now },
-      });
-    }
     await tx.taskAssistantTransferRequest.updateMany({
       where: {
         taskId,
-        status: { in: ["confirming", "pending", "pending_after_complete", "ready_to_takeover"] },
+        status: { in: ACTIVE_ASSISTANT_TRANSFER_STATUSES },
         ...(transferRequestId ? { id: { not: transferRequestId } } : {}),
       },
       data: { status: "canceled", canceledAt: now, reason: "任务已完成其他移交" },
@@ -1759,7 +1823,13 @@ async function executePrimaryAssistantTransfer(
       where: { id: targetAssistantId },
       data: { status: ProfileStatus.assigned },
     });
+    return { error: null } as const;
   });
+
+  if (result.error) {
+    await syncProfileStatus();
+    throw new Error(result.error);
+  }
 
   await syncProfileStatus();
   return "immediate";
@@ -1775,25 +1845,75 @@ async function executeImmediateAssistantSwap(
   if (fromAssistantId === targetAssistantId) throw new Error("不能和自己互换任务");
   if (taskId === counterpartTaskId) throw new Error("互换任务无效");
 
-  const { task: sourceTask, taskBuildingId } = await validateManualTransferTask(taskId, fromAssistantId);
-  const { task: counterpartTask, taskBuildingId: counterpartBuildingId } = await validateManualTransferTask(
-    counterpartTaskId,
-    targetAssistantId,
-  );
-  if (taskBuildingId !== counterpartBuildingId) throw new Error("互换任务不在同一区域");
+  const result = await prisma.$transaction(async (tx) => {
+    const now = new Date();
+    const expire = async (message: string, reason: string) => {
+      await tx.taskAssistantTransferRequest.updateMany({
+        where: { id: transferRequestId, status: "confirming" },
+        data: { status: "expired", canceledAt: now, reason },
+      });
+      return { error: message } as const;
+    };
+    const request = await tx.taskAssistantTransferRequest.findUnique({ where: { id: transferRequestId } });
+    if (!request || request.status !== "confirming") {
+      return { error: "移交请求已处理，不能重复响应" } as const;
+    }
 
-  const targetEligibility = await manualTransferTargetEligibility(targetAssistantId, taskBuildingId);
-  if (!targetEligibility.ok || targetEligibility.mode !== "reserved") {
-    throw new Error(targetEligibility.reason ?? "目标助理当前不能互换任务");
-  }
+    let sourceValidated: Awaited<ReturnType<typeof validateManualTransferTaskWithClient>>;
+    let counterpartValidated: Awaited<ReturnType<typeof validateManualTransferTaskWithClient>>;
+    try {
+      sourceValidated = await validateManualTransferTaskWithClient(tx, taskId, fromAssistantId);
+      counterpartValidated = await validateManualTransferTaskWithClient(tx, counterpartTaskId, targetAssistantId);
+    } catch (error) {
+      return expire(error instanceof Error ? error.message : String(error), "互换任务状态已变化，交换请求失效");
+    }
+    const { task: sourceTask, taskBuildingId } = sourceValidated;
+    const { task: counterpartTask, taskBuildingId: counterpartBuildingId } = counterpartValidated;
+    const sourcePrimaryIsWorking = sourceTask.collaborators.some(
+      (participant) =>
+        participant.assistantId === fromAssistantId &&
+        participant.role === "primary" &&
+        WORKING_PARTICIPANT_STATUSES.includes(participant.status as ParticipantStatus),
+    );
+    const counterpartPrimaryIsWorking = counterpartTask.collaborators.some(
+      (participant) =>
+        participant.assistantId === targetAssistantId &&
+        participant.role === "primary" &&
+        WORKING_PARTICIPANT_STATUSES.includes(participant.status as ParticipantStatus),
+    );
+    if (
+      (sourceTask.status !== TaskStatus.executing && sourceTask.status !== TaskStatus.paused) ||
+      (counterpartTask.status !== TaskStatus.executing && counterpartTask.status !== TaskStatus.paused) ||
+      !sourcePrimaryIsWorking ||
+      !counterpartPrimaryIsWorking
+    ) {
+      return expire("互换任务已不再符合交换条件", "互换任务执行状态已变化，交换请求失效");
+    }
+    if (taskBuildingId !== counterpartBuildingId) {
+      return expire("互换任务不在同一区域", "互换任务区域已变化，交换请求失效");
+    }
+    const targetEligibility = await manualTransferTargetEligibilityWithClient(tx, targetAssistantId, taskBuildingId);
+    if (!targetEligibility.ok || targetEligibility.mode !== "reserved") {
+      return expire(
+        targetEligibility.reason ?? "目标助理当前不能互换任务",
+        `目标助理不再符合交换资格：${targetEligibility.reason ?? "不能互换任务"}`,
+      );
+    }
 
-  const now = new Date();
-  const flushedSourceTask = flushTaskWorkSegment(sourceTask);
-  const flushedSourcePrimary = flushPrimaryParticipant(sourceTask, fromAssistantId);
-  const flushedCounterpartTask = flushTaskWorkSegment(counterpartTask);
-  const flushedCounterpartPrimary = flushPrimaryParticipant(counterpartTask, targetAssistantId);
-
-  await prisma.$transaction(async (tx) => {
+    const flushedSourceTask = flushTaskWorkSegment(sourceTask);
+    const flushedSourcePrimary = flushPrimaryParticipant(sourceTask, fromAssistantId);
+    const flushedCounterpartTask = flushTaskWorkSegment(counterpartTask);
+    const flushedCounterpartPrimary = flushPrimaryParticipant(counterpartTask, targetAssistantId);
+    const completed = await tx.taskAssistantTransferRequest.updateMany({
+      where: { id: transferRequestId, status: "confirming" },
+      data: {
+        status: "completed",
+        responseMode: "pause_and_go",
+        targetConfirmedAt: now,
+        completedAt: now,
+      },
+    });
+    if (completed.count !== 1) return { error: "移交请求已处理，不能重复响应" } as const;
     await tx.taskCollaborator.updateMany({
       where: {
         taskId,
@@ -1860,35 +1980,20 @@ async function executeImmediateAssistantSwap(
       where: { id: taskId },
       data: {
         assistantId: targetAssistantId,
-        status: TaskStatus.waiting,
-        pausedAt: null,
-        effectiveWorkSeconds: flushedSourceTask.effectiveWorkSeconds,
-        workSegmentStartedAt: null,
+        ...manualTransferWaitingTaskData(sourceTask, flushedSourceTask.effectiveWorkSeconds, now),
       },
     });
     await tx.bookingTask.update({
       where: { id: counterpartTaskId },
       data: {
         assistantId: fromAssistantId,
-        status: TaskStatus.waiting,
-        pausedAt: null,
-        effectiveWorkSeconds: flushedCounterpartTask.effectiveWorkSeconds,
-        workSegmentStartedAt: null,
-      },
-    });
-    await tx.taskAssistantTransferRequest.update({
-      where: { id: transferRequestId },
-      data: {
-        status: "completed",
-        responseMode: "pause_and_go",
-        targetConfirmedAt: now,
-        completedAt: now,
+        ...manualTransferWaitingTaskData(counterpartTask, flushedCounterpartTask.effectiveWorkSeconds, now),
       },
     });
     await tx.taskAssistantTransferRequest.updateMany({
       where: {
         id: { not: transferRequestId },
-        status: { in: ["confirming", "pending", "pending_after_complete", "ready_to_takeover"] },
+        status: { in: ACTIVE_ASSISTANT_TRANSFER_STATUSES },
         OR: [
           { taskId },
           { taskId: counterpartTaskId },
@@ -1902,7 +2007,10 @@ async function executeImmediateAssistantSwap(
       where: { id: { in: [fromAssistantId, targetAssistantId] } },
       data: { status: ProfileStatus.assigned },
     });
+    return { error: null } as const;
   });
+
+  if (result.error) throw new Error(result.error);
 
   await syncProfileStatus();
   return "swap_immediate";
@@ -1914,40 +2022,56 @@ export async function requestPrimaryAssistantTransfer(
   targetAssistantId: string,
 ): Promise<{ mode: ManualTransferMode; kind: AssistantTransferKind; requestId?: string; counterpartTaskId?: string | null }> {
   if (fromAssistantId === targetAssistantId) throw new Error("不能移交给自己");
-  const { taskBuildingId } = await validateManualTransferTask(taskId, fromAssistantId);
-  const existing = await prisma.taskAssistantTransferRequest.findFirst({
-    where: { taskId, status: { in: ["confirming", "pending", "pending_after_complete", "ready_to_takeover"] } },
-    select: { id: true },
+  return prisma.$transaction(async (tx) => {
+    await tx.bookingTask.update({ where: { id: taskId }, data: { updatedAt: new Date() } });
+    const { taskBuildingId } = await validateManualTransferTaskWithClient(tx, taskId, fromAssistantId);
+    const existing = await tx.taskAssistantTransferRequest.findFirst({
+      where: { taskId, status: { in: ACTIVE_ASSISTANT_TRANSFER_STATUSES } },
+      select: { id: true },
+    });
+    if (existing) throw new Error("该任务已有移交请求，请等待目标助理处理后再操作");
+
+    const targetEligibility = await manualTransferTargetEligibilityWithClient(tx, targetAssistantId, taskBuildingId);
+    if (!targetEligibility.ok || !targetEligibility.mode) {
+      throw new Error(targetEligibility.reason ?? "目标助理当前不能接手");
+    }
+
+    let kind: AssistantTransferKind = "handoff";
+    let counterpartTaskId: string | null = null;
+    if (targetEligibility.mode === "reserved") {
+      const counterpartTask = await tx.bookingTask.findFirst({
+        where: {
+          assistantId: targetAssistantId,
+          status: { in: [TaskStatus.executing, TaskStatus.paused] },
+          collaborators: {
+            some: {
+              assistantId: targetAssistantId,
+              role: "primary",
+              status: { in: WORKING_PARTICIPANT_STATUSES },
+            },
+          },
+        },
+        orderBy: [{ status: "asc" }, { createdAt: "asc" }],
+      });
+      if (!counterpartTask) throw new Error("未找到目标助理当前可互换的进行中任务");
+      await validateManualTransferTaskWithClient(tx, counterpartTask.id, targetAssistantId);
+      kind = "swap";
+      counterpartTaskId = counterpartTask.id;
+    }
+
+    const request = await tx.taskAssistantTransferRequest.create({
+      data: {
+        taskId,
+        fromAssistantId,
+        targetAssistantId,
+        counterpartTaskId,
+        kind,
+        status: "confirming",
+        reason: kind === "swap" ? "assistant_swap_confirming" : "assistant_handoff_confirming",
+      },
+    });
+    return { mode: targetEligibility.mode, kind, requestId: request.id, counterpartTaskId };
   });
-  if (existing) throw new Error("该任务已有移交请求，请等待目标助理处理后再操作");
-
-  const targetEligibility = await manualTransferTargetEligibility(targetAssistantId, taskBuildingId);
-  if (!targetEligibility.ok || !targetEligibility.mode) {
-    throw new Error(targetEligibility.reason ?? "目标助理当前不能接手");
-  }
-
-  let kind: AssistantTransferKind = "handoff";
-  let counterpartTaskId: string | null = null;
-  if (targetEligibility.mode === "reserved") {
-    const counterpartTask = await activePrimaryWorkingTaskForAssistant(targetAssistantId);
-    if (!counterpartTask) throw new Error("未找到目标助理当前可互换的进行中任务");
-    await validateManualTransferTask(counterpartTask.id, targetAssistantId);
-    kind = "swap";
-    counterpartTaskId = counterpartTask.id;
-  }
-
-  const request = await prisma.taskAssistantTransferRequest.create({
-    data: {
-      taskId,
-      fromAssistantId,
-      targetAssistantId,
-      counterpartTaskId,
-      kind,
-      status: "confirming",
-      reason: kind === "swap" ? "assistant_swap_confirming" : "assistant_handoff_confirming",
-    },
-  });
-  return { mode: targetEligibility.mode, kind, requestId: request.id, counterpartTaskId };
 }
 
 export async function respondPrimaryAssistantTransfer(
@@ -1990,18 +2114,19 @@ export async function respondPrimaryAssistantTransfer(
 
   const now = new Date();
   if (!accepted) {
-    await prisma.taskAssistantTransferRequest.update({
-      where: { id: request.id },
+    const rejected = await prisma.taskAssistantTransferRequest.updateMany({
+      where: { id: request.id, status: "confirming" },
       data: { status: "rejected", canceledAt: now, reason: "目标助理拒绝接替" },
     });
+    if (rejected.count !== 1) throw new Error("移交请求已处理，不能重复响应");
     return { mode: "rejected", requestId: request.id, kind: request.kind as AssistantTransferKind };
   }
 
   const kind = request.kind as AssistantTransferKind;
   if (kind === "handoff") {
-    await prisma.$transaction(async (tx) => {
-      await tx.taskAssistantTransferRequest.update({
-        where: { id: request.id },
+    const acceptedHandoff = await prisma.$transaction(async (tx) => {
+      const claimed = await tx.taskAssistantTransferRequest.updateMany({
+        where: { id: request.id, status: "confirming" },
         data: {
           status: "ready_to_takeover",
           responseMode: null,
@@ -2009,11 +2134,14 @@ export async function respondPrimaryAssistantTransfer(
           reason: "target_assistant_confirmed_handoff_ready_to_takeover",
         },
       });
+      if (claimed.count !== 1) return false;
       await tx.profile.update({
         where: { id: request.targetAssistantId },
         data: { status: ProfileStatus.assigned },
       });
+      return true;
     });
+    if (!acceptedHandoff) throw new Error("移交请求已处理，不能重复响应");
     return { mode: "accepted", requestId: request.id, kind, responseMode: null };
   }
 
@@ -2039,8 +2167,8 @@ export async function respondPrimaryAssistantTransfer(
     return { mode: "accepted", requestId: request.id, kind, responseMode };
   }
 
-  await prisma.taskAssistantTransferRequest.update({
-    where: { id: request.id },
+  const pending = await prisma.taskAssistantTransferRequest.updateMany({
+    where: { id: request.id, status: "confirming" },
     data: {
       status: "pending_after_complete",
       responseMode,
@@ -2048,6 +2176,7 @@ export async function respondPrimaryAssistantTransfer(
       reason: "target_assistant_confirmed_after_complete",
     },
   });
+  if (pending.count !== 1) throw new Error("移交请求已处理，不能重复响应");
   return { mode: "accepted", requestId: request.id, kind, responseMode };
 }
 

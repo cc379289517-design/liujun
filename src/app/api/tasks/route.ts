@@ -1,6 +1,6 @@
 import { NextRequest } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { OnlineStatus, PriorityUpgradeRequestStatus, Role, TaskStatus } from "@/generated/prisma/client";
+import { OnlineStatus, Prisma, PriorityUpgradeRequestStatus, Role, TaskStatus } from "@/generated/prisma/client";
 import {
   assignTask,
   checkPhotographerActiveTaskLimit,
@@ -21,8 +21,24 @@ const VISIBLE_PRIORITY_UPGRADE_REQUEST_STATUSES: PriorityUpgradeRequestStatus[] 
   PriorityUpgradeRequestStatus.pending,
   PriorityUpgradeRequestStatus.approved,
 ];
-const VISIBLE_ASSISTANT_TRANSFER_REQUEST_STATUSES = ["confirming", "pending", "pending_after_complete", "ready_to_takeover"];
+const VISIBLE_ASSISTANT_TRANSFER_REQUEST_STATUSES = ["confirming", "pending", "pending_after_complete", "ready_to_takeover", "completed"];
 const ACTIVE_TASK_STATUSES = [TaskStatus.waiting, TaskStatus.executing, TaskStatus.paused] as const;
+
+const ASSISTANT_TRANSFER_REQUEST_SELECT = {
+  id: true,
+  taskId: true,
+  fromAssistantId: true,
+  targetAssistantId: true,
+  counterpartTaskId: true,
+  kind: true,
+  responseMode: true,
+  status: true,
+  reason: true,
+  requestedAt: true,
+  targetConfirmedAt: true,
+  completedAt: true,
+  canceledAt: true,
+} as const;
 
 const TASK_INCLUDE = {
   photographer: { select: { id: true, name: true, currentRoom: true, buildingId: true } },
@@ -76,21 +92,7 @@ const TASK_INCLUDE = {
     where: { status: { in: VISIBLE_ASSISTANT_TRANSFER_REQUEST_STATUSES } },
     orderBy: { requestedAt: "desc" },
     take: 3,
-    select: {
-      id: true,
-      taskId: true,
-      fromAssistantId: true,
-      targetAssistantId: true,
-      counterpartTaskId: true,
-      kind: true,
-      responseMode: true,
-      status: true,
-      reason: true,
-      requestedAt: true,
-      targetConfirmedAt: true,
-      completedAt: true,
-      canceledAt: true,
-    },
+    select: ASSISTANT_TRANSFER_REQUEST_SELECT,
   },
 } as const;
 
@@ -241,21 +243,7 @@ const WORKBENCH_STATUS_TASK_SELECT = {
     where: { status: { in: VISIBLE_ASSISTANT_TRANSFER_REQUEST_STATUSES } },
     orderBy: { requestedAt: "desc" },
     take: 1,
-    select: {
-      id: true,
-      taskId: true,
-      fromAssistantId: true,
-      targetAssistantId: true,
-      counterpartTaskId: true,
-      kind: true,
-      responseMode: true,
-      status: true,
-      reason: true,
-      requestedAt: true,
-      targetConfirmedAt: true,
-      completedAt: true,
-      canceledAt: true,
-    },
+    select: ASSISTANT_TRANSFER_REQUEST_SELECT,
   },
 } as const;
 
@@ -274,6 +262,83 @@ const ADMIN_LIST_TASK_SELECT = {
 } as const;
 
 const TASK_QUERY_LIMIT_MAX = 500;
+
+type DateRange = { gte?: Date; lt?: Date };
+type TransferEvent = Prisma.TaskAssistantTransferRequestGetPayload<{
+  select: typeof ASSISTANT_TRANSFER_REQUEST_SELECT;
+}>;
+
+function dateInRange(value: Date | string | null | undefined, range: DateRange): boolean {
+  if (!value) return false;
+  const time = new Date(value).getTime();
+  return Number.isFinite(time) &&
+    (range.gte == null || time >= range.gte.getTime()) &&
+    (range.lt == null || time < range.lt.getTime());
+}
+
+async function transferEventsByTaskId(taskIds: string[]) {
+  const ids = [...new Set(taskIds)];
+  const eventsByTaskId = new Map<string, NonNullable<TransferEvent>[]>();
+  if (ids.length === 0) return eventsByTaskId;
+  const idSet = new Set(ids);
+  const events = await prisma.taskAssistantTransferRequest.findMany({
+    where: {
+      status: { in: VISIBLE_ASSISTANT_TRANSFER_REQUEST_STATUSES },
+      OR: [
+        { taskId: { in: ids } },
+        { counterpartTaskId: { in: ids } },
+      ],
+    },
+    select: ASSISTANT_TRANSFER_REQUEST_SELECT,
+    orderBy: { requestedAt: "desc" },
+  });
+  for (const event of events) {
+    for (const taskId of new Set([event.taskId, event.counterpartTaskId])) {
+      if (!taskId || !idSet.has(taskId)) continue;
+      const current = eventsByTaskId.get(taskId) ?? [];
+      current.push(event);
+      eventsByTaskId.set(taskId, current);
+    }
+  }
+  return eventsByTaskId;
+}
+
+async function attachTransferEvents<T extends { id: string; assistantTransferRequests: unknown[] }>(tasks: T[]): Promise<T[]> {
+  const eventsByTaskId = await transferEventsByTaskId(tasks.map((task) => task.id));
+  return tasks.map((task) => ({
+    ...task,
+    assistantTransferRequests: eventsByTaskId.get(task.id) ?? [],
+  }));
+}
+
+function statsPeriodWhere(range: DateRange) {
+  return {
+    OR: [
+      { status: { not: TaskStatus.completed }, createdAt: range },
+      {
+        status: TaskStatus.completed,
+        OR: [
+          { completedAt: range },
+          { collaborators: { some: { status: "completed", completedAt: range } } },
+          { completedAt: null, createdAt: range },
+        ],
+      },
+    ],
+  };
+}
+
+function filterStatsContributions<
+  T extends { completedAt: Date | null; collaborators: Array<{ status: string; completedAt: Date | null }> },
+>(tasks: T[], range: DateRange): T[] {
+  return tasks.map((task) => ({
+    ...task,
+    collaborators: task.collaborators.filter((participant) =>
+      participant.status !== "completed" ||
+      dateInRange(participant.completedAt, range) ||
+      (participant.completedAt == null && dateInRange(task.completedAt, range))
+    ),
+  }));
+}
 
 function parsePositiveIntParam(value: string | null, name: string): { value?: number; error?: Response } {
   if (value == null || value.trim() === "") return {};
@@ -396,15 +461,16 @@ export async function GET(request: NextRequest) {
     if (parsedStartDate.error) return parsedStartDate.error;
     const parsedEndDate = parseDateBoundParam(searchParams.get("endDate"), "endDate");
     if (parsedEndDate.error) return parsedEndDate.error;
+    let requestedDateRange: DateRange | null = null;
     if (parsedStartDate.value && parsedEndDate.value) {
       if (parsedStartDate.value >= parsedEndDate.value) {
         return Response.json({ error: "startDate must be before endDate" }, { status: 400 });
       }
-      where.createdAt = { gte: parsedStartDate.value, lt: parsedEndDate.value };
+      requestedDateRange = { gte: parsedStartDate.value, lt: parsedEndDate.value };
     } else if (parsedStartDate.value) {
-      where.createdAt = { gte: parsedStartDate.value };
+      requestedDateRange = { gte: parsedStartDate.value };
     } else if (parsedEndDate.value) {
-      where.createdAt = { lt: parsedEndDate.value };
+      requestedDateRange = { lt: parsedEndDate.value };
     }
 
     const parsedBuildingId = parsePositiveIntParam(buildingIdParam, "buildingId");
@@ -427,10 +493,24 @@ export async function GET(request: NextRequest) {
 
     if (scopedPhotographerId) where.photographerId = scopedPhotographerId;
     if (scopedAssistantId) {
+      const scopedTransferRequests = await prisma.taskAssistantTransferRequest.findMany({
+        where: {
+          status: { in: VISIBLE_ASSISTANT_TRANSFER_REQUEST_STATUSES },
+          OR: [
+            { fromAssistantId: scopedAssistantId },
+            { targetAssistantId: scopedAssistantId },
+          ],
+        },
+        select: { taskId: true, counterpartTaskId: true },
+      });
+      const scopedTransferTaskIds = [...new Set(scopedTransferRequests.flatMap((event) =>
+        [event.taskId, event.counterpartTaskId].filter((id): id is string => id != null)
+      ))];
       andFilters.push({
         OR: [
           { assistantId: scopedAssistantId },
           { collaborators: { some: { assistantId: scopedAssistantId, status: { not: "left" } } } },
+          ...(scopedTransferTaskIds.length > 0 ? [{ id: { in: scopedTransferTaskIds } }] : []),
           {
             assistantTransferRequests: {
               some: {
@@ -452,16 +532,16 @@ export async function GET(request: NextRequest) {
     }
 
     // 只返回今天的任务（基于 createdAt，过了24点自动不显示昨天的）
-    if (todayOnly === "true" && !where.createdAt) {
+    if (todayOnly === "true" && !requestedDateRange) {
       const now = new Date();
       const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());
       const endOfDay = new Date(startOfDay.getTime() + 24 * 60 * 60 * 1000);
-      where.createdAt = { gte: startOfDay, lt: endOfDay };
+      requestedDateRange = { gte: startOfDay, lt: endOfDay };
     }
 
     // 返回本周任务（周一到周日）
     const weekOnly = searchParams.get("weekOnly");
-    if (weekOnly === "true" && !where.createdAt) {
+    if (weekOnly === "true" && !requestedDateRange) {
       const now = new Date();
       const dow = now.getDay(); // 0=周日
       const mondayOffset = dow === 0 ? -6 : 1 - dow;
@@ -469,7 +549,15 @@ export async function GET(request: NextRequest) {
       const weekOffset = Number.isFinite(rawWeekOffset) ? rawWeekOffset : 0;
       const monday = new Date(now.getFullYear(), now.getMonth(), now.getDate() + mondayOffset + weekOffset * 7);
       const nextMonday = new Date(monday.getTime() + 7 * 24 * 60 * 60 * 1000);
-      where.createdAt = { gte: monday, lt: nextMonday };
+      requestedDateRange = { gte: monday, lt: nextMonday };
+    }
+
+    if (requestedDateRange) {
+      if (payload === "stats") {
+        andFilters.push(statsPeriodWhere(requestedDateRange));
+      } else {
+        where.createdAt = requestedDateRange;
+      }
     }
 
     if (andFilters.length > 0) {
@@ -484,7 +572,7 @@ export async function GET(request: NextRequest) {
         take,
       });
 
-      return Response.json(tasks);
+      return Response.json(requestedDateRange ? filterStatsContributions(tasks, requestedDateRange) : tasks);
     }
 
     if (payload === "adminList") {
@@ -506,7 +594,8 @@ export async function GET(request: NextRequest) {
         take,
       });
 
-      return Response.json(tasks.map(serializeTaskAssistantAvatars));
+      const enrichedTasks = await attachTransferEvents(tasks);
+      return Response.json(enrichedTasks.map(serializeTaskAssistantAvatars));
     }
 
     if (payload === "workbenchStatus") {
@@ -517,7 +606,7 @@ export async function GET(request: NextRequest) {
         take,
       });
 
-      return Response.json(tasks);
+      return Response.json(await attachTransferEvents(tasks));
     }
 
     const include = includeCollaborators ? TASK_INCLUDE : TASK_INCLUDE_WITHOUT_COLLABORATORS;
@@ -529,7 +618,7 @@ export async function GET(request: NextRequest) {
       take,
     });
 
-    return Response.json(tasks);
+    return Response.json(await attachTransferEvents(tasks));
   } catch (error) {
     console.error("[GET /api/tasks]", error);
     return Response.json({ error: "Failed to fetch tasks" }, { status: 500 });

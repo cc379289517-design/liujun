@@ -21,7 +21,7 @@ type RouteContext = { params: Promise<{ id: string }> };
 type TaskActionActor = { id: string; role: Role };
 
 const ACTIVE_PARTICIPANT_STATUSES = ["waiting", "executing", "paused"] as const;
-const VISIBLE_ASSISTANT_TRANSFER_REQUEST_STATUSES = ["confirming", "pending", "pending_after_complete", "ready_to_takeover"];
+const VISIBLE_ASSISTANT_TRANSFER_REQUEST_STATUSES = ["confirming", "pending", "pending_after_complete", "ready_to_takeover", "completed"];
 
 function actorIdFrom(value: unknown): string | null {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
@@ -119,10 +119,27 @@ function taskDetailInclude() {
 }
 
 async function loadTaskDetail(taskId: string) {
-  return prisma.bookingTask.findUnique({
-    where: { id: taskId },
-    include: taskDetailInclude(),
-  });
+  const [task, transferRequests] = await Promise.all([
+    prisma.bookingTask.findUnique({
+      where: { id: taskId },
+      include: taskDetailInclude(),
+    }),
+    prisma.taskAssistantTransferRequest.findMany({
+      where: {
+        status: { in: VISIBLE_ASSISTANT_TRANSFER_REQUEST_STATUSES },
+        OR: [
+          { taskId },
+          { counterpartTaskId: taskId },
+        ],
+      },
+      orderBy: { requestedAt: "desc" },
+    }),
+  ]);
+  if (!task) return null;
+  return {
+    ...task,
+    assistantTransferRequests: transferRequests,
+  };
 }
 
 /**

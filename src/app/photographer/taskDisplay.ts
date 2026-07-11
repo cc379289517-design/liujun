@@ -155,6 +155,59 @@ export function participantStatusText(status: string): string {
   return "已离开";
 }
 
+export type TaskTransferDisplayRelation = {
+  kind: "handoff" | "swap";
+  status: "completed" | "ready_to_takeover";
+  fromAssistantId: string;
+  targetAssistantId: string;
+};
+
+function transferRequestTimeMs(request: NonNullable<TaskFromAPI["assistantTransferRequests"]>[number]): number {
+  const raw = request.completedAt ?? request.targetConfirmedAt ?? request.requestedAt;
+  const ms = new Date(raw).getTime();
+  return Number.isFinite(ms) ? ms : 0;
+}
+
+/**
+ * 展示层只认已经完成或已进入可接手阶段的关系。
+ * confirming / pending / pending_after_complete 仍是协商过程，不能展示成已完成移交。
+ */
+export function taskTransferDisplayRelation(
+  task: TaskFromAPI | undefined | null,
+): TaskTransferDisplayRelation | null {
+  const request = [...(task?.assistantTransferRequests ?? [])]
+    .filter((item) => (
+      (item.status === "completed" || item.status === "ready_to_takeover") &&
+      (item.kind === "handoff" || item.kind === "swap")
+    ))
+    .sort((a, b) => transferRequestTimeMs(b) - transferRequestTimeMs(a))[0];
+  if (!request || (request.kind !== "handoff" && request.kind !== "swap")) return null;
+  return {
+    kind: request.kind,
+    status: request.status as TaskTransferDisplayRelation["status"],
+    fromAssistantId: request.fromAssistantId,
+    targetAssistantId: request.targetAssistantId,
+  };
+}
+
+export function taskAssistantNameById(
+  task: TaskFromAPI | undefined | null,
+  assistantId: string,
+): string | null {
+  if (!task) return null;
+  if (task.assistantId === assistantId && task.assistant?.name) return task.assistant.name;
+  return task.collaborators?.find((participant) => participant.assistantId === assistantId)?.assistant.name ?? null;
+}
+
+export function taskHasCompletedTransferForAssistant(
+  task: TaskFromAPI | undefined | null,
+  assistantId: string,
+): boolean {
+  const relation = taskTransferDisplayRelation(task);
+  return relation?.status === "completed" &&
+    (relation.fromAssistantId === assistantId || relation.targetAssistantId === assistantId);
+}
+
 export function taskAssigneeNames(task: TaskFromAPI | undefined | null, fallbackName?: string | null): string[] {
   const names = [
     task?.assistant?.name ?? fallbackName ?? null,

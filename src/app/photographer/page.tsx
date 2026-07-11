@@ -91,15 +91,19 @@ import {
   statsDayDate,
   statsWeekStart,
   taskAssigneeNames,
+  taskAssistantNameById,
   taskCategoryDurationCaption,
   taskCompletedContributionsForRanking,
+  taskHasCompletedTransferForAssistant,
   taskListActualLine,
   taskParticipantForProfile,
   taskParticipants,
   taskStatusForProfile,
   taskStatusLabelForList,
   taskTimingForProfile,
+  taskTransferDisplayRelation,
   taskTypeGroupName,
+  type TaskTransferDisplayRelation,
   type PublicQueueStatusInfo,
 } from "./taskDisplay";
 import {
@@ -290,6 +294,83 @@ function assistantPresenceMeta(state: AssistantPresenceState) {
     on_break: { label: "休假/下班 /离线", shortLabel: "休假/下班 /离线", dot: "#9ca3af", textCls: "text-gray-500", bgCls: "bg-gray-50", borderCls: "border-gray-200" },
   } satisfies Record<AssistantPresenceState, { label: string; shortLabel: string; dot: string; textCls: string; bgCls: string; borderCls: string }>;
   return meta[state];
+}
+
+type AssistantNameLookup = ReadonlyMap<string, { name: string }>;
+
+function taskTransferAssistantName(
+  task: TaskFromAPI,
+  assistantId: string,
+  assistantNames: AssistantNameLookup,
+): string {
+  return taskAssistantNameById(task, assistantId) ?? assistantNames.get(assistantId)?.name ?? "未知助理";
+}
+
+function taskTransferRelationTitle(
+  task: TaskFromAPI,
+  relation: TaskTransferDisplayRelation,
+  assistantNames: AssistantNameLookup,
+): string {
+  const fromName = taskTransferAssistantName(task, relation.fromAssistantId, assistantNames);
+  const targetName = taskTransferAssistantName(task, relation.targetAssistantId, assistantNames);
+  return `${fromName} ${relation.kind === "swap" ? "交换" : "移交"} ${targetName}`;
+}
+
+function renderTaskTransferRelation(
+  task: TaskFromAPI | undefined | null,
+  assistantNames: AssistantNameLookup,
+  options: {
+    viewerAssistantId?: string | null;
+    dark: boolean;
+    className?: string;
+  },
+): ReactNode {
+  if (!task) return null;
+  const relation = taskTransferDisplayRelation(task);
+  if (!relation) return null;
+  const fromName = taskTransferAssistantName(task, relation.fromAssistantId, assistantNames);
+  const targetName = taskTransferAssistantName(task, relation.targetAssistantId, assistantNames);
+  const keyword = relation.kind === "swap" ? "交换" : "移交";
+  const keywordCls = options.dark ? "font-extrabold text-purple-300" : "font-extrabold text-purple-600";
+  const contentCls = "min-w-0 truncate font-normal text-[--text-muted]";
+  const wrapperCls = `inline-flex min-w-0 max-w-full items-baseline whitespace-nowrap font-normal ${options.className ?? ""}`;
+  const title = taskTransferRelationTitle(task, relation, assistantNames);
+
+  if (options.viewerAssistantId === relation.targetAssistantId) {
+    return relation.kind === "swap" ? (
+      <span className={wrapperCls} title={title}>
+        <span className={`${keywordCls} mr-1`}>交换</span>
+        <span className={contentCls}>接替 {fromName}</span>
+      </span>
+    ) : (
+      <span className={wrapperCls} title={title}>
+        <span className={contentCls}>来自 {fromName}</span>
+      </span>
+    );
+  }
+
+  if (options.viewerAssistantId === relation.fromAssistantId) {
+    return relation.kind === "swap" ? (
+      <span className={wrapperCls} title={title}>
+        <span className={contentCls}>与 {targetName}</span>
+        <span className={`${keywordCls} ml-1`}>交换</span>
+      </span>
+    ) : (
+      <span className={wrapperCls} title={title}>
+        {relation.status === "completed" ? <span className={contentCls}>已</span> : null}
+        <span className={keywordCls}>移交</span>
+        <span className={contentCls}>给 {targetName}</span>
+      </span>
+    );
+  }
+
+  return (
+    <span className={wrapperCls} title={title}>
+      <span className={contentCls}>{fromName}</span>
+      <span className={`${keywordCls} mx-1`}>{keyword}</span>
+      <span className={contentCls}>{targetName}</span>
+    </span>
+  );
 }
 
 function assistantEatingStorageKey(profileId: string): string {
@@ -1053,7 +1134,14 @@ export default function PhotographerPage() {
           }`} />
           {row.details.length > 0 ? (
             <div className={useColumns ? "grid grid-cols-2 gap-x-4 gap-y-2" : "space-y-1.5"}>
-              {row.details.map((detail, detailIndex) => (
+              {row.details.map((detail, detailIndex) => {
+                const detailTask = publicQueueRaw.find((task) => task.id === detail.taskId)
+                  ?? areaCompletedWeeklyTasks.find((task) => task.id === detail.taskId)
+                  ?? weeklyTasks.find((task) => task.id === detail.taskId);
+                const serviceLabel = taskHasCompletedTransferForAssistant(detailTask, row.assistantId)
+                  ? "分段服务"
+                  : "服务";
+                return (
                 <div key={`${detail.taskId}-${detailIndex}`} className="min-w-0">
                   <div className="flex items-center justify-between gap-2">
                     <p className="min-w-0 text-[10px] font-extrabold leading-tight text-[--text-primary]">
@@ -1064,7 +1152,7 @@ export default function PhotographerPage() {
                     </span>
                   </div>
                   <p className="mt-0.5 whitespace-normal text-[9px] font-semibold leading-snug text-[--text-muted]">
-                    服务 {fmtMin(detail.serviceSeconds / 60)}
+                    {serviceLabel} {fmtMin(detail.serviceSeconds / 60)}
                     {detail.scoreFactor !== 1 ? (
                       <span className="text-orange-500"> × {formatAssistantScore(detail.scoreFactor)}</span>
                     ) : null}
@@ -1072,7 +1160,8 @@ export default function PhotographerPage() {
                     <span className="text-orange-500"> {formatAssistantScore(detail.serviceScore)}分</span>
                   </p>
                 </div>
-              ))}
+                );
+              })}
             </div>
           ) : (
             <div className={`rounded-xl px-2.5 py-2 text-[11px] font-semibold leading-relaxed text-[--text-muted] ring-1 ${
@@ -1091,7 +1180,7 @@ export default function PhotographerPage() {
       </div>,
       document.body,
     );
-  }, [assistantScoreBubbleAnchor, resolvedTheme]);
+  }, [areaCompletedWeeklyTasks, assistantScoreBubbleAnchor, publicQueueRaw, resolvedTheme, weeklyTasks]);
 
   const showTaskTypeDetailBubble = useCallback((taskTypeName: string, element: HTMLElement, assistantCount = 0) => {
     const rect = element.getBoundingClientRect();
@@ -4568,7 +4657,7 @@ export default function PhotographerPage() {
   const canOpenTransferForTask = useCallback((task: TaskFromAPI | null | undefined) => {
     if (!task || !profile || task.assistantId !== profile.id) return false;
     if (task.status === "completed" || !task.startedAt) return false;
-    if (isIroningTask(task) || isExternalModelFollowTask(task)) return false;
+    if (isExternalModelFollowTask(task)) return false;
     if (task.parentTaskId) return false;
     if (helperParticipants(task).length > 0) return false;
     return task.status === "executing" || task.status === "paused" || task.status === "waiting";
@@ -4737,7 +4826,7 @@ export default function PhotographerPage() {
     return (
       <div
         ref={transferPickerRef}
-        className={`absolute right-[-124px] top-0 z-[220] w-[100px] rounded-2xl border p-1.5 shadow-2xl backdrop-blur-2xl ${
+        className={`absolute right-[-136px] top-0 z-[220] w-[112px] rounded-2xl border p-1.5 shadow-2xl backdrop-blur-2xl ${
           resolvedTheme === "dark"
             ? "border-white/[0.16] bg-slate-900/58 shadow-black/25"
             : "border-white/70 bg-white/92 shadow-slate-300/40"
@@ -4749,7 +4838,7 @@ export default function PhotographerPage() {
             当前区域暂无其他助理
           </div>
         ) : (
-          <div className="max-h-[286px] space-y-1 overflow-y-auto pr-0.5 task-scroll">
+          <div className="max-h-[318px] space-y-1.5 overflow-y-auto pr-0.5 task-scroll">
             {transferCandidates.map(({ profile: candidate, info }) => {
               const isSaving = transferSavingAssistantId === candidate.id;
               const transferButtonPending = transferActionPending || isSaving;
@@ -4762,6 +4851,7 @@ export default function PhotographerPage() {
                   : info.mode === "immediate"
                     ? "空闲"
                     : quickBookAssistantStatusText(candidateDock);
+              const transferStatusColor = assistantDockDotColor(candidateDock);
               return (
                 <button
                   key={candidate.id}
@@ -4778,7 +4868,7 @@ export default function PhotographerPage() {
                     setTransferError(null);
                     setTransferConfirmTarget({ assistantId: candidate.id, assistantName: candidate.name });
                   }}
-                  className={`group relative flex min-h-[44px] w-full items-center gap-1 rounded-xl px-1 py-1.5 text-left transition-colors ${
+                  className={`group relative flex min-h-[52px] w-full items-center gap-2 rounded-xl px-2 py-2 text-left transition-colors ${
                     info.selectable
                       ? resolvedTheme === "dark"
                         ? "bg-white/[0.11] text-slate-50 hover:bg-white/[0.16]"
@@ -4789,26 +4879,23 @@ export default function PhotographerPage() {
                   } ${info.selectable ? "" : "cursor-not-allowed"} disabled:cursor-wait`}
                   title={info.reason}
                 >
-                  <span className="relative flex h-7 w-7 shrink-0 items-center justify-center overflow-visible">
-                    <span className={`flex h-7 w-7 items-center justify-center overflow-hidden rounded-full bg-slate-200 text-[10px] font-extrabold text-white ${info.selectable ? "" : "grayscale"}`}>
+                  <span className="relative flex h-8 w-8 shrink-0 items-center justify-center overflow-visible">
+                    <span className={`flex h-8 w-8 items-center justify-center overflow-hidden rounded-full bg-slate-200 text-[11px] font-extrabold text-white ${info.selectable ? "" : "grayscale"}`}>
                       {candidate.avatar ? (
                         <img src={candidate.avatar} alt={candidate.name} className="h-full w-full object-cover" />
                       ) : candidate.name.slice(0, 1)}
                     </span>
                     <span
-                      className="absolute -bottom-0.5 -right-0.5 z-10 h-2.5 w-2.5 rounded-full ring-2 ring-white"
+                      className="absolute -bottom-0.5 -right-0.5 z-10 h-3 w-3 rounded-full ring-2 ring-white"
                       style={{ backgroundColor: assistantDockDotColor(candidateDock) }}
                     />
                   </span>
-                  <span className="min-w-0 flex-1">
-                    <span className="block truncate text-[10px] font-extrabold leading-tight">{candidate.name}</span>
-                    <span className={`block truncate text-[8px] font-bold leading-tight ${
-                      info.mode === "reserved"
-                        ? "text-purple-600"
-                        : info.mode === "immediate"
-                          ? "text-purple-600"
-                          : resolvedTheme === "dark" ? "text-purple-100/80" : "text-purple-500/80"
-                    }`}>
+                  <span className="flex min-w-0 flex-1 flex-col justify-center gap-0.5">
+                    <span className="block truncate text-[11px] font-extrabold leading-[1.15]">{candidate.name}</span>
+                    <span
+                      className="block truncate text-[9px] font-extrabold leading-[1.15]"
+                      style={{ color: transferStatusColor }}
+                    >
                       {transferStatusText}
                     </span>
                   </span>
@@ -5976,9 +6063,13 @@ export default function PhotographerPage() {
     const footerControls = priorityControl || completionControl
       ? <div className="flex flex-wrap gap-2">{priorityControl}{completionControl}</div>
       : null;
-    return (
+    const transferRelation = renderTaskTransferRelation(task, profileById, {
+      viewerAssistantId: isAssistantProfile ? profile?.id : null,
+      dark: resolvedTheme === "dark",
+      className: "text-[11px] leading-4",
+    });
+    const card = (
       <MobileTaskCard
-        key={task.id}
         task={task}
         meta={meta}
         title={task.category?.name ?? "任务"}
@@ -6006,7 +6097,19 @@ export default function PhotographerPage() {
         onCancel={() => handleCancelTask(task.id)}
       />
     );
-  }, [handleAssistantStatusChange, handleCancelTask, handlePauseCurrentTask, handleResumePausedTask, isAssistantProfile, isWorkbenchPendingAction, mobileGlassPanel, mobileRecommendedIroningTaskId, mobileTaskStatusForProfile, mobileTaskStatusMeta, mobileTaskSubtitle, mobileTaskTimeLine, profile?.id, renderCompletionRegistrationControl, renderEscalationBadge, renderPriorityUpgradeControl]);
+    return transferRelation ? (
+      <div key={task.id} className="min-w-0 space-y-1.5">
+        {card}
+        <div className={`flex min-w-0 items-center overflow-hidden rounded-xl border px-3 py-1.5 ${
+          resolvedTheme === "dark"
+            ? "border-purple-300/15 bg-purple-300/[0.07]"
+            : "border-purple-200/70 bg-purple-50/75"
+        }`}>
+          {transferRelation}
+        </div>
+      </div>
+    ) : <div key={task.id}>{card}</div>;
+  }, [handleAssistantStatusChange, handleCancelTask, handlePauseCurrentTask, handleResumePausedTask, isAssistantProfile, isWorkbenchPendingAction, mobileGlassPanel, mobileRecommendedIroningTaskId, mobileTaskStatusForProfile, mobileTaskStatusMeta, mobileTaskSubtitle, mobileTaskTimeLine, profile?.id, profileById, renderCompletionRegistrationControl, renderEscalationBadge, renderPriorityUpgradeControl, resolvedTheme]);
 
   const mobileCreatePending = profile
     ? isWorkbenchPendingAction(workbenchProfileActionKey("create-mobile", profile.id))
@@ -8168,7 +8271,12 @@ export default function PhotographerPage() {
                                                   </span>
                                                 </div>
                                                 <p className="mt-1 text-[9px] font-semibold leading-relaxed text-[--text-primary]">
-                                                  服务 {fmtMin(detail.serviceSeconds / 60)}
+                                                  {taskHasCompletedTransferForAssistant(
+                                                    publicQueueRaw.find((task) => task.id === detail.taskId)
+                                                      ?? areaCompletedWeeklyTasks.find((task) => task.id === detail.taskId)
+                                                      ?? weeklyTasks.find((task) => task.id === detail.taskId),
+                                                    row.assistantId,
+                                                  ) ? "分段服务" : "服务"} {fmtMin(detail.serviceSeconds / 60)}
                                                   {detail.scoreFactor !== 1 ? (
                                                     <span className="text-orange-600"> ×{formatAssistantScore(detail.scoreFactor)}</span>
                                                   ) : null}
@@ -10153,7 +10261,12 @@ export default function PhotographerPage() {
 	                  const isRemoving = removingTaskId === task.id;
                   const cancelPending = isWorkbenchPendingAction(workbenchTaskActionKey("cancel", task.id, profile?.id));
                   const cancelInFlight = isRemoving || cancelPending;
-                  const rawForTask = getVisibleRawTaskById(task.id);
+	                  const rawForTask = getVisibleRawTaskById(task.id);
+	                  const transferRelationNode = renderTaskTransferRelation(rawForTask, profileById, {
+	                    viewerAssistantId: isAssistantRole(profile?.role) ? profile?.id : null,
+	                    dark: resolvedTheme === "dark",
+	                    className: "ml-1.5 max-w-[min(52vw,190px)] text-[9px] leading-[14px]",
+	                  });
                   const isPhotographerQueueTask = rawForTask != null && isPhotographerLimitQueuedTask(rawForTask);
                   const isAssistantTaskList = isAssistantRole(profile?.role);
                   const isCancellable = !isAssistantTaskList && (canCancelRawTask(rawForTask) || isPhotographerQueueTask);
@@ -10170,7 +10283,7 @@ export default function PhotographerPage() {
                     task.statusLabel === "已完成" &&
                     collaboratorCount > 0 &&
                     completedAssigneeNames.length > 1;
-                  const statusBadgeLabel = isCompletedCollaboration ? "多人协作完成" : displayStatusLabel;
+	                  const statusBadgeLabel = displayStatusLabel;
 	                  const statusBadgeCls = cancelInFlight
                       ? "bg-red-100/80 text-red-500 cursor-default"
                       : showCancel
@@ -10351,16 +10464,22 @@ export default function PhotographerPage() {
                       <div className="mt-0.5 grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2">
                         <span className="flex min-w-0 items-center text-[10px] leading-[14px] text-[--text-muted]">
                           <span className="shrink-0">{task.room}室</span>
-                          {isAssistantRole(profile?.role) ? (
-                            task.photographerName ? (
-                              <>
-                                <span className="truncate"> · {task.photographerName}</span>
-                                {collaboratorEntryButton}
-                              </>
-                            ) : (
-                              collaboratorEntryButton
-                            )
-                          ) : isCompletedCollaboration ? (
+	                          {isAssistantRole(profile?.role) ? (
+	                            task.photographerName ? (
+	                              <>
+	                                <span className="truncate"> · {task.photographerName}</span>
+	                                {collaboratorEntryButton}
+	                                {transferRelationNode}
+	                              </>
+	                            ) : (
+	                              <>{collaboratorEntryButton}{transferRelationNode}</>
+	                            )
+	                          ) : transferRelationNode ? (
+	                            <>
+	                              <span className="shrink-0">&nbsp;·&nbsp;</span>
+	                              {transferRelationNode}
+	                            </>
+	                          ) : isCompletedCollaboration ? (
                             <>
                               <span className="shrink-0">&nbsp;·&nbsp;</span>
                               <span className="task-assignee-line task-assignee-marquee-container">
@@ -10566,19 +10685,6 @@ export default function PhotographerPage() {
         <div
           className="absolute top-3 right-1.5 z-20 hidden flex-col items-end gap-1.5 lg:flex"
         >
-          {/* 返回登录：非管理账号独立显示；管理账号收纳到后台管理菜单 */}
-          {!(loginRole === "admin" || loginRole === "assistant_leader") && (
-            <a
-              href="/"
-              onClick={() => { safeLocalStorageRemove("user"); safeLocalStorageRemove("currentProfileId"); }}
-              className={`readable-glass-dark flex w-[88px] cursor-pointer items-center justify-start gap-1.5 rounded-lg px-2 py-1.5 transition-colors ${glass}`}
-            >
-              <svg className="text-current opacity-90" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" /><polyline points="16 17 21 12 16 7" /><line x1="21" y1="12" x2="9" y2="12" />
-              </svg>
-              <span className="text-[11px] font-extrabold">返回登录</span>
-            </a>
-          )}
           {/* 数据统计：仅摄影师/助理可见 */}
           {(loginRole === "photographer" || loginRole === "assistant") && (
           <a href="/stats" className={`readable-glass-dark flex w-[88px] cursor-pointer items-center justify-start gap-1.5 rounded-lg px-2 py-1.5 transition-colors ${glass}`}>
@@ -10588,9 +10694,9 @@ export default function PhotographerPage() {
             <span className="text-[11px] font-extrabold">数据统计</span>
           </a>
           )}
-          {/* 后台管理集合：仅管理账号可见 */}
+          {/* 后台管理与身份切换：仅管理账号可见 */}
           {(loginRole === "admin" || loginRole === "assistant_leader") && (
-            <div className="group/admin-menu relative">
+            <>
               <a
                 href="/admin"
                 className={`readable-glass-dark flex w-[88px] cursor-pointer items-center justify-start gap-1.5 rounded-lg px-2 py-1.5 transition-colors ${glass}`}
@@ -10601,62 +10707,63 @@ export default function PhotographerPage() {
                 </svg>
                 <span className="text-[11px] font-extrabold">后台管理</span>
               </a>
-	              <div className="pointer-events-none absolute right-0 top-full w-[88px] translate-y-[-6px] pt-2 opacity-0 transition-all duration-200 group-hover/admin-menu:pointer-events-auto group-hover/admin-menu:translate-y-0 group-hover/admin-menu:opacity-100">
-	                <div className={`rounded-2xl border p-1.5 shadow-xl backdrop-blur-xl ${workbenchFloatingSurfaceCls}`}>
-	                  <a
-	                    href="/"
-	                    onClick={() => { safeLocalStorageRemove("user"); safeLocalStorageRemove("currentProfileId"); }}
-	                    className={`flex w-full items-center justify-start rounded-xl px-3 py-2 text-left text-xs font-bold transition-colors ${workbenchFloatingItemCls}`}
-	                  >
-	                    返回登录
-	                  </a>
-                </div>
-              </div>
-            </div>
+              <button
+                type="button"
+                onClick={() => setShowIdentityModal(true)}
+                className={`readable-glass-dark flex w-[88px] cursor-pointer items-center justify-start gap-1.5 rounded-lg px-2 py-1.5 transition-colors ${glass}`}
+                aria-label="切换身份"
+                title="切换身份"
+              >
+                <svg className="text-current opacity-90" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
+                  <circle cx="8.5" cy="7" r="4" />
+                  <line x1="20" y1="8" x2="20" y2="14" />
+                  <line x1="23" y1="11" x2="17" y2="11" />
+                </svg>
+                <span className="text-[11px] font-extrabold">切换身份</span>
+              </button>
+            </>
           )}
         </div>
-        {(loginRole === "admin" || loginRole === "assistant_leader") && (
-          <div className={`absolute bottom-3 right-1.5 z-30 hidden items-center gap-[3px] rounded-full px-1.5 py-0.5 shadow-lg backdrop-blur-2xl lg:flex ${
-            resolvedTheme === "dark"
-              ? "bg-slate-950/54 text-slate-100 shadow-black/30"
-              : "bg-white/62 text-slate-700 shadow-slate-300/35"
-          }`}>
-            <button
-              type="button"
-              onClick={() => setShowIdentityModal(true)}
-              className="grid h-[27px] w-[27px] place-items-center rounded-full transition-colors hover:bg-white/18 focus:outline-none focus:ring-2 focus:ring-white/45"
-              aria-label="切换身份"
-              title="切换身份"
-            >
-              <svg className="text-current opacity-95" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.35" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                <path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
-                <circle cx="8.5" cy="7" r="4" />
-                <line x1="20" y1="8" x2="20" y2="14" />
-                <line x1="23" y1="11" x2="17" y2="11" />
-              </svg>
-            </button>
-            <span className="select-none text-[11px] font-bold leading-none text-[--text-muted] opacity-70">/</span>
-            <button
-              type="button"
-              onClick={cycleTheme}
-              className="grid h-[27px] w-[27px] place-items-center rounded-full transition-colors hover:bg-white/18 focus:outline-none focus:ring-2 focus:ring-white/45"
-              aria-label="切换系统风格"
-              title="系统风格"
-            >
-              <svg className="text-current opacity-95" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.25" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                <circle cx="12" cy="12" r="4" />
-                <path d="M12 2v2" />
-                <path d="M12 20v2" />
-                <path d="m4.93 4.93 1.41 1.41" />
-                <path d="m17.66 17.66 1.41 1.41" />
-                <path d="M2 12h2" />
-                <path d="M20 12h2" />
-                <path d="m6.34 17.66-1.41 1.41" />
-                <path d="m19.07 4.93-1.41 1.41" />
-              </svg>
-            </button>
-          </div>
-        )}
+        <div className={`absolute bottom-3 right-1.5 z-30 hidden items-center gap-[3px] rounded-full px-1.5 py-0.5 shadow-lg backdrop-blur-2xl lg:flex ${
+          resolvedTheme === "dark"
+            ? "bg-slate-950/54 text-slate-100 shadow-black/30"
+            : "bg-white/62 text-slate-700 shadow-slate-300/35"
+        }`}>
+          <a
+            href="/"
+            onClick={() => { safeLocalStorageRemove("user"); safeLocalStorageRemove("currentProfileId"); }}
+            className="grid h-[27px] w-[27px] place-items-center rounded-full transition-colors hover:bg-white/18 focus:outline-none focus:ring-2 focus:ring-white/45"
+            aria-label="返回登录"
+            title="返回登录"
+          >
+            <svg className="text-current opacity-95" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.35" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <path d="M13 4h5.5A1.5 1.5 0 0 1 20 5.5v13a1.5 1.5 0 0 1-1.5 1.5H13" />
+              <path d="M9 12h10" />
+              <path d="m6 8-4 4 4 4" />
+            </svg>
+          </a>
+          <span className="select-none text-[11px] font-bold leading-none text-[--text-muted] opacity-70">/</span>
+          <button
+            type="button"
+            onClick={cycleTheme}
+            className="grid h-[27px] w-[27px] place-items-center rounded-full transition-colors hover:bg-white/18 focus:outline-none focus:ring-2 focus:ring-white/45"
+            aria-label="切换系统风格"
+            title="系统风格"
+          >
+            <svg className="text-current opacity-95" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.25" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <circle cx="12" cy="12" r="4" />
+              <path d="M12 2v2" />
+              <path d="M12 20v2" />
+              <path d="m4.93 4.93 1.41 1.41" />
+              <path d="m17.66 17.66 1.41 1.41" />
+              <path d="M2 12h2" />
+              <path d="M20 12h2" />
+              <path d="m6.34 17.66-1.41 1.41" />
+              <path d="m19.07 4.93-1.41 1.41" />
+            </svg>
+          </button>
+        </div>
       {/* ====== GENIE PHANTOM ====== */}
       {genie && (
         <div
@@ -11296,6 +11403,10 @@ export default function PhotographerPage() {
                               <tbody>
                                 {selectedStatsTasks.map((task) => {
                                   const rawTask = selectedStatsRawTasks.find((raw) => raw.id === task.id);
+                                  const transferRelationNode = renderTaskTransferRelation(rawTask, profileById, {
+                                    dark: resolvedTheme === "dark",
+                                    className: "justify-center text-[10px]",
+                                  });
                                   return (
                                     <tr key={task.id} className={`border-b transition-colors last:border-b-0 ${
                                       resolvedTheme === "dark"
@@ -11308,7 +11419,9 @@ export default function PhotographerPage() {
                                         <span className="inline-block max-w-full truncate align-middle" title={task.photographerName || ""}>{task.photographerName || "—"}</span>
                                       </td>
                                       <td className="px-3 py-3 font-bold text-[--text-primary] align-middle min-w-0">
-                                        <span className="inline-block max-w-full truncate align-middle" title={task.assistantName || ""}>{task.assistantName || "—"}</span>
+                                        {transferRelationNode ?? (
+                                          <span className="inline-block max-w-full truncate align-middle font-normal" title={task.assistantName || ""}>{task.assistantName || "—"}</span>
+                                        )}
                                       </td>
                                       <td className="px-3 py-3 font-semibold text-[--text-primary] align-middle min-w-0">
                                         <span className="inline-block max-w-full truncate align-middle" title={task.name}>{task.name}</span>
@@ -11323,7 +11436,7 @@ export default function PhotographerPage() {
                                       </td>
                                       <td className="px-3 py-3 align-middle">
                                         <div className="flex items-center justify-center gap-1">
-                                          <span className={`inline-block rounded-full px-2.5 py-1 text-[9px] font-extrabold whitespace-nowrap ${task.tagCls}`}>{task.statusLabel}</span>
+                                          <span className={`stats-detail-status-pill inline-block rounded-full px-2.5 py-1 text-[9px] font-extrabold whitespace-nowrap ${task.tagCls}`}>{task.statusLabel}</span>
                                           {renderEscalationBadge(rawTask, { compact: true })}
                                         </div>
                                       </td>
@@ -11645,7 +11758,15 @@ export default function PhotographerPage() {
                       </tr>
                     </thead>
                     <tbody>
-                      {selectedStatsTasks.map((t) => (
+                      {selectedStatsTasks.map((t) => {
+                        const rawTask = selectedStatsRawTasks.find((item) => item.id === t.id);
+                        const transferRelationNode = !isStatsAssistantView
+                          ? renderTaskTransferRelation(rawTask, profileById, {
+                              dark: resolvedTheme === "dark",
+                              className: "justify-center text-[10px]",
+                            })
+                          : null;
+                        return (
                         <tr key={t.id} className={`border-b transition-colors last:border-b-0 ${
                           resolvedTheme === "dark"
                             ? "border-white/[0.06] hover:bg-white/[0.06]"
@@ -11656,12 +11777,14 @@ export default function PhotographerPage() {
                           </td>
                           <td className="px-3 py-3 text-[--text-muted] align-middle tabular-nums">{t.room}室</td>
                           <td className="px-3 py-3 font-bold text-[--text-primary] align-middle min-w-0">
-                            <span
-                              className="inline-block max-w-full truncate align-middle"
-                              title={isAssistantRole(profile?.role) ? (t.photographerName || "") : (t.assistantName || "")}
-                            >
-                              {isAssistantRole(profile?.role) ? (t.photographerName || "—") : (t.assistantName || "—")}
-                            </span>
+                            {transferRelationNode ?? (
+                              <span
+                                className="inline-block max-w-full truncate align-middle font-normal"
+                                title={isStatsAssistantView ? (t.photographerName || "") : (t.assistantName || "")}
+                              >
+                                {isStatsAssistantView ? (t.photographerName || "—") : (t.assistantName || "—")}
+                              </span>
+                            )}
                           </td>
                           <td className="px-3 py-3 font-semibold text-[--text-primary] align-middle min-w-0">
                             <span className="inline-block max-w-full truncate align-middle" title={t.name}>{t.name}</span>
@@ -11677,13 +11800,13 @@ export default function PhotographerPage() {
                             }`}
                           >
                             <span className="inline-block max-w-full truncate align-middle">
-                              {taskListActualLine(t, selectedStatsRawTasks.find((x) => x.id === t.id), now.getTime(), false, isAssistantRole(profile?.role) ? profile?.id : undefined) ?? "—"}
+                              {taskListActualLine(t, rawTask, now.getTime(), false, isStatsAssistantView ? profile?.id : undefined) ?? "—"}
                             </span>
                           </td>
                           <td className="px-3 py-3 align-middle">
                             <div className="flex items-center justify-center gap-1">
-                              <span className={`inline-block rounded-full px-2.5 py-1 text-[9px] font-extrabold whitespace-nowrap ${t.tagCls}`}>{t.statusLabel}</span>
-                              {renderEscalationBadge(selectedStatsRawTasks.find((x) => x.id === t.id), { compact: true })}
+                              <span className={`stats-detail-status-pill inline-block rounded-full px-2.5 py-1 text-[9px] font-extrabold whitespace-nowrap ${t.tagCls}`}>{t.statusLabel}</span>
+                              {renderEscalationBadge(rawTask, { compact: true })}
                             </div>
                           </td>
                           <td className="px-3 py-3 align-middle">
@@ -11750,7 +11873,8 @@ export default function PhotographerPage() {
                             </div>
                           </td>
                         </tr>
-                      ))}
+                        );
+                      })}
                     </tbody>
                   </table>
                 )}

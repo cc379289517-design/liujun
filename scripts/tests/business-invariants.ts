@@ -377,6 +377,314 @@ const tests: TestCase[] = [
     },
   },
   {
+    name: "普通移交后旧主助理的完成贡献和个人工时不会在新主助理开始时消失",
+    async run(ctx) {
+      const from = await createAssistant(ctx, "inv-handoff-contribution-from", { status: ProfileStatus.executing });
+      const target = await createAssistant(ctx, "inv-handoff-contribution-target");
+      const segmentStartedAt = new Date();
+      const task = await createTask(ctx, {
+        assistantId: from.id,
+        status: TaskStatus.executing,
+        startedAt: segmentStartedAt,
+      });
+      await addParticipant(task.id, from.id, "primary", "executing");
+      await prisma.bookingTask.update({
+        where: { id: task.id },
+        data: { effectiveWorkSeconds: 180, workSegmentStartedAt: segmentStartedAt },
+      });
+      await prisma.taskCollaborator.update({
+        where: { taskId_assistantId: { taskId: task.id, assistantId: from.id } },
+        data: {
+          effectiveWorkSeconds: 180,
+          startedAt: segmentStartedAt,
+          workSegmentStartedAt: segmentStartedAt,
+        },
+      });
+
+      await requestPrimaryAssistantTransfer(task.id, from.id, target.id);
+      await respondPrimaryAssistantTransfer(task.id, target.id, true);
+      await prepareWaitingTaskForAssistantStart(task.id, target.id);
+
+      const afterHandoff = await prisma.taskCollaborator.findMany({
+        where: { taskId: task.id, role: "primary" },
+        orderBy: { joinedAt: "asc" },
+      });
+      const oldPrimaryAfterHandoff = afterHandoff.find((participant) => participant.assistantId === from.id);
+      const currentPrimaryAfterHandoff = afterHandoff.filter((participant) =>
+        ACTIVE_PARTICIPANT_STATUSES.includes(participant.status as typeof ACTIVE_PARTICIPANT_STATUSES[number]),
+      );
+      assert(oldPrimaryAfterHandoff?.status === "completed", "移交完成时旧主助理应保留 completed 历史贡献");
+      assert(
+        oldPrimaryAfterHandoff.effectiveWorkSeconds >= 180 && oldPrimaryAfterHandoff.effectiveWorkSeconds <= 182,
+        `移交完成时旧主助理应保留约 180 秒个人工时，实际 ${oldPrimaryAfterHandoff.effectiveWorkSeconds}`,
+      );
+      assert(
+        currentPrimaryAfterHandoff.length === 1 && currentPrimaryAfterHandoff[0].assistantId === target.id,
+        "移交后目标助理应是唯一当前 primary",
+      );
+
+      await updateTaskParticipantStatus(task.id, target.id, "executing");
+
+      const oldPrimaryAfterTargetStarted = await prisma.taskCollaborator.findUnique({
+        where: { taskId_assistantId: { taskId: task.id, assistantId: from.id } },
+      });
+      assert(
+        oldPrimaryAfterTargetStarted?.status === "completed",
+        "新主助理开始后，旧主助理有工时的 completed 贡献不能被改成 left",
+      );
+      assert(
+        oldPrimaryAfterTargetStarted.effectiveWorkSeconds >= 180 && oldPrimaryAfterTargetStarted.effectiveWorkSeconds <= 182,
+        `新主助理开始后旧主助理个人工时应继续保留，实际 ${oldPrimaryAfterTargetStarted.effectiveWorkSeconds}`,
+      );
+
+      const targetSegmentStartedAt = new Date();
+      await prisma.taskCollaborator.update({
+        where: { taskId_assistantId: { taskId: task.id, assistantId: target.id } },
+        data: { effectiveWorkSeconds: 120, workSegmentStartedAt: targetSegmentStartedAt },
+      });
+      await prisma.bookingTask.update({
+        where: { id: task.id },
+        data: { effectiveWorkSeconds: oldPrimaryAfterTargetStarted.effectiveWorkSeconds + 120, workSegmentStartedAt: targetSegmentStartedAt },
+      });
+      await updateTaskParticipantStatus(task.id, target.id, "completed");
+
+      const completedTask = await prisma.bookingTask.findUnique({
+        where: { id: task.id },
+        include: { collaborators: true },
+      });
+      const completedFrom = completedTask?.collaborators.find((participant) => participant.assistantId === from.id);
+      const completedTarget = completedTask?.collaborators.find((participant) => participant.assistantId === target.id);
+      assert(completedTask?.status === TaskStatus.completed, "A/B 都完成贡献后任务聚合应为 completed");
+      assert(completedFrom?.status === "completed" && completedTarget?.status === "completed", "A/B 的历史贡献都应保留为 completed");
+      assert(
+        completedFrom.effectiveWorkSeconds >= 180 && completedFrom.effectiveWorkSeconds <= 182,
+        "A 的个人有效工时应保持不变",
+      );
+      assert(
+        completedTarget.effectiveWorkSeconds >= 120 && completedTarget.effectiveWorkSeconds <= 122,
+        "B 的个人有效工时应独立保留",
+      );
+      assert(
+        completedTask.effectiveWorkSeconds >= 300 && completedTask.effectiveWorkSeconds <= 304,
+        `任务总有效工时应聚合 A/B 的约 300 秒，实际 ${completedTask.effectiveWorkSeconds}`,
+      );
+    },
+  },
+  {
+    name: "立即交换后双方旧任务的完成贡献在接手人开始和任务完成后仍保留",
+    async run(ctx) {
+      const from = await createAssistant(ctx, "inv-swap-contribution-from", { status: ProfileStatus.executing });
+      const target = await createAssistant(ctx, "inv-swap-contribution-target", { status: ProfileStatus.executing });
+      const segmentStartedAt = new Date();
+      const sourceTask = await createTask(ctx, {
+        assistantId: from.id,
+        status: TaskStatus.executing,
+        startedAt: segmentStartedAt,
+        roomNumber: "101",
+      });
+      const counterpartTask = await createTask(ctx, {
+        assistantId: target.id,
+        status: TaskStatus.executing,
+        startedAt: segmentStartedAt,
+        roomNumber: "102",
+      });
+      await addParticipant(sourceTask.id, from.id, "primary", "executing");
+      await addParticipant(counterpartTask.id, target.id, "primary", "executing");
+      await prisma.bookingTask.update({
+        where: { id: sourceTask.id },
+        data: { effectiveWorkSeconds: 90, workSegmentStartedAt: segmentStartedAt },
+      });
+      await prisma.bookingTask.update({
+        where: { id: counterpartTask.id },
+        data: { effectiveWorkSeconds: 120, workSegmentStartedAt: segmentStartedAt },
+      });
+      await prisma.taskCollaborator.update({
+        where: { taskId_assistantId: { taskId: sourceTask.id, assistantId: from.id } },
+        data: { effectiveWorkSeconds: 90, startedAt: segmentStartedAt, workSegmentStartedAt: segmentStartedAt },
+      });
+      await prisma.taskCollaborator.update({
+        where: { taskId_assistantId: { taskId: counterpartTask.id, assistantId: target.id } },
+        data: { effectiveWorkSeconds: 120, startedAt: segmentStartedAt, workSegmentStartedAt: segmentStartedAt },
+      });
+
+      const transfer = await requestPrimaryAssistantTransfer(sourceTask.id, from.id, target.id);
+      assert(transfer.kind === "swap" && transfer.counterpartTaskId === counterpartTask.id, "目标助理忙碌时应创建立即交换请求");
+      await respondPrimaryAssistantTransfer(sourceTask.id, target.id, true, "pause_and_go");
+
+      await updateTaskParticipantStatus(sourceTask.id, target.id, "executing");
+      await updateTaskParticipantStatus(counterpartTask.id, from.id, "executing");
+
+      const participantsAfterStart = await prisma.taskCollaborator.findMany({
+        where: { taskId: { in: [sourceTask.id, counterpartTask.id] }, role: "primary" },
+      });
+      const sourceOldPrimary = participantsAfterStart.find(
+        (participant) => participant.taskId === sourceTask.id && participant.assistantId === from.id,
+      );
+      const counterpartOldPrimary = participantsAfterStart.find(
+        (participant) => participant.taskId === counterpartTask.id && participant.assistantId === target.id,
+      );
+      assert(sourceOldPrimary?.status === "completed", "交换后 A 在原任务的完成贡献不能在 B 开始时变成 left");
+      assert(counterpartOldPrimary?.status === "completed", "交换后 B 在原任务的完成贡献不能在 A 开始时变成 left");
+      assert(
+        sourceOldPrimary.effectiveWorkSeconds >= 90 && sourceOldPrimary.effectiveWorkSeconds <= 92,
+        "A 在原任务的个人有效工时应保留",
+      );
+      assert(
+        counterpartOldPrimary.effectiveWorkSeconds >= 120 && counterpartOldPrimary.effectiveWorkSeconds <= 122,
+        "B 在原任务的个人有效工时应保留",
+      );
+
+      const activePrimaries = participantsAfterStart.filter((participant) =>
+        ACTIVE_PARTICIPANT_STATUSES.includes(participant.status as typeof ACTIVE_PARTICIPANT_STATUSES[number]),
+      );
+      assert(
+        activePrimaries.length === 2 &&
+          activePrimaries.some((participant) => participant.taskId === sourceTask.id && participant.assistantId === target.id) &&
+          activePrimaries.some((participant) => participant.taskId === counterpartTask.id && participant.assistantId === from.id),
+        "立即交换后两条任务应各自只有一个接手 primary",
+      );
+
+      const sourceNextSegment = new Date(Date.now() - 40_000);
+      const counterpartNextSegment = new Date(Date.now() - 50_000);
+      await prisma.taskCollaborator.update({
+        where: { taskId_assistantId: { taskId: sourceTask.id, assistantId: target.id } },
+        data: { workSegmentStartedAt: sourceNextSegment },
+      });
+      await prisma.bookingTask.update({
+        where: { id: sourceTask.id },
+        data: { workSegmentStartedAt: sourceNextSegment },
+      });
+      await prisma.taskCollaborator.update({
+        where: { taskId_assistantId: { taskId: counterpartTask.id, assistantId: from.id } },
+        data: { workSegmentStartedAt: counterpartNextSegment },
+      });
+      await prisma.bookingTask.update({
+        where: { id: counterpartTask.id },
+        data: { workSegmentStartedAt: counterpartNextSegment },
+      });
+      await updateTaskParticipantStatus(sourceTask.id, target.id, "completed");
+      await updateTaskParticipantStatus(counterpartTask.id, from.id, "completed");
+
+      const completedTasks = await prisma.bookingTask.findMany({
+        where: { id: { in: [sourceTask.id, counterpartTask.id] } },
+        include: { collaborators: true },
+      });
+      assert(completedTasks.every((task) => task.status === TaskStatus.completed), "立即交换后的两条任务都应正确聚合为 completed");
+      assert(
+        completedTasks.every((task) => task.collaborators.every((participant) => participant.status === "completed")),
+        "立即交换后的四条人员-任务贡献都应保留为 completed",
+      );
+      const completedSource = completedTasks.find((task) => task.id === sourceTask.id);
+      const completedCounterpart = completedTasks.find((task) => task.id === counterpartTask.id);
+      assert(
+        completedSource != null && completedSource.effectiveWorkSeconds >= 130 && completedSource.effectiveWorkSeconds <= 133,
+        "源任务总有效工时应保留交换前后两人的贡献",
+      );
+      assert(
+        completedCounterpart != null && completedCounterpart.effectiveWorkSeconds >= 170 && completedCounterpart.effectiveWorkSeconds <= 173,
+        "对方任务总有效工时应保留交换前后两人的贡献",
+      );
+    },
+  },
+  {
+    name: "熨烫任务可以像普通任务一样移交给空闲助理",
+    async run(ctx) {
+      await prisma.ironingMachine.create({
+        data: { buildingId: ctx.buildingId, name: "移交熨烫机", status: IroningMachineStatus.normal },
+      });
+      const from = await createAssistant(ctx, "inv-ironing-handoff-from", { status: ProfileStatus.executing });
+      const target = await createAssistant(ctx, "inv-ironing-handoff-target");
+      const task = await createTask(ctx, {
+        assistantId: from.id,
+        categoryId: ctx.ironingCategoryId,
+        status: TaskStatus.executing,
+        ironingStage: IroningTaskStage.using,
+        startedAt: new Date(Date.now() - 60_000),
+      });
+      await addParticipant(task.id, from.id, "primary", "executing");
+
+      await requestPrimaryAssistantTransfer(task.id, from.id, target.id);
+      await respondPrimaryAssistantTransfer(task.id, target.id, true);
+      await prepareWaitingTaskForAssistantStart(task.id, target.id);
+
+      const activePrimaries = await prisma.taskCollaborator.findMany({
+        where: { taskId: task.id, role: "primary", status: { in: [...ACTIVE_PARTICIPANT_STATUSES] } },
+      });
+      assert(activePrimaries.length === 1 && activePrimaries[0].assistantId === target.id, "熨烫移交后必须只有目标助理是当前主助理");
+      const oldPrimary = await prisma.taskCollaborator.findUnique({
+        where: { taskId_assistantId: { taskId: task.id, assistantId: from.id } },
+      });
+      assert(oldPrimary?.status === "completed", "熨烫移交后原主助理贡献应结算为 completed");
+      const fresh = await prisma.bookingTask.findUnique({ where: { id: task.id } });
+      assert(
+        fresh?.assistantId === target.id &&
+          fresh.status === TaskStatus.waiting &&
+          fresh.ironingStage === IroningTaskStage.notified,
+        "熨烫移交后任务应进入目标助理准备熨烫状态",
+      );
+
+      await updateTaskParticipantStatus(task.id, target.id, "executing");
+      const started = await prisma.bookingTask.findUnique({ where: { id: task.id } });
+      assert(started?.status === TaskStatus.executing && started.ironingStage === IroningTaskStage.using, "目标助理应可继续开始熨烫任务");
+    },
+  },
+  {
+    name: "熨烫任务可以和其他执行中任务马上互换",
+    async run(ctx) {
+      await prisma.ironingMachine.create({
+        data: { buildingId: ctx.buildingId, name: "互换熨烫机", status: IroningMachineStatus.normal },
+      });
+      const from = await createAssistant(ctx, "inv-ironing-swap-from", { status: ProfileStatus.executing });
+      const target = await createAssistant(ctx, "inv-ironing-swap-target", { status: ProfileStatus.executing });
+      const ironingTask = await createTask(ctx, {
+        assistantId: from.id,
+        categoryId: ctx.ironingCategoryId,
+        status: TaskStatus.executing,
+        ironingStage: IroningTaskStage.using,
+        startedAt: new Date(Date.now() - 120_000),
+      });
+      const regularTask = await createTask(ctx, {
+        assistantId: target.id,
+        categoryId: ctx.regularCategoryId,
+        status: TaskStatus.executing,
+        startedAt: new Date(Date.now() - 60_000),
+      });
+      await addParticipant(ironingTask.id, from.id, "primary", "executing");
+      await addParticipant(regularTask.id, target.id, "primary", "executing");
+
+      const transfer = await requestPrimaryAssistantTransfer(ironingTask.id, from.id, target.id);
+      assert(transfer.kind === "swap" && transfer.counterpartTaskId === regularTask.id, "熨烫任务应能创建互换请求");
+      await respondPrimaryAssistantTransfer(ironingTask.id, target.id, true, "pause_and_go");
+
+      const freshIroning = await prisma.bookingTask.findUnique({ where: { id: ironingTask.id } });
+      const freshRegular = await prisma.bookingTask.findUnique({ where: { id: regularTask.id } });
+      assert(
+        freshIroning?.assistantId === target.id &&
+          freshIroning.status === TaskStatus.waiting &&
+          freshIroning.ironingStage === IroningTaskStage.notified,
+        "熨烫任务互换后应切给目标助理并进入准备熨烫",
+      );
+      assert(
+        freshRegular?.assistantId === from.id &&
+          freshRegular.status === TaskStatus.waiting &&
+          freshRegular.ironingStage === IroningTaskStage.none,
+        "对方普通任务互换后应切给原熨烫助理并进入待就位",
+      );
+      const activePrimaries = await prisma.taskCollaborator.findMany({
+        where: {
+          taskId: { in: [ironingTask.id, regularTask.id] },
+          role: "primary",
+          status: { in: [...ACTIVE_PARTICIPANT_STATUSES] },
+        },
+      });
+      assert(activePrimaries.length === 2, "互换后两条任务各自只能保留一个当前主助理");
+      const usingCount = await prisma.bookingTask.count({
+        where: { categoryId: ctx.ironingCategoryId, status: TaskStatus.executing, ironingStage: IroningTaskStage.using },
+      });
+      assert(usingCount === 0, "熨烫互换后未重新开始前不应继续占用 using 机器");
+    },
+  },
+  {
     name: "熨烫 using 数不能超过正常机器容量",
     async run(ctx) {
       await prisma.ironingMachine.create({
@@ -502,6 +810,159 @@ const tests: TestCase[] = [
 
       const processed = await processPendingTaskAssistantTransfers();
       assert(processed === 0, "失效转派不应被后台维护继续处理");
+    },
+  },
+  {
+    name: "并发重复发起只能创建一条活跃移交请求",
+    async run(ctx) {
+      const from = await createAssistant(ctx, "inv-transfer-concurrent-from", { status: ProfileStatus.executing });
+      const target = await createAssistant(ctx, "inv-transfer-concurrent-target");
+      const task = await createTask(ctx, {
+        assistantId: from.id,
+        status: TaskStatus.executing,
+        startedAt: new Date(Date.now() - 60_000),
+      });
+      await addParticipant(task.id, from.id, "primary", "executing");
+
+      const attempts = await Promise.allSettled([
+        requestPrimaryAssistantTransfer(task.id, from.id, target.id),
+        requestPrimaryAssistantTransfer(task.id, from.id, target.id),
+      ]);
+      const activeRequests = await prisma.taskAssistantTransferRequest.findMany({
+        where: {
+          taskId: task.id,
+          status: { in: ["confirming", "pending", "pending_after_complete", "ready_to_takeover"] },
+        },
+      });
+      assert(attempts.filter((attempt) => attempt.status === "fulfilled").length === 1, "并发发起只能有一次成功");
+      assert(activeRequests.length === 1, "同一任务最多只能有一条活跃移交请求");
+    },
+  },
+  {
+    name: "并发重复响应只能确认一次且不会二次执行移交",
+    async run(ctx) {
+      const from = await createAssistant(ctx, "inv-transfer-response-from", { status: ProfileStatus.executing });
+      const target = await createAssistant(ctx, "inv-transfer-response-target");
+      const task = await createTask(ctx, {
+        assistantId: from.id,
+        status: TaskStatus.executing,
+        startedAt: new Date(Date.now() - 60_000),
+      });
+      await addParticipant(task.id, from.id, "primary", "executing");
+
+      const transfer = await requestPrimaryAssistantTransfer(task.id, from.id, target.id);
+      assert(transfer.requestId, "应创建待确认移交请求");
+      const responses = await Promise.allSettled([
+        respondPrimaryAssistantTransfer(task.id, target.id, true),
+        respondPrimaryAssistantTransfer(task.id, target.id, true),
+      ]);
+      assert(responses.filter((response) => response.status === "fulfilled").length === 1, "并发响应只能有一次成功");
+      const ready = await prisma.taskAssistantTransferRequest.findUnique({ where: { id: transfer.requestId } });
+      assert(ready?.status === "ready_to_takeover", "重复响应后请求应只进入一次 ready_to_takeover");
+
+      await prepareWaitingTaskForAssistantStart(task.id, target.id);
+      await prepareWaitingTaskForAssistantStart(task.id, target.id);
+      const participants = await prisma.taskCollaborator.findMany({ where: { taskId: task.id, role: "primary" } });
+      const activePrimaries = participants.filter((participant) =>
+        ACTIVE_PARTICIPANT_STATUSES.includes(participant.status as typeof ACTIVE_PARTICIPANT_STATUSES[number]),
+      );
+      assert(activePrimaries.length === 1 && activePrimaries[0].assistantId === target.id, "重复执行后仍应只有一个当前 primary");
+      assert(
+        participants.find((participant) => participant.assistantId === from.id)?.status === "completed",
+        "原主助理贡献只能结算一次并保持 completed",
+      );
+    },
+  },
+  {
+    name: "移交目标确认后状态漂移必须失效且不能切换负责人",
+    async run(ctx) {
+      const from = await createAssistant(ctx, "inv-handoff-drift-from", { status: ProfileStatus.executing });
+      const target = await createAssistant(ctx, "inv-handoff-drift-target");
+      const task = await createTask(ctx, {
+        assistantId: from.id,
+        status: TaskStatus.executing,
+        startedAt: new Date(Date.now() - 60_000),
+      });
+      await addParticipant(task.id, from.id, "primary", "executing");
+
+      const transfer = await requestPrimaryAssistantTransfer(task.id, from.id, target.id);
+      assert(transfer.requestId, "应创建移交请求");
+      await respondPrimaryAssistantTransfer(task.id, target.id, true);
+      await prisma.profile.update({
+        where: { id: target.id },
+        data: { onlineStatus: OnlineStatus.offline },
+      });
+
+      await expectRejects(
+        () => prepareWaitingTaskForAssistantStart(task.id, target.id),
+        "目标助理状态漂移后不能继续接手",
+      );
+
+      const expired = await prisma.taskAssistantTransferRequest.findUnique({ where: { id: transfer.requestId } });
+      assert(expired?.status === "expired", "目标助理状态漂移后 ready 移交请求必须标记 expired");
+      const freshTask = await prisma.bookingTask.findUnique({ where: { id: task.id } });
+      assert(freshTask?.assistantId === from.id, "目标漂移失败后任务负责人不能被切走");
+    },
+  },
+  {
+    name: "互换写入前对方任务负责人漂移必须失效且不覆盖变化",
+    async run(ctx) {
+      const from = await createAssistant(ctx, "inv-swap-drift-from", { status: ProfileStatus.executing });
+      const target = await createAssistant(ctx, "inv-swap-drift-target", { status: ProfileStatus.executing });
+      const replacement = await createAssistant(ctx, "inv-swap-drift-replacement", { status: ProfileStatus.executing });
+      const sourceTask = await createTask(ctx, {
+        assistantId: from.id,
+        status: TaskStatus.executing,
+        startedAt: new Date(Date.now() - 120_000),
+      });
+      const counterpartTask = await createTask(ctx, {
+        assistantId: target.id,
+        status: TaskStatus.executing,
+        startedAt: new Date(Date.now() - 60_000),
+      });
+      await addParticipant(sourceTask.id, from.id, "primary", "executing");
+      await addParticipant(counterpartTask.id, target.id, "primary", "executing");
+
+      const transfer = await requestPrimaryAssistantTransfer(sourceTask.id, from.id, target.id);
+      assert(transfer.requestId && transfer.kind === "swap" && transfer.counterpartTaskId === counterpartTask.id, "应创建互换请求");
+      const driftedAt = new Date();
+      await prisma.$transaction(async (tx) => {
+        await tx.taskCollaborator.update({
+          where: { taskId_assistantId: { taskId: counterpartTask.id, assistantId: target.id } },
+          data: {
+            status: "completed",
+            completedAt: driftedAt,
+            leftAt: driftedAt,
+            workSegmentStartedAt: null,
+          },
+        });
+        await tx.bookingTask.update({
+          where: { id: counterpartTask.id },
+          data: { assistantId: replacement.id },
+        });
+        await tx.taskCollaborator.create({
+          data: {
+            taskId: counterpartTask.id,
+            assistantId: replacement.id,
+            role: "primary",
+            status: "executing",
+            startedAt: driftedAt,
+            workSegmentStartedAt: driftedAt,
+          },
+        });
+      });
+
+      await expectRejects(
+        () => respondPrimaryAssistantTransfer(sourceTask.id, target.id, true, "pause_and_go"),
+        "对方任务负责人变化后不能继续互换",
+      );
+
+      const expired = await prisma.taskAssistantTransferRequest.findUnique({ where: { id: transfer.requestId } });
+      assert(expired?.status === "expired", "对方任务负责人漂移后互换请求必须标记 expired");
+      const freshSource = await prisma.bookingTask.findUnique({ where: { id: sourceTask.id } });
+      const freshCounterpart = await prisma.bookingTask.findUnique({ where: { id: counterpartTask.id } });
+      assert(freshSource?.assistantId === from.id, "互换失败后源任务负责人不能被覆盖");
+      assert(freshCounterpart?.assistantId === replacement.id, "互换失败后对方任务负责人变化不能被覆盖");
     },
   },
   {

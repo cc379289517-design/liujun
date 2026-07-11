@@ -16,6 +16,7 @@ import {
   serializeTaskAssistantAvatars,
 } from "@/lib/profilePayload";
 import {
+  assistantTaskScoreFactor,
   assistantTaskScoreFromSeconds,
   displayTaskCategoryName,
   EXTERNAL_MODEL_ASSIST_DISPLAY_NAME,
@@ -26,7 +27,7 @@ const VISIBLE_PRIORITY_UPGRADE_REQUEST_STATUSES: PriorityUpgradeRequestStatus[] 
   PriorityUpgradeRequestStatus.pending,
   PriorityUpgradeRequestStatus.approved,
 ];
-const VISIBLE_ASSISTANT_TRANSFER_REQUEST_STATUSES = ["confirming", "pending", "pending_after_complete", "ready_to_takeover"];
+const VISIBLE_ASSISTANT_TRANSFER_REQUEST_STATUSES = ["confirming", "pending", "pending_after_complete", "ready_to_takeover", "completed"];
 const AREA_TASK_LIMIT = 500;
 const SCOPED_TASK_LIMIT = 200;
 const RELATED_CHANGE_ID_LIMIT = 1000;
@@ -57,6 +58,22 @@ const TASK_CATEGORY_GROUP: Record<string, string> = {
   "其他长时任务": "其他",
   "其他": "其他",
 };
+
+const ASSISTANT_TRANSFER_REQUEST_SELECT = {
+  id: true,
+  taskId: true,
+  fromAssistantId: true,
+  targetAssistantId: true,
+  counterpartTaskId: true,
+  kind: true,
+  responseMode: true,
+  status: true,
+  reason: true,
+  requestedAt: true,
+  targetConfirmedAt: true,
+  completedAt: true,
+  canceledAt: true,
+} as const;
 
 const FULL_TASK_INCLUDE = {
   photographer: { select: { id: true, name: true, currentRoom: true, buildingId: true } },
@@ -110,21 +127,7 @@ const FULL_TASK_INCLUDE = {
     where: { status: { in: VISIBLE_ASSISTANT_TRANSFER_REQUEST_STATUSES } },
     orderBy: { requestedAt: "desc" },
     take: 3,
-    select: {
-      id: true,
-      taskId: true,
-      fromAssistantId: true,
-      targetAssistantId: true,
-      counterpartTaskId: true,
-      kind: true,
-      responseMode: true,
-      status: true,
-      reason: true,
-      requestedAt: true,
-      targetConfirmedAt: true,
-      completedAt: true,
-      canceledAt: true,
-    },
+    select: ASSISTANT_TRANSFER_REQUEST_SELECT,
   },
 } as const;
 
@@ -181,21 +184,7 @@ const QUEUE_TASK_INCLUDE = {
     where: { status: { in: VISIBLE_ASSISTANT_TRANSFER_REQUEST_STATUSES } },
     orderBy: { requestedAt: "desc" },
     take: 1,
-    select: {
-      id: true,
-      taskId: true,
-      fromAssistantId: true,
-      targetAssistantId: true,
-      counterpartTaskId: true,
-      kind: true,
-      responseMode: true,
-      status: true,
-      reason: true,
-      requestedAt: true,
-      targetConfirmedAt: true,
-      completedAt: true,
-      canceledAt: true,
-    },
+    select: ASSISTANT_TRANSFER_REQUEST_SELECT,
   },
 } as const;
 
@@ -236,6 +225,67 @@ function isAssistantRole(role: string | null): boolean {
 
 function uniqueIds(ids: Array<string | null | undefined>): string[] {
   return [...new Set(ids.filter((id): id is string => typeof id === "string" && id.length > 0))];
+}
+
+type DateRange = { gte?: Date; lt?: Date };
+type TransferEvent = Prisma.TaskAssistantTransferRequestGetPayload<{
+  select: typeof ASSISTANT_TRANSFER_REQUEST_SELECT;
+}>;
+
+function dateInRange(value: Date | string | null | undefined, range: DateRange): boolean {
+  if (!value) return false;
+  const time = new Date(value).getTime();
+  return Number.isFinite(time) &&
+    (range.gte == null || time >= range.gte.getTime()) &&
+    (range.lt == null || time < range.lt.getTime());
+}
+
+function completedContributionWhere(range: DateRange): Prisma.BookingTaskWhereInput {
+  return {
+    status: "completed",
+    OR: [
+      { completedAt: range },
+      { collaborators: { some: { status: "completed", completedAt: range } } },
+      { completedAt: null, createdAt: range },
+    ],
+  };
+}
+
+async function loadTransferEventsByTaskId(taskIds: string[]) {
+  const ids = uniqueIds(taskIds);
+  const eventsByTaskId = new Map<string, TransferEvent[]>();
+  if (ids.length === 0) return eventsByTaskId;
+  const idSet = new Set(ids);
+  const events = await prisma.taskAssistantTransferRequest.findMany({
+    where: {
+      status: { in: VISIBLE_ASSISTANT_TRANSFER_REQUEST_STATUSES },
+      OR: [
+        { taskId: { in: ids } },
+        { counterpartTaskId: { in: ids } },
+      ],
+    },
+    select: ASSISTANT_TRANSFER_REQUEST_SELECT,
+    orderBy: { requestedAt: "desc" },
+  });
+  for (const event of events) {
+    for (const taskId of new Set([event.taskId, event.counterpartTaskId])) {
+      if (!taskId || !idSet.has(taskId)) continue;
+      const current = eventsByTaskId.get(taskId) ?? [];
+      current.push(event);
+      eventsByTaskId.set(taskId, current);
+    }
+  }
+  return eventsByTaskId;
+}
+
+function attachTransferEvents<T extends { id: string; assistantTransferRequests: TransferEvent[] }>(
+  tasks: T[],
+  eventsByTaskId: Map<string, TransferEvent[]>,
+): T[] {
+  return tasks.map((task) => ({
+    ...task,
+    assistantTransferRequests: eventsByTaskId.get(task.id) ?? [],
+  }));
 }
 
 function taskDeltaWhere(
@@ -287,7 +337,6 @@ async function relatedChangedTaskIdsSince(
           { completedAt: { gte: since } },
           { canceledAt: { gte: since } },
         ],
-        task: { is: taskWhere },
       },
       select: { taskId: true, counterpartTaskId: true },
       take,
@@ -786,7 +835,7 @@ function totalEffectiveWorkSecondsForRanking(
   );
 }
 
-function completedRankingContributions(task: QueueTask, nowMs: number) {
+function completedRankingContributions(task: QueueTask, nowMs: number, range?: DateRange) {
   const rows: Array<{
     assistantId: string;
     assistantName: string;
@@ -831,7 +880,9 @@ function completedRankingContributions(task: QueueTask, nowMs: number) {
     seenAssistantIds.add(participant.assistantId);
   }
 
-  return rows;
+  return rows.filter((row) =>
+    row.workSeconds > 0 && (!range || dateInRange(new Date(row.completedAtMs), range))
+  );
 }
 
 function orderedTaskTypeSummary(counts: Map<string, number>) {
@@ -848,7 +899,12 @@ function orderedTaskTypeSummary(counts: Map<string, number>) {
     .filter((item): item is { name: string; count: number; color: string } => item !== null);
 }
 
-function buildAreaSummary(profiles: AssistantProfileRow[], tasks: QueueTask[]) {
+function buildAreaSummary(
+  profiles: AssistantProfileRow[],
+  tasks: QueueTask[],
+  contributionTasks: QueueTask[] = tasks,
+  contributionRange?: DateRange,
+) {
   const nowMs = Date.now();
   const profileById = new Map(
     profiles.map((profile) => {
@@ -896,7 +952,10 @@ function buildAreaSummary(profiles: AssistantProfileRow[], tasks: QueueTask[]) {
       completedTypeCounts.set(completedName, row);
     }
 
-    for (const entry of completedRankingContributions(task, nowMs)) {
+  }
+
+  for (const task of contributionTasks) {
+    for (const entry of completedRankingContributions(task, nowMs, contributionRange)) {
       areaCompletedAssistantIds.add(entry.assistantId);
       const current = contributionMap.get(entry.assistantId) ?? [];
       current.push(entry);
@@ -929,9 +988,20 @@ function buildAreaSummary(profiles: AssistantProfileRow[], tasks: QueueTask[]) {
       const orderedEntries = [...entries].sort((a, b) => a.completedAtMs - b.completedAtMs);
       const completedCount = orderedEntries.length;
       const workSeconds = orderedEntries.reduce((sum, entry) => sum + entry.workSeconds, 0);
-      const score = orderedEntries.reduce((sum, entry) => (
-        sum + assistantTaskScoreFromSeconds(entry.workSeconds, entry.taskName)
-      ), 0);
+      const details = orderedEntries.map((entry) => {
+        const scoreFactor = assistantTaskScoreFactor(entry.taskName);
+        const serviceScore = assistantTaskScoreFromSeconds(entry.workSeconds, entry.taskName);
+        const buildingName = entry.buildingId == null ? "未知楼座" : `${entry.buildingId}号楼`;
+        return {
+          taskId: entry.taskId,
+          taskTitle: `${buildingName} · ${entry.roomNumber} · ${entry.taskName}`,
+          serviceSeconds: entry.workSeconds,
+          scoreFactor,
+          serviceScore,
+          totalScore: serviceScore,
+        };
+      });
+      const score = details.reduce((sum, detail) => sum + detail.totalScore, 0);
       const profile = profileById.get(assistantId);
       const assistantName = profile?.name ?? orderedEntries.at(-1)?.assistantName ?? "未命名助理";
       return {
@@ -942,7 +1012,7 @@ function buildAreaSummary(profiles: AssistantProfileRow[], tasks: QueueTask[]) {
         completedCount,
         workSeconds,
         lastCompletedAtMs: orderedEntries.at(-1)?.completedAtMs ?? 0,
-        details: [],
+        details,
       };
     })
     .sort((a, b) =>
@@ -962,11 +1032,17 @@ function buildAreaSummary(profiles: AssistantProfileRow[], tasks: QueueTask[]) {
   };
 }
 
-function areaSummaryFromTasks(profiles: AssistantProfileRow[], tasks: QueueTask[]): AreaSummaryResult {
+function areaSummaryFromTasks(
+  profiles: AssistantProfileRow[],
+  tasks: QueueTask[],
+  contributionTasks: QueueTask[],
+  contributionRange: DateRange,
+): AreaSummaryResult {
   const visibleTasks = tasks.slice(0, AREA_TASK_LIMIT);
+  const visibleContributionTasks = contributionTasks.slice(0, AREA_TASK_LIMIT);
   return {
-    summary: buildAreaSummary(profiles, visibleTasks),
-    truncated: tasks.length > AREA_TASK_LIMIT,
+    summary: buildAreaSummary(profiles, visibleTasks, visibleContributionTasks, contributionRange),
+    truncated: tasks.length > AREA_TASK_LIMIT || contributionTasks.length > AREA_TASK_LIMIT,
   };
 }
 
@@ -991,18 +1067,28 @@ async function getCachedAreaSummary(
   buildingId: number,
   profiles: AssistantProfileRow[],
   areaTaskWhere: Prisma.BookingTaskWhereInput,
-  fallbackTasks?: QueueTask[],
+  contributionTaskWhere: Prisma.BookingTaskWhereInput,
+  contributionRange: DateRange,
 ): Promise<AreaSummaryResult> {
-  if (fallbackTasks) return areaSummaryFromTasks(profiles, fallbackTasks);
   const nowMs = Date.now();
   const cached = areaSummaryCache.get(buildingId);
   if (cached && cached.expiresAtMs > nowMs) return cached.promise;
-  const promise = prisma.bookingTask.findMany({
-    where: areaTaskWhere,
-    include: QUEUE_TASK_INCLUDE,
-    orderBy: [{ priority: "asc" }, { createdAt: "asc" }],
-    take: AREA_TASK_LIMIT + 1,
-  }).then((tasks) => areaSummaryFromTasks(profiles, tasks));
+  const promise = Promise.all([
+    prisma.bookingTask.findMany({
+      where: areaTaskWhere,
+      include: QUEUE_TASK_INCLUDE,
+      orderBy: [{ priority: "asc" }, { createdAt: "asc" }],
+      take: AREA_TASK_LIMIT + 1,
+    }),
+    prisma.bookingTask.findMany({
+      where: contributionTaskWhere,
+      include: QUEUE_TASK_INCLUDE,
+      orderBy: [{ completedAt: "asc" }, { id: "asc" }],
+      take: AREA_TASK_LIMIT + 1,
+    }),
+  ]).then(([tasks, contributionTasks]) =>
+    areaSummaryFromTasks(profiles, tasks, contributionTasks, contributionRange)
+  );
   areaSummaryCache.set(buildingId, {
     expiresAtMs: nowMs + AREA_SUMMARY_CACHE_TTL_MS,
     promise,
@@ -1032,6 +1118,34 @@ export async function GET(request: NextRequest) {
     const maintenance = scheduleWorkbenchSyncMaintenance();
     const createdAt = todayRange();
     const areaWhere = taskBuildingWhere(buildingId);
+    const contributionTaskWhere: Prisma.BookingTaskWhereInput = {
+      AND: [areaWhere, completedContributionWhere(createdAt)],
+    };
+
+    const [profileTransferRequests, readyTransferRequests] = await Promise.all([
+      profileId && (isAssistantRole(view) || isAssistantRole(role))
+        ? prisma.taskAssistantTransferRequest.findMany({
+            where: {
+              status: { in: VISIBLE_ASSISTANT_TRANSFER_REQUEST_STATUSES },
+              OR: [
+                { fromAssistantId: profileId },
+                { targetAssistantId: profileId },
+              ],
+            },
+            select: { taskId: true, counterpartTaskId: true },
+          })
+        : Promise.resolve([]),
+      prisma.taskAssistantTransferRequest.findMany({
+        where: { status: "ready_to_takeover", counterpartTaskId: { not: null } },
+        select: { taskId: true, counterpartTaskId: true },
+      }),
+    ]);
+    const profileTransferTaskIds = uniqueIds(
+      profileTransferRequests.flatMap((event) => [event.taskId, event.counterpartTaskId]),
+    );
+    const readyCounterpartTaskIds = uniqueIds(
+      readyTransferRequests.map((event) => event.counterpartTaskId),
+    );
 
     const taskFilters: Record<string, unknown>[] = [];
     if (profileId && (view === "photographer" || role === "photographer")) {
@@ -1041,6 +1155,7 @@ export async function GET(request: NextRequest) {
         OR: [
           { assistantId: profileId },
           { collaborators: { some: { assistantId: profileId, status: { not: "left" } } } },
+          ...(profileTransferTaskIds.length > 0 ? [{ id: { in: profileTransferTaskIds } }] : []),
           {
             assistantTransferRequests: {
               some: {
@@ -1067,6 +1182,17 @@ export async function GET(request: NextRequest) {
       createdAt,
       AND: [areaWhere],
     };
+    const areaSummaryTaskWhere: Prisma.BookingTaskWhereInput = {
+      AND: [
+        areaWhere,
+        {
+          OR: [
+            { createdAt },
+            completedContributionWhere(createdAt),
+          ],
+        },
+      ],
+    };
     const areaDetailTaskWhere: Prisma.BookingTaskWhereInput = {
       createdAt,
       AND: [
@@ -1087,18 +1213,19 @@ export async function GET(request: NextRequest) {
             { assistantId: { not: null } },
             { collaborators: { some: { status: { in: ACTIVE_PARTICIPANT_STATUSES } } } },
             { assistantTransferRequests: { some: { status: "ready_to_takeover" } } },
+            ...(readyCounterpartTaskIds.length > 0 ? [{ id: { in: readyCounterpartTaskIds } }] : []),
           ],
         },
       ],
     };
     const [areaRelatedChanges, scopedRelatedChanges, areaSummaryUpdatedTask] = await Promise.all([
-      relatedChangedTaskIdsSince(since, areaTaskWhere),
+      relatedChangedTaskIdsSince(since, areaSummaryTaskWhere),
       relatedChangedTaskIdsSince(since, scopedTaskWhere),
       since
         ? prisma.bookingTask.findFirst({
             where: {
               AND: [
-                areaTaskWhere,
+                areaSummaryTaskWhere,
                 { updatedAt: { gte: since } },
               ],
             },
@@ -1117,7 +1244,7 @@ export async function GET(request: NextRequest) {
     const noticeChangedWhere = profileId && isAssistantRole(role)
       ? noticeChangedWhereForAssistant(profileId, since)
       : null;
-    const [profiles, areaTaskIds, areaTasks, taskIds, tasks, noticeChanged] = await Promise.all([
+    const [profiles, areaTaskIds, rawAreaTasks, taskIds, rawTasks, noticeChanged] = await Promise.all([
       prisma.profile.findMany({
         where: {
           role: { in: ["assistant", "assistant_leader"] },
@@ -1160,6 +1287,12 @@ export async function GET(request: NextRequest) {
           })
         : Promise.resolve(null),
     ]);
+    const transferEventsByTaskId = await loadTransferEventsByTaskId([
+      ...rawAreaTasks.map((task) => task.id),
+      ...rawTasks.map((task) => task.id),
+    ]);
+    const areaTasks = attachTransferEvents(rawAreaTasks, transferEventsByTaskId);
+    const tasks = attachTransferEvents(rawTasks, transferEventsByTaskId);
     const shouldSendNotices = shouldCheckNotices && (!since || noticeChanged != null);
     const notices = shouldSendNotices && profileId
       ? await prisma.standbyReassignmentNotice.findMany({
@@ -1230,10 +1363,17 @@ export async function GET(request: NextRequest) {
           assistantStatusTaskById.set(parentTask.id, parentTask);
         }
       }
+      const statusTaskEventsById = await loadTransferEventsByTaskId(
+        [...assistantStatusTaskById.values()].map((task) => task.id),
+      );
+      const enrichedAssistantStatusTasks = attachTransferEvents(
+        [...assistantStatusTaskById.values()],
+        statusTaskEventsById,
+      );
       assistantStatus = compactAssistantStatus(
         buildAssistantStatus(
           profiles,
-          [...assistantStatusTaskById.values()],
+          enrichedAssistantStatusTasks,
           parseEatingOvertimeAlertMin(eatingOvertimeConfig?.value),
         ),
       );
@@ -1248,6 +1388,8 @@ export async function GET(request: NextRequest) {
           buildingId,
           profiles,
           areaTaskWhere,
+          contributionTaskWhere,
+          createdAt,
         )
       : null;
     const shouldSendPublicQueueIds =
