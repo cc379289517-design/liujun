@@ -7649,8 +7649,8 @@
 - [x] 汇总当前工作区全部代码变更，确认覆盖 Dock/身份同步、任务交换交互、熨烫派单与展示、指定助理保护、自动转派通知、在线状态和陈旧任务卡清理。
 - [x] 将所有最终运行规则写入长期文档 `摄影助理自动派单系统.md`，并同步 `tasks/lessons.md` 与本评审记录。
 - [x] 运行完整测试、TypeScript、Prisma validate、生产 build、脚本语法与 `git diff --check`；确认 `prisma/dev.db` 不进入提交。
-- [ ] 使用 `scripts/release-to-mini.sh` 统一提交并推送 `origin/后台管理`，保护 Mac mini 生产 SQLite，完成远端构建、服务重启和健康检查。
-- [ ] 发布后核对本地 HEAD、远程分支、Mac mini HEAD 一致，并记录提交号和生产访问结果。
+- [x] 使用 `scripts/release-to-mini.sh` 统一提交并推送 `origin/后台管理`，保护 Mac mini 生产 SQLite，完成远端构建、服务重启和健康检查。
+- [x] 发布后核对本地 HEAD、远程分支、Mac mini HEAD 一致，并记录提交号和生产访问结果。
 
 ##### 发布评审
 
@@ -7659,4 +7659,6 @@
 - 展示与同步验证：Dock/身份、任务展示和通知纯函数测试 `30/30` 通过，覆盖完整成员集合、空集合清空、场地/楼座乐观更新、交换状态、忙后熨烫、陈旧 executing/paused 卡片清理和通知来源区分。
 - 工程验证：TypeScript、Prisma schema validate、Next.js 生产 build、发布/备份/生产脚本语法和 `git diff --check` 全部通过。
 - 文档收口：长期运行逻辑补齐交换取消与防重复响应、指定助理硬保护、熨烫等待数优先、系统/人工通知分流、在线状态边界、Dock 权威集合与身份缓存；部署文档和一键脚本已切换到当前 Mini 目录。
-- 待发布后补充统一提交号、远程与 Mac mini HEAD、生产健康检查结果。
+- 统一业务提交：`f6dc08637d43c7d33f91e94abaec04c9bbc6f255`；已推送 `origin/后台管理`，本地、GitHub 和 Mac mini HEAD 首次发布核对一致。
+- Mini 发布结果：生产 SQLite 在拉取前临时保护、拉取后恢复并备份到 `database-backups/dev-20260721-163703.db.gz`；远端 Prisma schema 已同步、生产 build 通过、`launchd` 服务已重启。
+- 生产验收：`http://192.168.31.171:3000/api/config` 返回 200，`http://192.168.31.171:3000/photographer` 返回 200。
