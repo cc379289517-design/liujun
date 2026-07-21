@@ -1122,7 +1122,7 @@ export async function GET(request: NextRequest) {
       AND: [areaWhere, completedContributionWhere(createdAt)],
     };
 
-    const [profileTransferRequests, readyTransferRequests] = await Promise.all([
+    const [profileTransferRequests, readyTransferRequests, changedAssistantProfile] = await Promise.all([
       profileId && (isAssistantRole(view) || isAssistantRole(role))
         ? prisma.taskAssistantTransferRequest.findMany({
             where: {
@@ -1139,6 +1139,15 @@ export async function GET(request: NextRequest) {
         where: { status: "ready_to_takeover", counterpartTaskId: { not: null } },
         select: { taskId: true, counterpartTaskId: true },
       }),
+      since
+        ? prisma.profile.findFirst({
+            where: {
+              role: { in: ["assistant", "assistant_leader"] },
+              updatedAt: { gte: since },
+            },
+            select: { id: true },
+          })
+        : Promise.resolve(null),
     ]);
     const profileTransferTaskIds = uniqueIds(
       profileTransferRequests.flatMap((event) => [event.taskId, event.counterpartTaskId]),
@@ -1328,6 +1337,7 @@ export async function GET(request: NextRequest) {
       areaSummaryUpdatedTask != null ||
       areaRelatedChanges.ids.length > 0 ||
       areaRelatedChanges.truncated ||
+      changedAssistantProfile != null ||
       responseProfiles.length > 0;
     const [assistantStatusTasks, eatingOvertimeConfig] = shouldSendAssistantStatus
       ? await Promise.all([

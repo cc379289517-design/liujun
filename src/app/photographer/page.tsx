@@ -10,6 +10,15 @@ import {
   isExternalModelAssistTaskName,
 } from "@/lib/assistantScore";
 import AssistantDock, { type DockAssistant, type NoteEditAnchor, assistantDockDotColor, DOCK_DOT } from "./AssistantDock";
+import {
+  mergeIdentityProfilePatches,
+  optimisticAssistantDockForBuilding,
+  patchAssistantDockRoom,
+  profileToDockAssistant as profileToQuickBookAssistant,
+  reconcileAssistantDockSnapshot,
+  shouldRefreshIdentityProfiles,
+  type AssistantProfileForDock,
+} from "./assistantDockSync";
 import AssistantRankingAvatar from "./AssistantRankingAvatar";
 import AvatarModal from "./AvatarModal";
 import {
@@ -70,14 +79,18 @@ import {
   formatStatsDateLabel,
   formatTaskDetailDateTime,
   hasAreaMetricDetail,
+  hasWorkingTaskForProfile,
   helperParticipants,
   ironingQueueEstimateMinutes,
   ironingQueueOrderMs,
+  isIncomingTransferForProfile,
   isAssignedIroningReadyTask,
   isIroningTask,
   isMapDeferredIroningWaitingTask,
   isPassiveIroningWaitingTask,
   isExternalModelFollowTask,
+  outgoingConfirmingSwapForProfile,
+  passiveIroningWaitingPresentation,
   participantStatusText,
   priorityTransitionLabel,
   publicQueueEscalationKey,
@@ -86,6 +99,7 @@ import {
   publicQueueRankShapeCls,
   publicQueueStatusInfoFromLookup,
   resolveAssistantTasks,
+  removeStaleActiveTasksForIdleProfile,
   sortPublicQueueTasks,
   sortTasksByStatus,
   statsDayDate,
@@ -101,8 +115,10 @@ import {
   taskStatusForProfile,
   taskStatusLabelForList,
   taskTimingForProfile,
+  taskTransferRequestForTask,
   taskTransferDisplayRelation,
   taskTypeGroupName,
+  transferResponseButtonsDisabled,
   type TaskTransferDisplayRelation,
   type PublicQueueStatusInfo,
 } from "./taskDisplay";
@@ -114,6 +130,7 @@ import {
   writePublicQueueLastOrder,
   writePublicQueueSeenEscalations,
 } from "./publicQueueStorage";
+import { reassignmentNoticeDisplay } from "./reassignmentNoticeDisplay";
 import type {
   AssistantPresenceState,
   AssistantRankingContribution,
@@ -671,54 +688,7 @@ function canSpecifyQuickBookAssistant(assistant: DockAssistant): boolean {
     !assistant.subStatus;
 }
 
-function profileToQuickBookAssistant(profile: {
-  id: string;
-  name: string;
-  status: string;
-  onlineStatus: string;
-  subStatus?: string | null;
-  updatedAt?: string;
-  eatingStartedAt?: string | null;
-  eatingPausedAt?: string | null;
-  eatingEndedAt?: string | null;
-  eatingAccumulatedSeconds?: number | null;
-  currentRoom: string | null;
-  activeRoom?: string | null;
-  avatar: string | null;
-  group: string | null;
-}): DockAssistant {
-  return {
-    id: profile.id,
-    name: profile.name,
-    status: profile.status,
-    onlineStatus: profile.onlineStatus,
-    subStatus: profile.subStatus,
-    updatedAt: profile.updatedAt,
-    eatingStartedAt: profile.eatingStartedAt,
-    eatingPausedAt: profile.eatingPausedAt,
-    eatingEndedAt: profile.eatingEndedAt,
-    eatingAccumulatedSeconds: profile.eatingAccumulatedSeconds,
-    currentRoom: profile.activeRoom ?? profile.currentRoom,
-    avatar: profile.avatar,
-    group: profile.group,
-    currentTask: null,
-    pausedRoom: null,
-    pausedTaskDesc: null,
-    pausedTaskDetail: null,
-    pausedElapsedMin: 0,
-    preemptedWaitingRoom: null,
-    preemptedWaitingTaskDesc: null,
-    preemptedWaitingTaskDetail: null,
-    newTaskDesc: null,
-    resumingFromPause: false,
-    pendingRoom: null,
-    currentTaskNote: null,
-    currentTaskId: null,
-    executingOvertimeMin: null,
-    pausedOvertimeMin: null,
-    preemptedOvertimeMin: null,
-  };
-}
+const IDENTITY_PROFILES_FRESHNESS_MS = 15_000;
 
 function quickBookAssistantStatusText(assistant: DockAssistant): string {
   if (assistant.onlineStatus !== "online") return "离线";
@@ -865,6 +835,11 @@ export default function PhotographerPage() {
   const [identityBuildingFilter, setIdentityBuildingFilter] = useState<number | null>(null);
   const [identityBuildingOrder, setIdentityBuildingOrder] = useState<number[]>([]);
   const [allProfiles, setAllProfiles] = useState<{ id: string; name: string; role: string; employeeId: string | null; department: string | null; group: string | null; avatar: string | null; buildingId: number; currentRoom: string | null; activeBuildingId?: number | null; activeRoom?: string | null; status: string; subStatus?: string | null; onlineStatus: string; updatedAt?: string; eatingStartedAt?: string | null; eatingPausedAt?: string | null; eatingEndedAt?: string | null; eatingAccumulatedSeconds?: number | null; building: { id: number; name: string } }[]>([]);
+  const allProfilesRef = useRef<typeof allProfiles>([]);
+  const identityProfilesLastFetchedAtRef = useRef(0);
+  const identityProfilesRequestRef = useRef<Promise<void> | null>(null);
+  const identityProfilesRefreshFrameRef = useRef<number | null>(null);
+  const identityProfilesRefreshTimerRef = useRef<number | null>(null);
   const [collabTaskId, setCollabTaskId] = useState<string | null>(null);
   const [collabSelectedIds, setCollabSelectedIds] = useState<string[]>([]);
   const [collabSaving, setCollabSaving] = useState(false);
@@ -875,6 +850,8 @@ export default function PhotographerPage() {
   const [transferHoverAssistantId, setTransferHoverAssistantId] = useState<string | null>(null);
   const [transferConfirmTarget, setTransferConfirmTarget] = useState<{ assistantId: string; assistantName: string } | null>(null);
   const [transferResponseSaving, setTransferResponseSaving] = useState<"accept" | "pause_and_go" | "after_complete" | "reject" | null>(null);
+  const transferResponseRequestRef = useRef<string | null>(null);
+  const [cancelingTransferRequestId, setCancelingTransferRequestId] = useState<string | null>(null);
   const [dismissedTransferRequestIds, setDismissedTransferRequestIds] = useState<string[]>([]);
   const transferPickerRef = useRef<HTMLDivElement | null>(null);
   // 助理当前任务（原始 API 数据）
@@ -957,6 +934,17 @@ export default function PhotographerPage() {
   const pendingRawTaskRef = useRef<TaskFromAPI | null>(null);
   const workbenchSyncTokenRef = useRef<string | null>(null);
   const workbenchLastFullSyncAtRef = useRef(0);
+  useEffect(() => {
+    allProfilesRef.current = allProfiles;
+  }, [allProfiles]);
+  useEffect(() => () => {
+    if (identityProfilesRefreshFrameRef.current != null) {
+      window.cancelAnimationFrame(identityProfilesRefreshFrameRef.current);
+    }
+    if (identityProfilesRefreshTimerRef.current != null) {
+      window.clearTimeout(identityProfilesRefreshTimerRef.current);
+    }
+  }, []);
   const pollingProfileId = profile?.id ?? null;
   const pollingProfileRole = profile?.role ?? null;
   const pollingProfileBuildingId = profile?.buildingId ?? null;
@@ -986,6 +974,44 @@ export default function PhotographerPage() {
     () => new Map(buildings.map((building) => [building.id, building.name])),
     [buildings],
   );
+  const identityBuildingData = useMemo(() => {
+    const buildingMap = new Map<number, { name: string; profiles: typeof allProfiles }>();
+    for (const item of allProfiles) {
+      const displayBuildingId = isAssistantRole(item.role)
+        ? item.activeBuildingId ?? item.buildingId
+        : item.buildingId;
+      const displayBuildingName =
+        buildingNameById.get(displayBuildingId) ?? item.building.name;
+      if (!buildingMap.has(displayBuildingId)) {
+        buildingMap.set(displayBuildingId, { name: displayBuildingName, profiles: [] });
+      }
+      buildingMap.get(displayBuildingId)!.profiles.push(item);
+    }
+    const allEntries = Array.from(buildingMap.entries());
+    const orderedEntries = identityBuildingOrder.length > 0
+      ? identityBuildingOrder
+          .map((id) => allEntries.find(([bId]) => bId === id))
+          .filter(Boolean) as [number, { name: string; profiles: typeof allProfiles }][]
+      : allEntries;
+    for (const entry of allEntries) {
+      if (!orderedEntries.some(([id]) => id === entry[0])) orderedEntries.push(entry);
+    }
+    const activeBld =
+      identityBuildingFilter ??
+      (profile
+        ? isAssistantRole(profile.role)
+          ? profile.activeBuildingId ?? profile.buildingId
+          : originalBuildingIdRef.current ?? profile.buildingId
+        : null) ??
+      orderedEntries[0]?.[0] ??
+      null;
+
+    return {
+      activeBld,
+      activeEntry: activeBld != null ? buildingMap.get(activeBld) ?? null : null,
+      entries: orderedEntries,
+    };
+  }, [allProfiles, buildingNameById, identityBuildingFilter, identityBuildingOrder, profile]);
 
   const quickBookBuildingId = profile && !isAssistantRole(profile.role)
     ? photographerWorkbenchBuildingId ?? profile.buildingId
@@ -1474,12 +1500,15 @@ export default function PhotographerPage() {
 
   const applyTaskDataForProfile = useCallback((
     taskData: TaskFromAPI[],
-    targetProfile: { id: string; role: string; buildingId: number },
+    targetProfile: { id: string; role: string; buildingId: number; status?: string | null },
     targetBuildingId = targetProfile.buildingId,
   ) => {
     const patchedTaskData = applyOptimisticTaskPatches(taskData, targetProfile);
-    const raw = visibleTasksForProfile(patchedTaskData, targetProfile, targetBuildingId);
     const assistantView = isAssistantRole(targetProfile.role);
+    const visibleTaskData = visibleTasksForProfile(patchedTaskData, targetProfile, targetBuildingId);
+    const raw = assistantView
+      ? removeStaleActiveTasksForIdleProfile(visibleTaskData, targetProfile.id, targetProfile.status)
+      : visibleTaskData;
     replaceTaskListRaw(raw);
     setTasks(sortTasksByStatus(raw.map((t) => apiTaskToDisplay(t, assistantView ? targetProfile.id : undefined))));
     if (assistantView) {
@@ -1718,7 +1747,7 @@ export default function PhotographerPage() {
     setDeferredWaitingRawTask(deferredWaiting);
   }, [profile, rememberTaskPatch, replaceAssistantRawTasks, taskListRawRef, upsertAssistantRawTask, upsertTaskListRaw]);
 
-  const applyWorkbenchProfile = useCallback((selected: typeof allProfiles[0]) => {
+  const applyWorkbenchProfile = useCallback((selected: typeof allProfiles[0], profilePool = allProfilesRef.current) => {
     originalRoomRef.current = selected.currentRoom;
     originalBuildingIdRef.current = selected.buildingId;
     const selectedServiceBuildingId = profileServiceBuildingId(selected);
@@ -1730,12 +1759,16 @@ export default function PhotographerPage() {
         currentRoom: selectedServiceRoom,
       }
       : selected;
+    const dockProfiles = profilePool.some((item) => item.id === selected.id)
+      ? profilePool.map((item) => item.id === selected.id ? selectedForWorkbench : item)
+      : [...profilePool, selectedForWorkbench];
     setNeedsIdentitySelection(false);
     setShowIdentityModal(false);
     setProfile(selectedForWorkbench);
     setWorkbenchRoom(selectedServiceRoom);
     setActiveBuildingId(selectedServiceBuildingId);
     setPhotographerWorkbenchBuildingId(isAssistantRole(selectedForWorkbench.role) ? null : selectedServiceBuildingId);
+    setAssistants((prev) => optimisticAssistantDockForBuilding(prev, dockProfiles, selectedServiceBuildingId));
     safeLocalStorageSet("currentProfileId", selectedForWorkbench.id);
     const url = new URL(window.location.href);
     if (url.searchParams.get("profileId") !== selectedForWorkbench.id || url.searchParams.has("employeeId")) {
@@ -2160,12 +2193,9 @@ export default function PhotographerPage() {
         : null;
       if (profiles.length > 0) {
         const freshProfilesById = new Map(profiles.map((p) => [p.id, p]));
-        setAllProfiles((prev) =>
-          prev.map((item) => {
-            const fresh = freshProfilesById.get(item.id);
-            return fresh ? { ...item, ...fresh } : item;
-          })
-        );
+        startTransition(() => {
+          setAllProfiles((prev) => mergeIdentityProfilePatches(prev, profiles));
+        });
         setProfile((prev) => {
           if (!prev) return prev;
           const fresh = freshProfilesById.get(prev.id);
@@ -2181,29 +2211,8 @@ export default function PhotographerPage() {
             .filter((row) => row && typeof row.id === "string")
             .map((row) => [row.id, row]),
         );
-        type AssistantProfileForDock = DockAssistant & { activeRoom?: string | null };
         const profilePatches = profiles as AssistantProfileForDock[];
-        setAssistants((prev) => {
-          const profilePatchById = new Map(profilePatches.map((p) => [p.id, p]));
-          const seen = new Set<string>();
-          const base = prev.length > 0
-            ? prev.map((item) => {
-                seen.add(item.id);
-                const patch = profilePatchById.get(item.id);
-                return patch ? { ...item, ...profileToQuickBookAssistant(patch) } : item;
-              })
-            : profilePatches.map((p) => {
-                seen.add(p.id);
-                return profileToQuickBookAssistant(p);
-              });
-          for (const patch of profilePatches) {
-            if (!seen.has(patch.id)) base.push(profileToQuickBookAssistant(patch));
-          }
-          return base.map((p) => ({
-            ...p,
-            ...statusById.get(p.id),
-          }));
-        });
+        setAssistants((prev) => reconcileAssistantDockSnapshot(prev, profilePatches, [...statusById.values()]));
         return allTasks;
       }
 
@@ -2327,7 +2336,6 @@ export default function PhotographerPage() {
         }
       }
 
-      type AssistantProfileForDock = DockAssistant & { activeRoom?: string | null };
       setAssistants(profiles.map((p: AssistantProfileForDock) => {
         const info = infoMap.get(p.id);
         const idleRoom = p.activeRoom ?? p.currentRoom;
@@ -2344,6 +2352,8 @@ export default function PhotographerPage() {
             status: "idle",
             currentTask: null,
             currentRoom: idleRoom,
+            currentTaskNote: null,
+            currentTaskId: null,
             pausedRoom: null,
             pausedElapsedMin: 0,
             pausedTaskDesc: null,
@@ -2932,6 +2942,8 @@ export default function PhotographerPage() {
       .then((r) => r.json())
       .then((data) => {
         if (Array.isArray(data)) {
+          allProfilesRef.current = data;
+          identityProfilesLastFetchedAtRef.current = Date.now();
           setAllProfiles(data);
           const params = new URLSearchParams(window.location.search);
           const urlProfileId = params.get("profileId");
@@ -2952,7 +2964,7 @@ export default function PhotographerPage() {
           } catch {}
           const selected = urlMatch || match || loginMatch;
           if (selected) {
-            applyWorkbenchProfile(selected);
+            applyWorkbenchProfile(selected, data);
           } else {
             setNeedsIdentitySelection(true);
             setProfile(null);
@@ -3111,6 +3123,7 @@ export default function PhotographerPage() {
 
   const switchVenue = useCallback(async (venue: string) => {
     if (!profile) return;
+    const previousServiceRoom = profile.activeRoom ?? profile.currentRoom;
     setWorkbenchRoom(venue);
     setShowVenueMenu(false);
     setLocationMenu(null);
@@ -3121,26 +3134,34 @@ export default function PhotographerPage() {
     try {
       setProfile((p) => p ? { ...p, currentRoom: venue } : p);
       setAllProfiles((prev) => prev.map((p) => p.id === profile.id ? { ...p, activeRoom: venue } : p));
+      setAssistants((prev) => patchAssistantDockRoom(prev, profile.id, venue));
       const res = await fetch(`/api/profiles/${profile.id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ activeRoom: venue }),
       });
-      if (res.ok) {
-        const updated = await res.json();
-        const updatedServiceRoom = updated.activeRoom ?? updated.currentRoom;
-        setProfile((p) => p ? { ...p, currentRoom: updatedServiceRoom, activeRoom: updated.activeRoom } : p);
-        setWorkbenchRoom(updatedServiceRoom);
-        setAllProfiles((prev) => prev.map((p) => p.id === profile.id ? { ...p, activeRoom: updated.activeRoom } : p));
+      if (!res.ok) {
+        throw new Error(`切换场地失败: ${res.status}`);
       }
+      const updated = await res.json();
+      const updatedServiceRoom = updated.activeRoom ?? updated.currentRoom;
+      setProfile((p) => p ? { ...p, currentRoom: updatedServiceRoom, activeRoom: updated.activeRoom } : p);
+      setWorkbenchRoom(updatedServiceRoom);
+      setAllProfiles((prev) => prev.map((p) => p.id === profile.id ? { ...p, activeRoom: updated.activeRoom } : p));
+      setAssistants((prev) => patchAssistantDockRoom(prev, profile.id, updatedServiceRoom));
       if (isAssistantRole(profile.role)) {
         // 触发全局扫描自动派单
         await fetch("/api/tasks/sweep", { method: "POST" }).catch(() => {});
       }
       // 刷新助理列表
-      refreshAssistants();
+      await refreshAssistants();
     } catch (err) {
       console.error("Failed to switch venue", err);
+      setWorkbenchRoom(previousServiceRoom);
+      setProfile((p) => p ? { ...p, currentRoom: previousServiceRoom, activeRoom: profile.activeRoom } : p);
+      setAllProfiles((prev) => prev.map((p) => p.id === profile.id ? { ...p, activeRoom: profile.activeRoom } : p));
+      setAssistants((prev) => patchAssistantDockRoom(prev, profile.id, previousServiceRoom));
+      await refreshAssistants();
     }
   }, [cancelLocationMenuClose, profile, refreshAssistants]);
 
@@ -3173,6 +3194,22 @@ export default function PhotographerPage() {
     if (!bld) return;
     const nextVenue = null;
     setShowVenueMenu(false);
+    const previousProfile = profile;
+    const previousActiveBuildingId = activeBuildingId;
+    const optimisticProfile = {
+      ...profile,
+      buildingId: newBuildingId,
+      building: { id: bld.id, name: bld.name, extraVenues: bld.extraVenues },
+      currentRoom: nextVenue,
+      activeBuildingId: newBuildingId,
+      activeRoom: nextVenue,
+    };
+    const optimisticProfiles = allProfiles.map((item) => item.id === profile.id ? optimisticProfile : item);
+    setWorkbenchRoom(nextVenue);
+    setProfile(optimisticProfile);
+    setAllProfiles(optimisticProfiles);
+    setActiveBuildingId(newBuildingId);
+    setAssistants((prev) => optimisticAssistantDockForBuilding(prev, optimisticProfiles, newBuildingId));
 
     try {
       const res = await fetch(`/api/profiles/${profile.id}`, {
@@ -3216,11 +3253,16 @@ export default function PhotographerPage() {
           updatedServiceBuildingId,
         );
       }
-      refreshAssistants();
     } catch (err) {
       console.error("Failed to switch assistant building", err);
+      setWorkbenchRoom(previousProfile.activeRoom ?? previousProfile.currentRoom);
+      setProfile(previousProfile);
+      setAllProfiles((prev) => prev.map((item) => item.id === previousProfile.id ? previousProfile : item));
+      setActiveBuildingId(previousActiveBuildingId);
+      setAssistants((prev) => optimisticAssistantDockForBuilding(prev, allProfiles, previousActiveBuildingId));
+      await refreshAssistants();
     }
-  }, [applyTaskDataForProfile, buildingById, currentRawTask?.status, profile, refreshAssistants]);
+  }, [activeBuildingId, allProfiles, applyTaskDataForProfile, buildingById, currentRawTask?.status, profile, refreshAssistants]);
 
   const handleCancelTask = useCallback(async (taskId: string) => {
     if (removingTaskId) return;
@@ -3300,15 +3342,68 @@ export default function PhotographerPage() {
     }
   }, [canCancelSpecifiedAssistant, cancelingSpecifiedTaskId, profile?.id, refreshAssistants, showTaskCreateError, updateLocalTaskSources]);
 
+  const refreshIdentityProfiles = useCallback(() => {
+    if (!shouldRefreshIdentityProfiles({
+      cachedProfileCount: allProfilesRef.current.length,
+      lastFetchedAt: identityProfilesLastFetchedAtRef.current,
+      now: Date.now(),
+      requestInFlight: identityProfilesRequestRef.current != null,
+      freshnessMs: IDENTITY_PROFILES_FRESHNESS_MS,
+    })) return;
+
+    const request = fetch("/api/profiles?view=identity", { cache: "no-store" })
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`刷新身份列表失败: ${response.status}`);
+        return response.json();
+      })
+      .then((data) => {
+        if (!Array.isArray(data)) return;
+        allProfilesRef.current = data;
+        identityProfilesLastFetchedAtRef.current = Date.now();
+        const nextDockBuildingId = activeBuildingId ?? (profile ? profileServiceBuildingId(profile) : null);
+        startTransition(() => {
+          setAllProfiles(data);
+          if (nextDockBuildingId != null) {
+            setAssistants((prev) => optimisticAssistantDockForBuilding(prev, data, nextDockBuildingId));
+          }
+        });
+      })
+      .catch(console.error)
+      .finally(() => {
+        if (identityProfilesRequestRef.current === request) {
+          identityProfilesRequestRef.current = null;
+        }
+      });
+    identityProfilesRequestRef.current = request;
+  }, [activeBuildingId, profile]);
+
+  const openIdentityModal = useCallback(() => {
+    setShowIdentityModal(true);
+    setIdentityPresenceMenuId(null);
+
+    if (!shouldRefreshIdentityProfiles({
+      cachedProfileCount: allProfilesRef.current.length,
+      lastFetchedAt: identityProfilesLastFetchedAtRef.current,
+      now: Date.now(),
+      requestInFlight: identityProfilesRequestRef.current != null,
+      freshnessMs: IDENTITY_PROFILES_FRESHNESS_MS,
+    })) return;
+    if (identityProfilesRefreshFrameRef.current != null || identityProfilesRefreshTimerRef.current != null) return;
+
+    identityProfilesRefreshFrameRef.current = window.requestAnimationFrame(() => {
+      identityProfilesRefreshFrameRef.current = null;
+      identityProfilesRefreshTimerRef.current = window.setTimeout(() => {
+        identityProfilesRefreshTimerRef.current = null;
+        refreshIdentityProfiles();
+      }, 0);
+    });
+  }, [refreshIdentityProfiles]);
+
   const switchIdentity = useCallback((p: typeof allProfiles[0]) => {
-    safeLocalStorageSet("currentProfileId", p.id);
-    const url = new URL(window.location.href);
-    url.searchParams.set("profileId", p.id);
-    url.searchParams.delete("employeeId");
-    window.history.replaceState(null, "", url.toString());
-    setShowIdentityModal(false);
-    window.location.reload();
-  }, []);
+    setIdentityPresenceMenuId(null);
+    setIdentityUrlState("present");
+    applyWorkbenchProfile(p);
+  }, [applyWorkbenchProfile]);
 
   const showEatingReentryHint = useCallback((profileId: string, untilIso: string) => {
     setEatingReentryHintUntilByProfileId((prev) => ({
@@ -3612,20 +3707,12 @@ export default function PhotographerPage() {
     const bld = buildingById.get(newBuildingId);
     if (!bld) return;
     const nextVenue = null;
+    const previousAssistant = profileById.get(profileId);
+    const isCurrentProfile = profile?.id === profileId;
     // 乐观更新本地
-    setAllProfiles((prev) => prev.map((p) => p.id === profileId ? { ...p, activeBuildingId: newBuildingId, activeRoom: nextVenue } : p));
-    if (profile?.id === profileId) {
-      setWorkbenchRoom(nextVenue);
-      setProfile((p) => p ? {
-        ...p,
-        buildingId: newBuildingId,
-        building: { id: bld.id, name: bld.name, extraVenues: bld.extraVenues },
-        currentRoom: nextVenue,
-        activeBuildingId: newBuildingId,
-        activeRoom: nextVenue,
-      } : p);
-      setActiveBuildingId(newBuildingId);
-    }
+    const optimisticProfiles = allProfiles.map((p) => p.id === profileId ? { ...p, activeBuildingId: newBuildingId, activeRoom: nextVenue } : p);
+    setAllProfiles(optimisticProfiles);
+    setAssistants((prev) => optimisticAssistantDockForBuilding(prev, optimisticProfiles, activeBuildingId));
     try {
       const res = await fetch(`/api/profiles/${profileId}`, {
         method: "PATCH",
@@ -3633,13 +3720,43 @@ export default function PhotographerPage() {
         body: JSON.stringify({ activeBuildingId: newBuildingId, activeRoom: nextVenue }),
       });
       if (!res.ok) {
-        console.error("Failed to update building", res.status, await res.text().catch(() => ""));
+        throw new Error(`切换楼座失败: ${res.status} ${await res.text().catch(() => "")}`);
       }
-      refreshAssistants();
+      const updated = await res.json();
+      const updatedServiceBuildingId = updated.activeBuildingId ?? updated.buildingId;
+      const updatedServiceRoom = updated.activeRoom ?? null;
+      const updatedProfiles = allProfiles.map((p) => p.id === profileId ? {
+        ...p,
+        activeBuildingId: updated.activeBuildingId,
+        activeRoom: updated.activeRoom,
+        status: updated.status,
+      } : p);
+      setAllProfiles(updatedProfiles);
+      setAssistants((prev) => optimisticAssistantDockForBuilding(prev, updatedProfiles, activeBuildingId));
+      if (isCurrentProfile) {
+        setWorkbenchRoom(updatedServiceRoom);
+        setProfile((p) => p ? {
+          ...p,
+          buildingId: updatedServiceBuildingId,
+          building: { id: bld.id, name: bld.name, extraVenues: bld.extraVenues },
+          currentRoom: updatedServiceRoom,
+          activeBuildingId: updated.activeBuildingId,
+          activeRoom: updated.activeRoom,
+          status: updated.status,
+        } : p);
+        setActiveBuildingId(updatedServiceBuildingId);
+      } else {
+        await refreshAssistants();
+      }
     } catch (e) {
       console.error("Failed to update building", e);
+      if (previousAssistant) {
+        setAllProfiles((prev) => prev.map((p) => p.id === profileId ? previousAssistant : p));
+      }
+      setAssistants((prev) => optimisticAssistantDockForBuilding(prev, allProfiles, activeBuildingId));
+      await refreshAssistants();
     }
-  }, [buildingById, profile?.id, refreshAssistants]);
+  }, [activeBuildingId, allProfiles, buildingById, profile?.id, profileById, refreshAssistants]);
 
   const noteTaskIsExecuting = useCallback((taskId: string) => {
     const task =
@@ -4329,8 +4446,7 @@ export default function PhotographerPage() {
     ? reassignmentNotices.find((notice) =>
         notice.oldAssistantId === profile?.id &&
         !notice.oldAssistantAcknowledgedAt &&
-        !dismissedReassignmentNoticeIds.includes(notice.id) &&
-        (notice.oldAssistantSetOffline !== false || notice.reason === "assistant_swap_after_complete_ready")
+        !dismissedReassignmentNoticeIds.includes(notice.id)
       ) ?? null
     : null;
   const newReassignmentNotice = isAssistantRole(profile?.role)
@@ -4345,32 +4461,15 @@ export default function PhotographerPage() {
     ? activeReassignmentNotice.oldAssistantId === profile?.id
       ? "old"
       : "new"
-    : null;
+      : null;
   const activeReassignmentKeepsOldOnline = activeReassignmentNotice?.oldAssistantSetOffline === false;
   const activeReassignmentTaskLabel = activeReassignmentNotice
     ? `${activeReassignmentNotice.taskRoomNumber}室 · ${activeReassignmentNotice.taskCategoryName} · P${activeReassignmentNotice.taskPriority}`
     : "";
-  const activeReassignmentOldWorkLabel = activeReassignmentNotice
-    ? [
-        activeReassignmentNotice.oldAssistantActiveTaskRoomNumber
-          ? `${activeReassignmentNotice.oldAssistantActiveTaskRoomNumber}室`
-          : null,
-        activeReassignmentNotice.oldAssistantActiveTaskCategoryName,
-      ].filter(Boolean).join(" · ") || "上一项任务"
-    : "上一项任务";
-  const activeReassignmentOldWorkStatusLabel =
-    activeReassignmentNotice?.oldAssistantActiveTaskStatus === "paused" ? "暂停中" : "超时进行中";
-  const activeReassignmentMessage = activeReassignmentNotice
-    ? activeReassignmentNoticeRole === "old"
-      ? activeReassignmentNotice.reason === "assistant_swap_after_complete_ready"
-        ? `${activeReassignmentNotice.newAssistantName}助理原任务已完成，正在前往你此时所在地，系统已将「${activeReassignmentTaskLabel}」转入待就位接替流程。`
-        : activeReassignmentKeepsOldOnline
-        ? `因你上一项任务「${activeReassignmentOldWorkLabel}」仍在${activeReassignmentOldWorkStatusLabel}，已将「${activeReassignmentTaskLabel}」转派给${activeReassignmentNotice.newAssistantName}。你的在线状态未改变。`
-        : "你因长时间未应答就位，现已将你状态切换为离线状态，点击下方确认窗口，状态切换为应接在线状态。"
-      : activeReassignmentKeepsOldOnline
-        ? `收到${activeReassignmentNotice.oldAssistantName}「${activeReassignmentTaskLabel}」接替/交换请求，是否经过协商确认。`
-        : `因${activeReassignmentNotice.oldAssistantName}长时间未应答就位，现由你接替派发任务。`
-    : "";
+  const activeReassignmentDisplay = activeReassignmentNotice && activeReassignmentNoticeRole
+    ? reassignmentNoticeDisplay(activeReassignmentNotice, activeReassignmentNoticeRole)
+    : null;
+  const activeReassignmentMessage = activeReassignmentDisplay?.message ?? "";
   const isAssistantProfile = isAssistantRole(profile?.role);
   const assistantPresence = assistantPresenceState(profile);
   const assistantPresenceInfo = assistantPresenceMeta(assistantPresence);
@@ -4618,6 +4717,7 @@ export default function PhotographerPage() {
       if (transferPickerRef.current?.contains(target)) return;
       if (target instanceof HTMLElement && target.closest("[data-transfer-control='true']")) return;
       if (target instanceof HTMLElement && target.closest("[data-transfer-confirm='true']")) return;
+      if (target instanceof HTMLElement && target.closest("[data-transfer-response='true']")) return;
       closeTransferModal();
     };
     document.addEventListener("mousedown", handlePointerDown);
@@ -4625,20 +4725,15 @@ export default function PhotographerPage() {
   }, [closeTransferModal, transferTask]);
 
   const activeTransferForTask = useCallback((task: TaskFromAPI | null | undefined) => (
-    task?.assistantTransferRequests?.find((request) =>
-      request.status === "confirming" ||
-      request.status === "pending" ||
-      request.status === "pending_after_complete" ||
-      request.status === "ready_to_takeover"
-    ) ?? null
+    taskTransferRequestForTask(task, ["confirming", "pending", "pending_after_complete", "ready_to_takeover"])
   ), []);
 
   const pendingTransferForTask = useCallback((task: TaskFromAPI | null | undefined) => (
-    task?.assistantTransferRequests?.find((request) => request.status === "pending") ?? null
+    taskTransferRequestForTask(task, ["pending"])
   ), []);
 
   const confirmingTransferForTask = useCallback((task: TaskFromAPI | null | undefined) => (
-    task?.assistantTransferRequests?.find((request) => request.status === "confirming") ?? null
+    taskTransferRequestForTask(task, ["confirming"])
   ), []);
 
   const incomingConfirmingTransferTask = useMemo(() => {
@@ -4749,9 +4844,13 @@ export default function PhotographerPage() {
     accepted: boolean,
     responseMode?: "pause_and_go" | "after_complete",
   ) => {
-    if (!profile || !incomingConfirmingTransferTask || !incomingConfirmingTransfer || transferResponseSaving) return;
+    if (!profile || !incomingConfirmingTransferTask || !incomingConfirmingTransfer || transferResponseSaving || transferResponseRequestRef.current) return;
     const actionKey = workbenchTaskActionKey("transfer-response", incomingConfirmingTransfer.id, profile.id);
-    if (!beginWorkbenchPendingAction(actionKey)) return;
+    if (!beginWorkbenchPendingAction(actionKey)) {
+      endWorkbenchPendingAction(actionKey);
+      if (!beginWorkbenchPendingAction(actionKey)) return;
+    }
+    transferResponseRequestRef.current = actionKey;
     setTransferResponseSaving(accepted ? (responseMode ?? "accept") : "reject");
     try {
       const response = await fetch(`/api/tasks/${incomingConfirmingTransferTask.id}`, {
@@ -4794,6 +4893,9 @@ export default function PhotographerPage() {
       console.error("Failed to respond transfer request", error);
       showTaskCreateError("移交请求处理失败，请检查网络后重试");
     } finally {
+      if (transferResponseRequestRef.current === actionKey) {
+        transferResponseRequestRef.current = null;
+      }
       setTransferResponseSaving(null);
       endWorkbenchPendingAction(actionKey);
     }
@@ -4811,11 +4913,40 @@ export default function PhotographerPage() {
     transferResponseSaving,
   ]);
 
+  const handleCancelTransferRequest = useCallback(async (
+    task: TaskFromAPI,
+    requestId: string,
+  ) => {
+    if (!profile || cancelingTransferRequestId) return;
+    setCancelingTransferRequestId(requestId);
+    try {
+      const response = await fetch(`/api/tasks/${task.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "cancelPrimaryAssistantTransfer",
+          actorAssistantId: profile.id,
+        }),
+      });
+      if (!response.ok) {
+        const data = await response.json().catch(() => null) as { error?: string } | null;
+        showTaskCreateError(data?.error ?? "取消交换失败，请稍后重试");
+        return;
+      }
+      const updated = await response.json() as TaskFromAPI;
+      replaceVisibleTaskForProfile(updated, true, profile);
+      refreshAssistants();
+      showTaskCreateError("已取消交换请求", false, "transfer");
+    } catch (error) {
+      console.error("Failed to cancel assistant transfer", error);
+      showTaskCreateError("取消交换失败，请检查网络后重试");
+    } finally {
+      setCancelingTransferRequestId(null);
+    }
+  }, [cancelingTransferRequestId, profile, refreshAssistants, replaceVisibleTaskForProfile, showTaskCreateError]);
+
   const transferActionPending = transferTask && profile
     ? isWorkbenchPendingAction(workbenchTaskActionKey("transfer", transferTask.id, profile.id))
-    : false;
-  const transferResponseActionPending = incomingConfirmingTransfer && profile
-    ? isWorkbenchPendingAction(workbenchTaskActionKey("transfer-response", incomingConfirmingTransfer.id, profile.id))
     : false;
   const priorityUpgradeActionPending = priorityUpgradeTask && profile
     ? isWorkbenchPendingAction(workbenchTaskActionKey("priority-upgrade", priorityUpgradeTask.id, profile.id))
@@ -4926,12 +5057,41 @@ export default function PhotographerPage() {
       : null;
     if (activeTransfer) {
       const label = activeTransfer.status === "confirming" ? "待确认" : "已预约";
+      const canReopenIncomingTransfer =
+        activeTransfer.status === "confirming" &&
+        isIncomingTransferForProfile(activeTransfer, profile?.id);
+      const controlClassName = `flex h-7 max-w-[138px] items-center gap-1.5 rounded-full px-2.5 text-[10px] font-extrabold shadow-sm backdrop-blur-xl ${
+        resolvedTheme === "dark"
+          ? "bg-white/[0.07] text-purple-200"
+          : "bg-white/54 text-purple-600"
+      }`;
+      if (canReopenIncomingTransfer) {
+        return (
+          <button
+            type="button"
+            data-transfer-control="true"
+            className={`${controlClassName} cursor-pointer transition-colors ${
+              resolvedTheme === "dark" ? "hover:bg-white/[0.12]" : "hover:bg-white/78"
+            }`}
+            aria-label={`重新处理${label}${targetName ?? "目标助理"}的交换请求`}
+            title="重新处理交换请求"
+            onClick={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              if (profile) {
+                endWorkbenchPendingAction(workbenchTaskActionKey("transfer-response", activeTransfer.id, profile.id));
+              }
+              setTransferResponseSaving(null);
+              setDismissedTransferRequestIds((prev) => prev.filter((id) => id !== activeTransfer.id));
+            }}
+          >
+            <TransferArrowsIcon className="h-[11px] w-[11px] shrink-0" />
+            <span className="min-w-0 truncate">{label} {targetName}</span>
+          </button>
+        );
+      }
       return (
-        <span className={`flex h-7 max-w-[138px] items-center gap-1.5 rounded-full px-2.5 text-[10px] font-extrabold shadow-sm backdrop-blur-xl ${
-          resolvedTheme === "dark"
-            ? "bg-white/[0.07] text-purple-200"
-            : "bg-white/54 text-purple-600"
-        }`}>
+        <span className={controlClassName}>
           <TransferArrowsIcon className="h-[11px] w-[11px] shrink-0" />
           <span className="min-w-0 truncate">{label} {targetName}</span>
         </span>
@@ -5768,23 +5928,21 @@ export default function PhotographerPage() {
     ? assistantStartCandidateTasksForProfile(taskListRaw, areaTasks, profile.id, freeIroningMachineCount, { blockRootStartWhenWorking: true })
     : [];
   const afterCompleteSwapTask = isAssistantProfile && profile
-    ? taskListRaw.find((task) =>
-        task.assistantTransferRequests?.some((request) =>
-          request.targetAssistantId === profile.id &&
-          (request.status === "pending_after_complete" || request.status === "ready_to_takeover") &&
-          request.responseMode === "after_complete"
-        )
-      ) ?? null
+    ? taskListRaw.find((task) => {
+        const request = taskTransferRequestForTask(task, ["pending_after_complete", "ready_to_takeover"]);
+        return request?.targetAssistantId === profile.id && request.responseMode === "after_complete";
+      }) ?? null
     : null;
-  const afterCompleteSwapRequest = afterCompleteSwapTask?.assistantTransferRequests?.find((request) =>
-    profile &&
-    request.targetAssistantId === profile.id &&
-    (request.status === "pending_after_complete" || request.status === "ready_to_takeover") &&
-    request.responseMode === "after_complete"
-  ) ?? null;
+  const afterCompleteSwapRequest = taskTransferRequestForTask(
+    afterCompleteSwapTask,
+    ["pending_after_complete", "ready_to_takeover"],
+  );
   const mobileRecommendedIroningTaskId = isAssistantProfile && profile && freeIroningMachineCount > 0
     ? mobileActionableWaitingTasks.find((task) => isIroningTask(task))?.id ?? null
     : null;
+  const assistantHasWorkingTask = isAssistantProfile && profile
+    ? hasWorkingTaskForProfile(taskListRaw, profile.id)
+    : false;
 
   const createMobileTask = useCallback(async (
     catName: string,
@@ -5890,8 +6048,10 @@ export default function PhotographerPage() {
       profileId: profile?.id,
       nowMs: now.getTime(),
       dots: DOCK_DOT,
+      freeIroningMachineCount,
+      hasWorkingTaskForProfile: assistantHasWorkingTask,
     });
-  }, [isAssistantProfile, now, profile?.id]);
+  }, [assistantHasWorkingTask, freeIroningMachineCount, isAssistantProfile, now, profile?.id]);
 
   const mobileTaskSubtitle = useCallback((task: TaskFromAPI) => {
     return deriveMobileTaskSubtitle(task, { isAssistantProfile });
@@ -6205,7 +6365,9 @@ export default function PhotographerPage() {
               )}
               className={`mt-4 min-h-[44px] w-full rounded-2xl px-4 text-[14px] font-extrabold text-white shadow-lg disabled:opacity-60 ${activeReassignmentNoticeIsWarning ? "bg-red-500 shadow-red-500/20" : "bg-purple-500 shadow-purple-500/20"}`}
             >
-              确认
+              {reassignmentNoticeSavingId === activeReassignmentNotice.id
+                ? "确认中..."
+                : activeReassignmentDisplay?.buttonLabel ?? "确认"}
             </button>
           </div>
         );
@@ -6555,7 +6717,7 @@ export default function PhotographerPage() {
             <>
               <button
                 type="button"
-                onClick={() => setShowIdentityModal(true)}
+                onClick={openIdentityModal}
                 className="flex min-h-[46px] items-center justify-center gap-2 rounded-2xl bg-white/54 px-3 text-[13px] font-extrabold text-[--text-primary]"
               >
                 {mobileIcon("identity")}
@@ -6726,7 +6888,7 @@ export default function PhotographerPage() {
               </p>
               <button
                 type="button"
-                onClick={() => setShowIdentityModal(true)}
+                onClick={openIdentityModal}
                 className="mt-5 min-h-[48px] w-full rounded-2xl bg-orange-500 px-4 text-[14px] font-extrabold text-white shadow-lg shadow-orange-500/20 active:scale-[0.99]"
               >
                 选择身份
@@ -8522,11 +8684,7 @@ export default function PhotographerPage() {
 		                  <p className={`text-[23px] font-bold leading-tight ${
                         activeReassignmentNoticeRole === "old" && !activeReassignmentKeepsOldOnline ? "text-[--text-primary]" : "text-purple-950"
                       }`}>
-		                    {activeReassignmentNoticeRole === "old"
-                        ? activeReassignmentKeepsOldOnline
-                          ? "任务转派提醒"
-                          : "待就位超时提醒"
-                        : "任务接替/交换提醒"}
+			                    {activeReassignmentDisplay?.title ?? "任务通知"}
 		                  </p>
 	                  <p className="mt-1 text-[17px] leading-snug text-[--text-secondary]">
 	                    {activeReassignmentTaskLabel}
@@ -8559,13 +8717,9 @@ export default function PhotographerPage() {
                   activeReassignmentNoticeRole === "old" ? "acknowledgeOld" : "acknowledgeNew"
                 )}
               >
-	                {reassignmentNoticeSavingId === activeReassignmentNotice.id
-	                  ? "确认中..."
-	                  : activeReassignmentNoticeRole === "old"
-	                    ? activeReassignmentKeepsOldOnline
-                        ? "知道了"
-                        : "确认并恢复在线"
-	                    : "确认"}
+		                {reassignmentNoticeSavingId === activeReassignmentNotice.id
+		                  ? "确认中..."
+		                  : activeReassignmentDisplay?.buttonLabel ?? "确认"}
               </button>
             </div>
           </div>
@@ -8617,12 +8771,12 @@ export default function PhotographerPage() {
 
         {incomingConfirmingTransferTask && incomingConfirmingTransfer && (
           <div className="fixed inset-0 z-[235] flex items-center justify-center bg-white/25 px-6 backdrop-blur-md">
-            <div className="relative w-full max-w-[510px] rounded-[36px] border border-white/70 bg-white/90 px-9 py-8 shadow-2xl shadow-black/10 backdrop-blur-xl">
+            <div data-transfer-response="true" className="relative w-full max-w-[510px] rounded-[36px] border border-white/70 bg-white/90 px-9 py-8 shadow-2xl shadow-black/10 backdrop-blur-xl">
               <button
                 type="button"
                 aria-label="稍后处理移交请求"
                 title="稍后处理"
-                disabled={transferResponseActionPending || transferResponseSaving != null}
+                disabled={transferResponseButtonsDisabled(transferResponseSaving)}
                 onClick={() => setDismissedTransferRequestIds((prev) => [...prev, incomingConfirmingTransfer.id])}
                 className="absolute right-5 top-5 flex h-8 w-8 items-center justify-center rounded-full bg-white/60 text-[20px] font-semibold leading-none text-slate-400 shadow-sm shadow-slate-200/50 transition-colors hover:bg-white/90 hover:text-slate-600 disabled:cursor-wait disabled:opacity-50"
               >
@@ -8652,39 +8806,39 @@ export default function PhotographerPage() {
               <div className="mt-8 flex gap-3">
                 <button
                   type="button"
-                  disabled={transferResponseActionPending || transferResponseSaving != null}
+                  disabled={transferResponseButtonsDisabled(transferResponseSaving)}
                   className="min-h-[54px] flex-1 rounded-3xl bg-white/70 px-5 text-[18px] font-bold text-[--text-secondary] shadow-sm shadow-slate-200/50 transition-colors hover:bg-white disabled:opacity-60"
                   onClick={() => void handleRespondTransferRequest(false)}
                 >
-                  {transferResponseActionPending || transferResponseSaving === "reject" ? "处理中..." : "拒绝"}
+                  {transferResponseSaving === "reject" ? "处理中..." : "拒绝"}
                 </button>
                 {incomingConfirmingTransferIsSwap ? (
                   <>
                     <button
                       type="button"
-                      disabled={transferResponseActionPending || transferResponseSaving != null}
+                      disabled={transferResponseButtonsDisabled(transferResponseSaving)}
                       className="min-h-[54px] flex-1 rounded-3xl bg-purple-500 px-4 text-[17px] font-bold text-white shadow-lg shadow-purple-500/20 transition-colors hover:bg-purple-600 active:scale-[0.99] disabled:opacity-70"
                       onClick={() => void handleRespondTransferRequest(true, "pause_and_go")}
                     >
-                      {transferResponseActionPending || transferResponseSaving === "pause_and_go" ? "处理中..." : "暂停并前往"}
+                      {transferResponseSaving === "pause_and_go" ? "处理中..." : "暂停并前往"}
                     </button>
                     <button
                       type="button"
-                      disabled={transferResponseActionPending || transferResponseSaving != null}
+                      disabled={transferResponseButtonsDisabled(transferResponseSaving)}
                       className="min-h-[54px] flex-1 rounded-3xl bg-purple-600 px-4 text-[17px] font-bold text-white shadow-lg shadow-purple-600/20 transition-colors hover:bg-purple-700 active:scale-[0.99] disabled:opacity-70"
                       onClick={() => void handleRespondTransferRequest(true, "after_complete")}
                     >
-                      {transferResponseActionPending || transferResponseSaving === "after_complete" ? "处理中..." : "结束后前往"}
+                      {transferResponseSaving === "after_complete" ? "处理中..." : "结束后前往"}
                     </button>
                   </>
                 ) : (
                   <button
                     type="button"
-                    disabled={transferResponseActionPending || transferResponseSaving != null}
+                    disabled={transferResponseButtonsDisabled(transferResponseSaving)}
                     className="min-h-[54px] flex-1 rounded-3xl bg-purple-500 px-5 text-[18px] font-bold text-white shadow-lg shadow-purple-500/20 transition-colors hover:bg-purple-600 active:scale-[0.99] disabled:opacity-70"
                     onClick={() => void handleRespondTransferRequest(true)}
                   >
-                    {transferResponseActionPending || transferResponseSaving === "accept" ? "确认中..." : "确认接替"}
+                    {transferResponseSaving === "accept" ? "确认中..." : "确认接替"}
                   </button>
                 )}
               </div>
@@ -9630,6 +9784,10 @@ export default function PhotographerPage() {
 
                   const renderPassiveIroningWaitingBlock = (task: TaskFromAPI, flex: number) => {
                     const cancelPending = taskActionPending("cancel", task);
+                    const presentation = passiveIroningWaitingPresentation(task, {
+                      freeIroningMachineCount,
+                      hasWorkingTaskForProfile: assistantHasWorkingTask,
+                    });
                     return (
                       <div
                         key={task.id}
@@ -9640,12 +9798,12 @@ export default function PhotographerPage() {
                           <div className="min-w-0 min-h-0 w-[45%] h-[45%] max-w-[min(72%,1.35rem)] max-h-[min(72%,1.35rem)] rounded-full bg-emerald-500/80" />
                         </div>
                         <span className="text-[16px] font-extrabold text-emerald-700">
-                          {task.ironingStage === "notified" ? "准备熨烫" : "等待熨烫机"}
+                          {task.ironingStage === "notified" ? "准备熨烫" : presentation.label}
                         </span>
                         {renderEscalationBadge(task, { compact: true })}
                         {lineRoomPhotoCategory(task, "text-emerald-700/80")}
                         <p className="text-[11px] text-emerald-700/70 text-center px-2">
-                          当前无空余熨烫机，只能开始做其他任务
+                          {presentation.description}
                         </p>
                         <button
                           type="button"
@@ -10269,12 +10427,19 @@ export default function PhotographerPage() {
 	                  });
                   const isPhotographerQueueTask = rawForTask != null && isPhotographerLimitQueuedTask(rawForTask);
                   const isAssistantTaskList = isAssistantRole(profile?.role);
+                  const cancelableSwapRequest = isAssistantTaskList
+                    ? outgoingConfirmingSwapForProfile(rawForTask, profile?.id)
+                    : null;
+                  const transferCancelInFlight = cancelableSwapRequest?.id === cancelingTransferRequestId;
                   const isCancellable = !isAssistantTaskList && (canCancelRawTask(rawForTask) || isPhotographerQueueTask);
 	                  const showCancel = isCancellable && hoveredTagId === task.id && !cancelInFlight;
 	                  const canRegisterCompletion = canOpenCompletionRegistration(rawForTask);
 	                  const showCompletionRegistration = canRegisterCompletion && hoveredTagId === task.id && !cancelInFlight;
-                  const statusBadgeInteractive = isCancellable || canRegisterCompletion;
-                  const displayStatusLabel = taskStatusLabelForList(task, rawForTask, taskListRaw);
+                  const statusBadgeInteractive = isCancellable || canRegisterCompletion || cancelableSwapRequest != null;
+                  const displayStatusLabel = taskStatusLabelForList(task, rawForTask, taskListRaw, {
+                    profileId: isAssistantRole(profile?.role) ? profile?.id : null,
+                    freeIroningMachineCount,
+                  });
                   const showPausedWaitingDots =
                     !isAssistantRole(profile?.role) && task.statusLabel === "已暂停";
                   const collaboratorCount = helperParticipants(rawForTask).length;
@@ -10283,8 +10448,15 @@ export default function PhotographerPage() {
                     task.statusLabel === "已完成" &&
                     collaboratorCount > 0 &&
                     completedAssigneeNames.length > 1;
-	                  const statusBadgeLabel = displayStatusLabel;
-	                  const statusBadgeCls = cancelInFlight
+                  const showCancelSwap = cancelableSwapRequest != null && hoveredTagId === task.id && !transferCancelInFlight;
+                  const statusBadgeLabel = cancelableSwapRequest
+                    ? showCancelSwap ? "取消交换" : transferCancelInFlight ? "取消中" : "待确认交换"
+                    : displayStatusLabel;
+                  const statusBadgeCls = transferCancelInFlight
+                      ? "bg-red-100/80 text-red-500 cursor-default"
+                      : showCancelSwap
+                        ? "bg-red-100/80 text-red-500 cursor-pointer hover:bg-red-200/80 scale-105"
+                  : cancelInFlight
                       ? "bg-red-100/80 text-red-500 cursor-default"
                       : showCancel
 	                    ? "bg-red-100/80 text-red-500 cursor-pointer hover:bg-red-200/80 scale-105"
@@ -10432,19 +10604,24 @@ export default function PhotographerPage() {
                           onMouseEnter={() => statusBadgeInteractive && setHoveredTagId(task.id)}
                           onMouseLeave={() => setHoveredTagId(null)}
                           onClick={(e) => {
-	                            if (isCancellable && !cancelInFlight) {
-	                              e.stopPropagation();
-	                              handleCancelTask(task.id);
+                            if (cancelableSwapRequest && !transferCancelInFlight) {
+                              e.stopPropagation();
+                              void handleCancelTransferRequest(rawForTask!, cancelableSwapRequest.id);
+                            } else if (isCancellable && !cancelInFlight) {
+                              e.stopPropagation();
+                              handleCancelTask(task.id);
                             } else if (canRegisterCompletion && rawForTask) {
                               e.stopPropagation();
                               openCompletionRegistrationModal(rawForTask);
                             }
                           }}
                         >
-	                          {cancelInFlight ? (
-	                            "取消中"
-	                          ) : showCancel ? (
-	                            "取消"
+                          {transferCancelInFlight ? (
+                            "取消中"
+                          ) : showCancelSwap ? (
+                            "取消交换"
+                          ) : showCancel ? (
+                            "取消"
                           ) : showCompletionRegistration ? (
                             rawForTask?.completionRegistration ? "查看登记" : "添加登记"
                           ) : (
@@ -10709,7 +10886,7 @@ export default function PhotographerPage() {
               </a>
               <button
                 type="button"
-                onClick={() => setShowIdentityModal(true)}
+                onClick={openIdentityModal}
                 className={`readable-glass-dark flex w-[88px] cursor-pointer items-center justify-start gap-1.5 rounded-lg px-2 py-1.5 transition-colors ${glass}`}
                 aria-label="切换身份"
                 title="切换身份"
@@ -10830,10 +11007,10 @@ export default function PhotographerPage() {
           onClick={() => setShowIdentityModal(false)}
         >
           <div
-            className={`relative flex w-[min(94vw,680px)] max-h-[86vh] flex-col overflow-hidden rounded-[26px] border p-1 shadow-[0_32px_96px_rgba(15,23,42,0.24),inset_0_1px_0_rgba(255,255,255,0.72)] backdrop-blur-[32px] ring-1 sm:rounded-[34px] ${
+            className={`relative isolate flex w-[min(94vw,680px)] max-h-[86vh] flex-col overflow-hidden rounded-[26px] border p-1 shadow-[0_32px_96px_rgba(15,23,42,0.24),inset_0_1px_0_rgba(255,255,255,0.72)] ring-1 sm:rounded-[34px] ${
               resolvedTheme === "dark"
-                ? "border-white/12 bg-slate-950/62 ring-white/10"
-                : "border-white/82 bg-white/58 ring-white/70"
+                ? "border-white/12 bg-slate-950/94 ring-white/10"
+                : "border-white/82 bg-white/90 ring-white/70"
             }`}
             onClick={(e) => e.stopPropagation()}
           >
@@ -10861,37 +11038,7 @@ export default function PhotographerPage() {
             </div>
             {/* Building tabs + filtered profiles */}
             {(() => {
-              const buildingMap = new Map<number, { name: string; profiles: typeof allProfiles }>();
-              for (const p of allProfiles) {
-                const displayBuildingId = isAssistantRole(p.role)
-                  ? p.activeBuildingId ?? p.buildingId
-                  : p.buildingId;
-                const displayBuildingName =
-                  buildingNameById.get(displayBuildingId) ?? p.building.name;
-                if (!buildingMap.has(displayBuildingId)) {
-                  buildingMap.set(displayBuildingId, { name: displayBuildingName, profiles: [] });
-                }
-                buildingMap.get(displayBuildingId)!.profiles.push(p);
-              }
-              const allEntries = Array.from(buildingMap.entries());
-              const orderedEntries = identityBuildingOrder.length > 0
-                ? identityBuildingOrder
-                    .map((id) => allEntries.find(([bId]) => bId === id))
-                    .filter(Boolean) as [number, { name: string; profiles: typeof allProfiles }][]
-                : allEntries;
-              for (const entry of allEntries) {
-                if (!orderedEntries.some(([id]) => id === entry[0])) orderedEntries.push(entry);
-              }
-              const activeBld =
-                identityBuildingFilter ??
-                (profile
-                  ? isAssistantRole(profile.role)
-                    ? profile.activeBuildingId ?? profile.buildingId
-                    : originalBuildingIdRef.current ?? profile.buildingId
-                  : null) ??
-                orderedEntries[0]?.[0] ??
-                null;
-              const activeEntry = activeBld != null ? buildingMap.get(activeBld) : null;
+              const { activeBld, activeEntry, entries: orderedEntries } = identityBuildingData;
               const roles = ["photographer", "assistant", "assistant_leader", "admin"] as const;
               const roleLabel = (r: string) => r === "photographer" ? "摄影师" : r === "assistant" ? "助理" : r === "assistant_leader" ? "助理组长" : "管理";
               const roleColor = (r: string) => r === "photographer" ? "text-orange-600" : r === "assistant" ? "text-green-600" : r === "assistant_leader" ? "text-blue-600" : "text-purple-600";
@@ -10903,20 +11050,20 @@ export default function PhotographerPage() {
                 return "text-slate-200";
               };
               const identityPresenceButtonSurface = (state: AssistantPresenceState) => {
-                if (resolvedTheme !== "dark") return "border-white/70 bg-white/40";
-                if (state === "online") return "border-emerald-300/35 bg-emerald-400/16 shadow-emerald-950/20";
-                if (state === "eating") return "border-sky-300/35 bg-sky-400/16 shadow-sky-950/20";
-                return "border-slate-300/30 bg-slate-400/18 shadow-black/20";
+                if (resolvedTheme !== "dark") return "border-white/80 bg-white/82";
+                if (state === "online") return "border-emerald-300/35 bg-emerald-950/78 shadow-emerald-950/20";
+                if (state === "eating") return "border-sky-300/35 bg-sky-950/78 shadow-sky-950/20";
+                return "border-slate-300/30 bg-slate-800/88 shadow-black/20";
               };
               const identityFloatingPanelCls = resolvedTheme === "dark"
-                ? "border-white/[0.16] bg-slate-900/92 shadow-2xl shadow-black/45"
-                : "border-white/70 bg-white/82 shadow-xl shadow-slate-300/30";
+                ? "border-white/[0.16] bg-slate-900/98 shadow-2xl shadow-black/45"
+                : "border-white/80 bg-white/98 shadow-xl shadow-slate-300/30";
               const identityFloatingButtonCls = resolvedTheme === "dark"
                 ? "border-white/[0.14] bg-white/[0.10] shadow-black/20 hover:bg-white/[0.16] disabled:opacity-55"
                 : "border-white/70 bg-white/54 shadow-sm hover:bg-white/80 disabled:opacity-60";
               const identityLocationButtonCls = resolvedTheme === "dark"
-                ? "border-white/[0.18] bg-white/[0.12] text-slate-200 shadow-black/20 hover:border-white/[0.28] hover:bg-white/[0.18] hover:text-white"
-                : "border-white/70 bg-white/40 text-gray-500 shadow-sm hover:bg-white/66 hover:border-white";
+                ? "border-white/[0.18] bg-slate-800/88 text-slate-200 shadow-black/20 hover:border-white/[0.28] hover:bg-slate-700 hover:text-white"
+                : "border-white/80 bg-white/82 text-gray-500 shadow-sm hover:bg-white hover:border-white";
 
               return (
                 <>
@@ -10926,7 +11073,7 @@ export default function PhotographerPage() {
                     onSelect={(id) => setIdentityBuildingFilter(id)}
                     onReorder={(newOrder) => setIdentityBuildingOrder(newOrder)}
                   />
-                  <div className="relative z-[1] mx-1 mb-2 flex-1 overflow-y-auto px-2 pb-4 pt-1 [scrollbar-color:rgba(148,163,184,0.48)_transparent] [scrollbar-width:thin] sm:mx-2 sm:px-3">
+                  <div className="relative z-[1] mx-1 mb-2 flex-1 isolate overflow-y-auto overscroll-contain px-2 pb-4 pt-1 [-webkit-overflow-scrolling:touch] [scrollbar-color:rgba(148,163,184,0.48)_transparent] [scrollbar-width:thin] sm:mx-2 sm:px-3">
                     {activeEntry && roles.map((role) => {
                       const roleProfiles = activeEntry.profiles.filter((p) => p.role === role);
                       if (roleProfiles.length === 0) return null;
@@ -10950,15 +11097,16 @@ export default function PhotographerPage() {
                               const assistantServiceBuildingName =
                                 buildingNameById.get(assistantServiceBuildingId) ?? p.building.name;
                               const otherBuildings = buildings.filter((b) => b.id !== assistantServiceBuildingId);
+                              const identityRowSurface = isCurrent
+                                ? "bg-orange-500/[0.07]"
+                                : resolvedTheme === "dark"
+                                  ? "bg-white/[0.025]"
+                                  : "bg-white/[0.035]";
 
                               return (
                                   <div
                                     key={p.id}
-                                  className={`group/identity grid ${isAssistant ? "grid-cols-[32px_minmax(0,1fr)_82px]" : "grid-cols-[32px_minmax(0,1fr)]"} items-center gap-2.5 rounded-[16px] px-2.5 py-1.5 text-left transition-colors duration-150 ${
-                                    isCurrent
-                                      ? "bg-orange-500/[0.07]"
-                                      : "hover:bg-white/24"
-                                  }`}
+                                  className={`group/identity grid min-h-[44px] ${isAssistant ? "grid-cols-[32px_minmax(0,1fr)_82px]" : "grid-cols-[32px_minmax(0,1fr)]"} items-center gap-2.5 rounded-[16px] px-2.5 py-1.5 text-left transition-colors duration-150 ${identityRowSurface} hover:bg-white/24`}
                                 >
                                   {/* 头像 */}
                                   <div
@@ -11003,7 +11151,7 @@ export default function PhotographerPage() {
                                         <button
                                           type="button"
                                           disabled={!isCurrent}
-                                          className={`flex h-6 w-[50px] items-center justify-center rounded-lg border px-1.5 text-[9px] font-extrabold shadow-sm backdrop-blur-xl transition-colors disabled:cursor-not-allowed ${identityPresenceButtonSurface(currentPresence)} ${isCurrent ? resolvedTheme === "dark" ? "cursor-pointer hover:bg-white/[0.20] hover:border-white/30" : "cursor-pointer hover:bg-white/66 hover:border-white" : ""} ${identityPresenceText(currentPresence)}`}
+                                          className={`flex h-6 w-[50px] items-center justify-center rounded-lg border px-1.5 text-[9px] font-extrabold shadow-sm transition-colors disabled:cursor-not-allowed ${identityPresenceButtonSurface(currentPresence)} ${isCurrent ? resolvedTheme === "dark" ? "cursor-pointer hover:bg-slate-700 hover:border-white/30" : "cursor-pointer hover:bg-white hover:border-white" : ""} ${identityPresenceText(currentPresence)}`}
                                           onPointerDown={(e) => {
                                             e.stopPropagation();
                                           }}
@@ -11025,7 +11173,7 @@ export default function PhotographerPage() {
                                           onMouseDown={(e) => e.stopPropagation()}
                                           onClick={(e) => e.stopPropagation()}
                                         >
-                                          <div className={`flex flex-col items-center gap-1 rounded-2xl border px-1.5 py-1.5 backdrop-blur-2xl ${identityFloatingPanelCls}`}>
+                                          <div className={`flex flex-col items-center gap-1 rounded-2xl border px-1.5 py-1.5 ${identityFloatingPanelCls}`}>
 	                                            {otherStatuses.map((s) => {
 	                                              const meta = assistantPresenceMeta(s);
 	                                              const reentryMinutes = s === "eating"
@@ -11081,7 +11229,7 @@ export default function PhotographerPage() {
                                       {/* 场地按钮 — 位置图标 */}
                                       <div className="relative group/bld">
                                         <div
-                                          className={`flex h-6 w-6 cursor-pointer items-center justify-center rounded-lg border shadow-sm backdrop-blur-xl transition-colors ${identityLocationButtonCls}`}
+                                          className={`flex h-6 w-6 cursor-pointer items-center justify-center rounded-lg border shadow-sm transition-colors ${identityLocationButtonCls}`}
                                           title={assistantServiceBuildingName}
                                         >
                                           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -11091,7 +11239,7 @@ export default function PhotographerPage() {
                                         {/* hover 下拉 */}
                                         {otherBuildings.length > 0 && (
                                           <div className="absolute top-full right-0 pt-1 opacity-0 pointer-events-none group-hover/bld:opacity-100 group-hover/bld:pointer-events-auto transition-opacity z-10">
-                                            <div className={`min-w-[92px] rounded-2xl border py-1.5 backdrop-blur-2xl ${identityFloatingPanelCls}`}>
+                                            <div className={`min-w-[92px] rounded-2xl border py-1.5 ${identityFloatingPanelCls}`}>
                                               <div className={`px-2.5 py-1 text-[9px] font-bold whitespace-nowrap ${resolvedTheme === "dark" ? "text-slate-400" : "text-gray-400"}`}>切换场地</div>
                                               {otherBuildings.map((b) => (
                                                 <button

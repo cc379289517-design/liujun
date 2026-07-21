@@ -9,8 +9,12 @@ import {
 } from "@/generated/prisma/client";
 import { ASSISTANT_EATING_SUB_STATUS } from "@/lib/eatingPresence";
 import { POST as createTaskRoute } from "@/app/api/tasks/route";
+import { PATCH as updateTaskRoute } from "@/app/api/tasks/[id]/route";
+import { PATCH as updateProfileRoute } from "@/app/api/profiles/[id]/route";
 import {
   assignTask,
+  balanceIroningWaitAssignments,
+  cancelPrimaryAssistantTransfer,
   escalatePriorities,
   completeTask,
   interruptExecutingPreempt,
@@ -18,9 +22,11 @@ import {
   prepareWaitingTaskForAssistantStart,
   processPendingTaskAssistantTransfers,
   reassignOverdueStandbyTasks,
+  releaseUnselectedStandbyTasks,
   requestPrimaryAssistantTransfer,
   respondPrimaryAssistantTransfer,
   runTaskMaintenance,
+  sweepIroningMachineQueue,
   updateTaskParticipantStatus,
 } from "@/lib/scheduler";
 import {
@@ -226,6 +232,28 @@ async function postTask(body: Record<string, unknown>): Promise<{ status: number
   return { status: response.status, data };
 }
 
+async function patchTask(taskId: string, body: Record<string, unknown>): Promise<{ status: number; data: Record<string, unknown> }> {
+  const request = new Request(`http://test.local/api/tasks/${taskId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const response = await updateTaskRoute(request as never, { params: Promise.resolve({ id: taskId }) });
+  const data = await response.json() as Record<string, unknown>;
+  return { status: response.status, data };
+}
+
+async function patchProfile(profileId: string, body: Record<string, unknown>): Promise<{ status: number; data: Record<string, unknown> }> {
+  const request = new Request(`http://test.local/api/profiles/${profileId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const response = await updateProfileRoute(request as never, { params: Promise.resolve({ id: profileId }) });
+  const data = await response.json() as Record<string, unknown>;
+  return { status: response.status, data };
+}
+
 async function addParticipant(
   taskId: string,
   assistantId: string,
@@ -263,7 +291,8 @@ async function assertNoInvariantViolations() {
       task.status === TaskStatus.waiting &&
       task.category.name.includes("熨") &&
       (task.ironingStage === IroningTaskStage.waiting_machine || task.ironingStage === IroningTaskStage.notified);
-    if (!isPassiveIroningWait && !isWaitingInterruptChild && task.assistantId) {
+    const isDeferredSpecifiedWait = task.status === TaskStatus.waiting && task.isSpecified && task.startedAt == null;
+    if (!isPassiveIroningWait && !isWaitingInterruptChild && !isDeferredSpecifiedWait && task.assistantId) {
       const taskIds = activeNonPassiveByAssistant.get(task.assistantId) ?? new Set<string>();
       taskIds.add(task.id);
       activeNonPassiveByAssistant.set(task.assistantId, taskIds);
@@ -272,6 +301,7 @@ async function assertNoInvariantViolations() {
       if (!ACTIVE_PARTICIPANT_STATUSES.includes(participant.status as typeof ACTIVE_PARTICIPANT_STATUSES[number])) continue;
       if (isPassiveIroningWait) continue;
       if (isWaitingInterruptChild) continue;
+      if (isDeferredSpecifiedWait && participant.startedAt == null) continue;
       const taskIds = activeNonPassiveByAssistant.get(participant.assistantId) ?? new Set<string>();
       taskIds.add(task.id);
       activeNonPassiveByAssistant.set(participant.assistantId, taskIds);
@@ -813,6 +843,59 @@ const tests: TestCase[] = [
     },
   },
   {
+    name: "原助理只能取消尚未确认的交换请求",
+    async run(ctx) {
+      const from = await createAssistant(ctx, "inv-cancel-swap-from", { status: ProfileStatus.executing });
+      const target = await createAssistant(ctx, "inv-cancel-swap-target", { status: ProfileStatus.executing });
+      const sourceTask = await createTask(ctx, {
+        assistantId: from.id,
+        status: TaskStatus.executing,
+        startedAt: new Date(),
+        roomNumber: "441",
+      });
+      const counterpartTask = await createTask(ctx, {
+        assistantId: target.id,
+        status: TaskStatus.executing,
+        startedAt: new Date(),
+        roomNumber: "442",
+      });
+      await addParticipant(sourceTask.id, from.id, "primary", "executing");
+      await addParticipant(counterpartTask.id, target.id, "primary", "executing");
+
+      const transfer = await requestPrimaryAssistantTransfer(sourceTask.id, from.id, target.id);
+      assert(transfer.kind === "swap" && transfer.requestId, "忙碌助理之间应创建待确认交换请求");
+      await expectRejects(
+        () => cancelPrimaryAssistantTransfer(sourceTask.id, target.id),
+        "目标助理不能取消原助理发起的交换",
+      );
+
+      const cancelResponse = await patchTask(sourceTask.id, {
+        action: "cancelPrimaryAssistantTransfer",
+        actorAssistantId: from.id,
+      });
+      assert(cancelResponse.status === 200, "原助理通过任务接口应能取消待确认交换");
+      const canceledRequest = await prisma.taskAssistantTransferRequest.findUnique({ where: { id: transfer.requestId } });
+      const tasksAfterCancel = await prisma.bookingTask.findMany({
+        where: { id: { in: [sourceTask.id, counterpartTask.id] } },
+        select: { id: true, assistantId: true, status: true },
+      });
+      assert(canceledRequest?.status === "canceled" && canceledRequest.canceledAt, "取消后请求应记录 canceled 与取消时间");
+      assert(
+        tasksAfterCancel.find((task) => task.id === sourceTask.id)?.assistantId === from.id &&
+          tasksAfterCancel.find((task) => task.id === counterpartTask.id)?.assistantId === target.id,
+        "取消待确认交换不能改变双方任务负责人",
+      );
+      await expectRejects(
+        () => cancelPrimaryAssistantTransfer(sourceTask.id, from.id),
+        "同一交换请求不能重复取消",
+      );
+      await expectRejects(
+        () => respondPrimaryAssistantTransfer(sourceTask.id, target.id, true, "pause_and_go"),
+        "交换取消后目标助理不能再确认",
+      );
+    },
+  },
+  {
     name: "并发重复发起只能创建一条活跃移交请求",
     async run(ctx) {
       const from = await createAssistant(ctx, "inv-transfer-concurrent-from", { status: ProfileStatus.executing });
@@ -1044,6 +1127,94 @@ const tests: TestCase[] = [
       assert(newParticipant?.status === "waiting", "新助理应成为待就位 primary");
       const notice = await prisma.standbyReassignmentNotice.findFirst({ where: { taskId: task.id } });
       assert(notice?.oldAssistantId === oldAssistant.id && notice.newAssistantId === newAssistant.id, "换派应生成通知记录");
+      const freshOldAssistant = await prisma.profile.findUnique({ where: { id: oldAssistant.id } });
+      assert(
+        freshOldAssistant?.status === ProfileStatus.idle &&
+          freshOldAssistant.onlineStatus === OnlineStatus.online &&
+          freshOldAssistant.isOnline,
+        "系统换派只能恢复原助理为空闲，不能改变其在线状态",
+      );
+      assert(notice?.oldAssistantSetOffline === false, "系统换派通知不能记录原助理被自动下线");
+    },
+  },
+  {
+    name: "普通待就位超时无替代助理时释放公共队列但保持在线",
+    async run(ctx) {
+      const oldAssistant = await createAssistant(ctx, "inv-standby-no-replacement-online", { status: ProfileStatus.assigned });
+      const task = await createTask(ctx, {
+        assistantId: oldAssistant.id,
+        priority: 3,
+        status: TaskStatus.waiting,
+      });
+      await addParticipant(task.id, oldAssistant.id, "primary", "waiting");
+      await prisma.taskCollaborator.update({
+        where: { taskId_assistantId: { taskId: task.id, assistantId: oldAssistant.id } },
+        data: { joinedAt: new Date(Date.now() - 30 * 60_000) },
+      });
+
+      const reassigned = await reassignOverdueStandbyTasks();
+      const [freshTask, freshAssistant, participant, notice] = await Promise.all([
+        prisma.bookingTask.findUnique({ where: { id: task.id } }),
+        prisma.profile.findUnique({ where: { id: oldAssistant.id } }),
+        prisma.taskCollaborator.findUnique({ where: { taskId_assistantId: { taskId: task.id, assistantId: oldAssistant.id } } }),
+        prisma.standbyReassignmentNotice.findFirst({ where: { taskId: task.id } }),
+      ]);
+      assert(reassigned === 1, "无替代助理时普通超时任务应释放到公共队列");
+      assert(freshTask?.assistantId === null, "普通超时任务应释放为未分配公共队列");
+      assert(freshAssistant?.status === ProfileStatus.idle, "释放公共队列后原助理应恢复空闲状态");
+      assert(freshAssistant?.onlineStatus === OnlineStatus.online && freshAssistant.isOnline, "系统不能因为超时扫描强制在线助理下线");
+      assert(participant?.status === "left", "释放公共队列时原 primary 应退出");
+      assert(notice?.reason === "standby_timeout_no_replacement" && notice.oldAssistantSetOffline === false, "通知不能再记录为自动下线");
+    },
+  },
+  {
+    name: "准备熨烫超时无替代助理时保留归属并保持在线",
+    async run(ctx) {
+      const oldAssistant = await createAssistant(ctx, "inv-ironing-notified-no-replacement", {
+        status: ProfileStatus.assigned,
+      });
+      const task = await createTask(ctx, {
+        assistantId: oldAssistant.id,
+        categoryId: ctx.ironingCategoryId,
+        priority: 3,
+        status: TaskStatus.waiting,
+        ironingStage: IroningTaskStage.notified,
+      });
+      const overdueAt = new Date(Date.now() - 30 * 60_000);
+      await addParticipant(task.id, oldAssistant.id, "primary", "waiting");
+      await Promise.all([
+        prisma.bookingTask.update({
+          where: { id: task.id },
+          data: { ironingNotifiedAt: overdueAt },
+        }),
+        prisma.taskCollaborator.update({
+          where: { taskId_assistantId: { taskId: task.id, assistantId: oldAssistant.id } },
+          data: { joinedAt: overdueAt },
+        }),
+      ]);
+
+      const reassigned = await reassignOverdueStandbyTasks();
+      const [freshTask, freshAssistant, participant, notice] = await Promise.all([
+        prisma.bookingTask.findUnique({ where: { id: task.id } }),
+        prisma.profile.findUnique({ where: { id: oldAssistant.id } }),
+        prisma.taskCollaborator.findUnique({ where: { taskId_assistantId: { taskId: task.id, assistantId: oldAssistant.id } } }),
+        prisma.standbyReassignmentNotice.findFirst({ where: { taskId: task.id } }),
+      ]);
+
+      assert(reassigned === 1, "准备熨烫超时无人替换时应生成一次处理记录");
+      assert(freshTask?.assistantId === oldAssistant.id, "准备熨烫任务应保留原助理归属");
+      assert(freshTask?.ironingStage === IroningTaskStage.notified, "准备熨烫状态不应被待就位换派扫描篡改");
+      assert(participant?.status === "waiting", "保留归属时原 primary 参与记录应继续等待");
+      assert(
+        freshAssistant?.status === ProfileStatus.idle &&
+          freshAssistant.onlineStatus === OnlineStatus.online &&
+          freshAssistant.isOnline,
+        "准备熨烫无人替换时只能恢复空闲，不能改变在线状态",
+      );
+      assert(
+        notice?.reason === "standby_timeout_ironing_retained" && notice.oldAssistantSetOffline === false,
+        "准备熨烫保留归属必须使用独立通知原因，不能误报释放公共队列",
+      );
     },
   },
   {
@@ -1066,6 +1237,194 @@ const tests: TestCase[] = [
         where: { taskId_assistantId: { taskId: task.id, assistantId: assistant.id } },
       });
       assert(participant?.role === "primary" && participant.status === "waiting", "指定任务应创建 primary waiting 参与记录");
+    },
+  },
+  {
+    name: "指定普通任务不会因原助理正在工作而自动释放给其他人",
+    async run(ctx) {
+      const specified = await createAssistant(ctx, "inv-specified-release-owner", { status: ProfileStatus.executing });
+      await createAssistant(ctx, "inv-specified-release-idle");
+      const active = await createTask(ctx, {
+        assistantId: specified.id,
+        status: TaskStatus.executing,
+        startedAt: new Date(Date.now() - 60_000),
+      });
+      await addParticipant(active.id, specified.id, "primary", "executing");
+      const waiting = await createTask(ctx, {
+        assistantId: specified.id,
+        isSpecified: true,
+        status: TaskStatus.waiting,
+      });
+      await addParticipant(waiting.id, specified.id, "primary", "waiting");
+
+      const moved = await releaseUnselectedStandbyTasks();
+      const fresh = await prisma.bookingTask.findUnique({ where: { id: waiting.id } });
+      assert(moved === 0, "指定任务不能进入未选择待就位释放");
+      assert(fresh?.assistantId === specified.id && fresh.isSpecified, "指定任务必须保留原指定助理");
+    },
+  },
+  {
+    name: "指定任务待就位超时也不会自动换人或把指定助理置离线",
+    async run(ctx) {
+      const specified = await createAssistant(ctx, "inv-specified-timeout-owner", { status: ProfileStatus.assigned });
+      await createAssistant(ctx, "inv-specified-timeout-idle");
+      const waiting = await createTask(ctx, {
+        assistantId: specified.id,
+        isSpecified: true,
+        status: TaskStatus.waiting,
+      });
+      await addParticipant(waiting.id, specified.id, "primary", "waiting");
+      await prisma.taskCollaborator.update({
+        where: { taskId_assistantId: { taskId: waiting.id, assistantId: specified.id } },
+        data: { joinedAt: new Date(Date.now() - 30 * 60_000) },
+      });
+
+      const moved = await reassignOverdueStandbyTasks();
+      const [freshTask, freshAssistant, notices] = await Promise.all([
+        prisma.bookingTask.findUnique({ where: { id: waiting.id } }),
+        prisma.profile.findUnique({ where: { id: specified.id } }),
+        prisma.standbyReassignmentNotice.count({ where: { taskId: waiting.id } }),
+      ]);
+      assert(moved === 0, "指定任务不能进入待就位超时换派");
+      assert(freshTask?.assistantId === specified.id, "超时后仍必须保留原指定助理");
+      assert(freshAssistant?.onlineStatus === OnlineStatus.online, "指定助理不能因指定任务等待超时被系统置离线");
+      assert(notices === 0, "指定任务不应生成自动换派通知");
+    },
+  },
+  {
+    name: "指定熨烫等待不参与负载均衡换人",
+    async run(ctx) {
+      const specified = await createAssistant(ctx, "inv-specified-ironing-owner", { status: ProfileStatus.assigned });
+      await createAssistant(ctx, "inv-specified-ironing-idle");
+      for (const priority of [3, 4]) {
+        const task = await createTask(ctx, {
+          assistantId: specified.id,
+          categoryId: ctx.ironingCategoryId,
+          priority,
+          isSpecified: true,
+          status: TaskStatus.waiting,
+          ironingStage: IroningTaskStage.waiting_machine,
+        });
+        await addParticipant(task.id, specified.id, "primary", "waiting");
+      }
+
+      const moved = await balanceIroningWaitAssignments();
+      const tasks = await prisma.bookingTask.findMany({ where: { isSpecified: true } });
+      assert(moved === 0, "指定熨烫任务不能参与等待负载均衡");
+      assert(tasks.length === 2 && tasks.every((task) => task.assistantId === specified.id), "全部指定熨烫任务都必须保留原助理");
+    },
+  },
+  {
+    name: "指定熨烫任务等待机器时不会改派空闲助理",
+    async run(ctx) {
+      await prisma.ironingMachine.create({
+        data: { buildingId: ctx.buildingId, name: "指定任务测试熨烫机", status: IroningMachineStatus.normal },
+      });
+      const specified = await createAssistant(ctx, "inv-specified-machine-owner", { status: ProfileStatus.executing });
+      await createAssistant(ctx, "inv-specified-machine-idle");
+      const active = await createTask(ctx, {
+        assistantId: specified.id,
+        status: TaskStatus.executing,
+        startedAt: new Date(Date.now() - 60_000),
+      });
+      await addParticipant(active.id, specified.id, "primary", "executing");
+      const ironing = await createTask(ctx, {
+        assistantId: specified.id,
+        categoryId: ctx.ironingCategoryId,
+        isSpecified: true,
+        status: TaskStatus.waiting,
+        ironingStage: IroningTaskStage.waiting_machine,
+      });
+      await addParticipant(ironing.id, specified.id, "primary", "waiting");
+
+      await sweepIroningMachineQueue();
+      const fresh = await prisma.bookingTask.findUnique({ where: { id: ironing.id } });
+      assert(fresh?.assistantId === specified.id, "指定助理忙碌时熨烫任务必须原地等待，不能改派空闲助理");
+      assert(fresh?.ironingStage === IroningTaskStage.waiting_machine, "指定助理忙碌时不能提前占用熨烫机使用权");
+    },
+  },
+  {
+    name: "摄影师取消指定后任务才重新进入普通空余助理派发",
+    async run(ctx) {
+      const specified = await createAssistant(ctx, "inv-cancel-specified-owner", { status: ProfileStatus.executing });
+      const idle = await createAssistant(ctx, "inv-cancel-specified-idle");
+      const active = await createTask(ctx, {
+        assistantId: specified.id,
+        status: TaskStatus.executing,
+        startedAt: new Date(Date.now() - 60_000),
+      });
+      await addParticipant(active.id, specified.id, "primary", "executing");
+      const waiting = await createTask(ctx, {
+        assistantId: specified.id,
+        isSpecified: true,
+        status: TaskStatus.waiting,
+      });
+      await addParticipant(waiting.id, specified.id, "primary", "waiting");
+
+      const response = await patchTask(waiting.id, {
+        action: "cancelSpecifiedAssistant",
+        actorProfileId: ctx.photographerId,
+      });
+      assert(response.status === 200, `摄影师取消指定应成功，实际 ${response.status}`);
+      const fresh = await prisma.bookingTask.findUnique({ where: { id: waiting.id } });
+      assert(fresh?.isSpecified === false, "取消指定后必须清除 isSpecified");
+      assert(fresh?.assistantId === idle.id, "取消指定接口返回前应按普通规则派给空余助理");
+    },
+  },
+  {
+    name: "新熨烫任务优先派给当前熨烫等待数量更少的助理",
+    async run(ctx) {
+      const zeroWait = await createAssistant(ctx, "inv-ironing-zero-wait");
+      const oneWait = await createAssistant(ctx, "inv-ironing-one-wait", { status: ProfileStatus.assigned });
+      const existing = await createTask(ctx, {
+        assistantId: oneWait.id,
+        categoryId: ctx.ironingCategoryId,
+        status: TaskStatus.waiting,
+        ironingStage: IroningTaskStage.waiting_machine,
+      });
+      await addParticipant(existing.id, oneWait.id, "primary", "waiting");
+      await prisma.systemConfig.create({
+        data: {
+          key: `idle_dispatch_rr_b${ctx.buildingId}`,
+          value: zeroWait.id,
+          label: "测试轮询指针",
+        },
+      });
+      const incoming = await createTask(ctx, {
+        categoryId: ctx.ironingCategoryId,
+        status: TaskStatus.waiting,
+      });
+
+      const assigned = await assignTask(incoming.id, ctx.buildingId);
+      assert(assigned === zeroWait.id, "熨烫等待为 0 的助理必须优先于轮询下一位但已有等待的助理");
+
+      const tiedIncoming = await createTask(ctx, {
+        categoryId: ctx.ironingCategoryId,
+        status: TaskStatus.waiting,
+      });
+      const tiedAssigned = await assignTask(tiedIncoming.id, ctx.buildingId);
+      assert(tiedAssigned === oneWait.id, "熨烫等待数量相同时必须继续使用楼座轮询下一位");
+    },
+  },
+  {
+    name: "助理切换服务楼座时指定待就位任务不会被释放",
+    async run(ctx) {
+      const specified = await createAssistant(ctx, "inv-specified-building-change", { status: ProfileStatus.assigned });
+      const waiting = await createTask(ctx, {
+        assistantId: specified.id,
+        isSpecified: true,
+        status: TaskStatus.waiting,
+      });
+      await addParticipant(waiting.id, specified.id, "primary", "waiting");
+
+      const response = await patchProfile(specified.id, { activeBuildingId: ctx.buildingId + 1 });
+      assert(response.status === 200, `指定助理切换服务楼座应成功，实际 ${response.status}`);
+      const [freshTask, freshParticipant] = await Promise.all([
+        prisma.bookingTask.findUnique({ where: { id: waiting.id } }),
+        prisma.taskCollaborator.findUnique({ where: { taskId_assistantId: { taskId: waiting.id, assistantId: specified.id } } }),
+      ]);
+      assert(freshTask?.assistantId === specified.id && freshTask.isSpecified, "指定任务不能因服务楼座切换而释放负责人");
+      assert(freshParticipant?.role === "primary" && freshParticipant.status === "waiting", "指定任务应保留 primary waiting");
     },
   },
   {

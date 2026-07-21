@@ -7507,3 +7507,156 @@
 - 新目录验证通过：`npm ci`、`DATABASE_URL=file:./prisma/dev.db npm run build`、本地 `PORT=3100 DATABASE_URL=file:./prisma/dev.db npm start`、`/photographer` 200、`/api/config` 200。
 - `npm run ops:daily-check` 在新目录执行但失败，失败原因为 Mac mini `192.168.31.171:22` SSH 连接超时；该失败不影响本机迁移完整性，报告已生成到 `ops-reports/daily-check-20260711-180417.md`。
 - 日常开发入口切换为 `/Users/ljuuuu/liujun-portable/liujun`；移动固态旧目录至少保留 3-7 天，不立即删除。
+
+#### Bug 修复计划：助理切换场地后右侧 Dock 头像未及时更新（2026-07-18）
+
+##### 现象与根因
+
+- 现象：在身份名片中把助理切换到其他楼座后，右侧头像 Dock 仍可能保留旧楼座成员，刷新页面后才恢复正确。
+- 根因：`/api/workbench/sync` 的 profiles 查询只返回当前楼座成员；助理移出后不会作为 delta profile 补丁返回，也没有单独的成员删除信号。
+- 根因：前端 `refreshAssistants()` 收到服务端整栋 `assistantStatus` 时仍以旧 Dock 列表为基底做追加合并，不会删除已经不属于当前楼座的助理。旧成员因此可长期残留。
+- 竞态：名片操作后的主动刷新可以短暂拉到正确列表，但并行中的旧增量响应仍可能把旧成员保留下来，导致表现为“更新不及时”或必须刷新。
+
+##### 分步实施
+
+- [x] 任务 1（测试）：新增独立回归测试，先复现“当前 Dock 有 A/B，权威楼座快照只剩 A，但合并结果仍错误保留 B”。
+- [x] 任务 2（服务端）：当任意助理 profile 在本轮 token 后发生变化时，触发当前楼座完整 `assistantStatus` 校准；不改派单、任务状态或数据库结构。
+- [x] 任务 3（前端）：仅在 `assistantStatus` 为完整、未截断数组时，把它的 ID 集合作为当前楼座权威成员集合，合并状态同时移除已离场成员；缺少摘要或摘要为 `null` 时继续保留旧列表，维持现有截断保护。
+- [x] 任务 4（验证）：运行新增回归测试、TypeScript、`git diff --check` 和生产 build；检查空楼座、助理移入、助理移出、摘要省略、摘要截断五类边缘情况。
+- [x] 完成后在本节补充评审结果，不提交本地运行态 `prisma/dev.db`。
+
+##### 可选方案
+
+- 推荐：复用完整 `assistantStatus` 的 ID 集合作为权威楼座成员集合，并补足 profile 变更触发。改动小，能同时修复操作端和其他在线页面。
+- 仅做前端乐观删除：操作当前页面会立刻正确，但其他已打开页面仍收不到“成员移出”信号，问题没有从根因解决。
+- 新增 `removedAssistantIds` 协议字段：语义最显式，但需要维护跨楼座的旧成员归属或变更日志；对当前问题改动偏大。
+
+##### 评审
+
+- 测试驱动记录：新测试首次运行时，“权威摘要移除旧成员”用例按预期失败，实际结果错误保留 `assistant-b`；修复后 4 个用例全部通过。
+- 前端：同楼座切换具体场地时立即乐观更新目标助理的 `currentRoom`，接口成功后用服务端值校准，失败时重新拉取；其他助理不受影响。
+- 前端：完整 `assistantStatus` 数组的 ID 集合现在作为当前楼座权威成员集合，可移除已离场助理、加入新进入助理，并正确处理空楼座；摘要省略或因截断返回 `null` 时仍保留上一份 Dock，避免半截数据误删。
+- 前端：当前身份切换楼座后不再调用捕获旧 `activeBuildingId` 的刷新函数，由楼座状态变更触发新楼座刷新，避免旧请求覆盖新 Dock。
+- 服务端：delta 同步会检测 token 后是否有任意助理 profile 更新；即使助理已经移出当前楼座、无法出现在当前楼座 profile 补丁中，也会重新发送当前楼座完整 `assistantStatus`。
+- 隔离接口验证：复制 `prisma/dev.db` 到 `/tmp/spad-dock-sync-test.db`，独立 3100 端口将测试助理从 3 号楼切到 1 号楼；3 号楼下一次响应为 `syncMode=delta`、包含数组型 `assistantStatus`，且已不包含该助理。工作区数据库未用于写入测试。
+- 验证通过：`npx tsx --test scripts/tests/assistant-dock-sync.test.ts`（4/4）、`npx tsc --noEmit --pretty false --incremental false`、`git diff --check`、`DATABASE_URL=file:./prisma/dev.db npm run build`。
+- 浏览器检查：本地 `/photographer` 与登录页可正常打开；内置浏览器的受控输入未触发该登录表单的 React 状态，无法完成登录后的人工点击复点，交互正确性由回归测试和隔离接口链路覆盖。
+- 边缘情况：楼座摘要超过保护上限时服务端返回 `assistantStatus=null`，前端不会据此裁剪成员；下一次未截断完整摘要会继续校准。`prisma/dev.db` 原有运行态修改保持未提交。
+
+#### 熨烫派单规则修正计划：先均衡等待数量，再楼座轮询（2026-07-18）
+
+##### 目标与规则
+
+- 当前问题：熨烫任务创建时只按 `idle_dispatch_rr_b{buildingId}` 轮询；未开始的 `waiting_machine/notified` 熨烫等待不占用助理，因此已经挂着熨烫等待的助理仍可能再次优先拿单，之后再由维护任务二次转派，造成任务来回变化和错误提醒。
+- 新规则：同楼座可派发助理先按“当前未开始熨烫等待数量”从少到多排序；等待数量相同时，再沿用原楼座轮询顺序。
+- 示例：黄桂兰有 0 条熨烫等待、黄婷有 1 条熨烫等待时，新熨烫任务直接派给黄桂兰；两人都是 0 条或都是 1 条时，才由轮询指针决定。
+- 边界：只修改熨烫任务的候选排序，不修改普通任务轮询、优先级、熨烫机槽位、指定助理、插单或人工交换规则。
+
+##### 指定助理硬保护（新增确认规则）
+
+- 用户规则：摄影师指定助理后，即使该助理正在执行、暂停或等待其他任务，新任务也必须保留给该指定助理，等待其完成后再去处理；系统不得自动更换负责人。
+- 允许改变负责人的入口仅限：发布摄影师/管理员主动“取消指定”，或人员明确发起并确认的人工移交/交换；自动维护不得隐式取消或改写指定关系。
+- 用户最终确认：指定任务只有在发布摄影师或管理员手动执行“取消指定”后，才清除 `isSpecified`、释放原负责人并允许系统介入；取消后任务按普通任务规则进入同楼座空余助理派发。指定状态未取消前，即使指定助理忙碌、暂停、离线、待就位超时或已有其他熨烫等待，系统都不得改派。
+- 当前数据证据：王品端任务 `3450074f-7bc8-4744-9a42-c9511d54a65c` 为 `isSpecified=true`、P1 手持、waiting、未开始；原指定马淑霞在 17:04:46 加入，17:08:14 被 `unselected_standby_release` 自动标记为 `left`，系统随后把邱诗婷写为 waiting primary。这正是需要修复的违规路径。
+- 自动入口保护范围：
+  - `reassignOverdueStandbyTasks()`：指定任务不参与待就位超时换人，也不能因此把指定助理置离线。
+  - `balanceIroningWaitAssignments()`：指定熨烫任务不参与等待负载均衡。
+  - `releaseUnselectedStandbyTasks()`：指定任务不因助理正在处理另一条真实工作而释放给其他人。
+  - `sweepIroningMachineQueue()`：指定熨烫任务在指定助理忙碌时继续保留原负责人并等待；助理空闲且机器可用后，只通知原指定助理，不重新选人。
+  - `/api/profiles/[id]`：助理切换在线状态或服务楼座时，只释放普通未开始任务，指定任务继续保留负责人和 primary waiting。
+- 当前王品端任务恢复：实施代码保护后，在确认任务仍为 waiting 且从未开始的前提下，把负责人和 primary 参与记录恢复为原指定助理马淑霞，并取消本次错误自动释放产生的未确认通知；若实施时任务已经开始或完成，则不自动改写，先报告最新状态。
+
+##### 自动转派与人工交换通知分流（新增确认规则）
+
+- 用户规则：系统自动转派与助理主动发起的接替/交换必须明确区分；转出方和接手方都要知道这是系统根据规则作出的判断，不能产生“某助理未经沟通主动把任务推给我”的误会。
+- 现有根因：前端只根据 `oldAssistantSetOffline=false` 判断样式和文案，把 `ironing_wait_load_balance`、`unselected_standby_release` 等系统通知统一拼成“收到某助理接替/交换请求”。数据库已有 `reason`，无需新增字段，问题在展示层没有按原因分类。
+- 系统自动事件：`ironing_wait_load_balance`、`unselected_standby_release`、`standby_timeout_*` 等，标题统一使用“系统自动转派通知”或更具体的系统状态通知；正文必须包含“系统检测到/系统判断后”，并分别说明原助理为什么被转出、新助理为什么接手。
+- 人工事件：真实 `TaskAssistantTransferRequest`，以及明确的人工移交/交换原因，继续使用“任务接替/交换申请”，正文明确“某助理发起”。
+- 已确认交换的延后执行：`assistant_swap_after_complete_ready` 不能伪装成新的系统转派，也不能再次写成未确认申请；应显示“此前双方已确认的交换现已就绪”。
+- 当前未确认的自动通知不需要改数据库；展示逻辑上线后可直接根据已有 `reason` 显示正确文案。
+
+##### 分步实施
+
+- [x] 任务 1（测试驱动）：在 `scripts/tests/business-invariants.ts` 先增加两组隔离数据库用例并确认失败：熨烫最少等待优先；指定普通/熨烫任务经过所有自动维护后 `assistantId` 与 primary 均保持不变。
+- [x] 任务 1B（通知测试）：新增纯函数回归测试，覆盖系统熨烫均衡、系统未选择任务释放、系统待就位超时、人工交换申请、已确认交换延后就绪五类原因，并分别断言转出方/接手方标题与正文不混淆。
+- [x] 任务 2（指定保护）：在 `src/lib/scheduler.ts` 为待就位超时转派、熨烫负载均衡、未选择任务释放和熨烫机队列重新选人增加统一 `isSpecified` 保护；不能只修本次命中的一个入口。
+- [x] 任务 3（熨烫排序）：在 `src/lib/scheduler.ts` 增加熨烫候选排序，统计候选助理当前未开始熨烫等待数量；先按数量升序分组，每组内部复用 `buildIdleDispatchOrder()`。
+- [x] 任务 4（一致性）：`assignTask()` 创建时派单和 `sweepIroningMachineQueue()` 非指定任务需要重新选择助理时复用同一排序；`balanceIroningWaitAssignments()` 仅保留为非指定任务的并发竞态和旧数据兜底。
+- [x] 任务 5（当前数据校准）：保护代码验证通过后重新读取王品端任务；仅在仍未开始时恢复原指定马淑霞及 primary 记录，并处理本次错误自动释放通知，避免覆盖已经发生的新业务操作。
+- [x] 任务 6（通知实现）：提取统一通知展示函数，`src/app/photographer/page.tsx` 不再按单个布尔值拼文案；系统自动转派、人工申请、已确认交换就绪分别使用稳定的标题、正文和按钮语义，双方视角均覆盖。
+- [x] 任务 7（文档）：更新 `摄影助理自动派单系统.md` 的指定助理、熨烫派单和通知语义说明，并在本节补充评审结果；除上述经确认的单条错误任务校准外，不改其他 `prisma/dev.db` 运行数据。
+- [x] 任务 8（验证）：运行隔离业务不变量测试、通知纯函数测试、TypeScript、Prisma validate、生产 build 与 `git diff --check`；重点确认指定任务四条自动路径均不换人、普通任务轮询不变、熨烫等待数相同时公平轮询、零等待优先、熨烫槽位不超容量，且自动/人工通知双方文案不混淆。
+
+##### 可选方案
+
+- 推荐：先最少熨烫等待，再轮询。直接避免重复堆单，同时保留同负载下的公平性。
+- “刚完成同一摄影师任务的助理优先”：连续性强，但会让同一摄影师长期绑定同一助理，破坏跨摄影师公平性，不采用。
+- 保持现状、依赖后续 `balanceIroningWaitAssignments()`：会继续出现先派错人再自动转移及误导通知，不采用。
+
+##### 评审
+
+- TDD：指定任务首次在 `releaseUnselectedStandbyTasks()` 用例按预期失败；实现四个自动入口、人员状态入口保护及熨烫事务内负责人校验后，业务不变量测试 29/29 通过。
+- 指定硬锁定：`reassignOverdueStandbyTasks()`、`balanceIroningWaitAssignments()`、`releaseUnselectedStandbyTasks()` 均在查询边界排除 `isSpecified=true`；`attachIroningTaskToAssistant()` 在事务内拒绝把指定任务挂给其他人，熨烫机队列在指定助理不可用时保持等待。
+- 状态入口：`/api/profiles/[id]` 的离线/吃饭/服务楼座切换也排除指定任务；对应回归用例验证任务负责人和 primary waiting 保留。
+- 取消指定：`cancelSpecifiedAssistant` 仍只允许发布摄影师或管理员操作未开始任务；取消后强制执行维护，不受节流影响，接口返回前按普通空余助理规则重新派发。
+- 熨烫排序：候选先按未开始熨烫等待数量升序，再按原楼座轮询顺序；测试同时覆盖零等待优先和等待数量相同时轮询下一位。
+- 通知分流：系统原因、人工申请、已确认延后交换分别生成稳定标题/正文/按钮；旧助理保持在线时不再被过滤，通知测试 6/6 通过。
+- 当前任务校准：已在 `database-backups/dev-before-specified-task-restore-20260718-173402.db` 做一致性备份。执行条件事务时任务已于 17:31:26 由邱诗婷开始，保护条件返回 0，因此未恢复负责人、未改参与记录或通知，避免覆盖现场操作。
+- 文档：已更新指定助理硬锁定、取消后介入、熨烫等待数优先和通知来源语义。
+- 验证通过：`npm run test:business-invariants`（29/29）、`npx tsx --test scripts/tests/reassignment-notice-display.test.ts`（6/6）、`npx tsx --test scripts/tests/assistant-dock-sync.test.ts`（11/11）、TypeScript、Prisma validate、生产 build、`git diff --check`。
+#### Bug 修复计划：普通待就位超时不应强制在线助理下线（2026-07-18）
+
+##### 已确认规则
+
+- 指定给该助理的任务：即使待就位超时且暂时没有替代助理，也继续保留 `assistantId` 和 primary waiting，不自动下线助理。
+- 未指定给该助理的普通任务：待就位超时且没有替代助理时，释放为公共队列任务；原本在线的助理保持在线，只恢复为空闲状态。
+- 系统自动扫描不拥有“强制下线”权限；下线只能来自助理本人或明确的管理操作。
+
+##### 实施步骤
+
+- [x] 任务 1（测试）：增加指定任务保留负责人、普通任务释放公共队列且助理保持在线的隔离回归用例。
+- [x] 任务 2（修复）：修改 `reassignOverdueStandbyTasks()` 的无替代助理分支，区分指定/普通任务，移除系统强制离线写入。
+- [x] 任务 3（通知）：普通任务释放使用不含“已切换离线”的系统通知原因和文案；指定任务保留时不生成错误的自动转派通知。
+- [x] 任务 4（验证）：运行业务不变量、通知测试、TypeScript、Prisma validate、生产构建和 `git diff --check`。
+
+##### 评审
+
+- 测试驱动：新增普通待就位无替代助理用例首次失败于“系统不能因为超时扫描强制在线助理下线”，修复后业务不变量测试 `30/30` 通过。
+- 最终规则：普通任务无替代人时释放公共队列并保持原在线状态；指定任务无替代人时保留原负责人；系统通知原因改为 `standby_timeout_no_replacement`，不再伪装成离线处理。
+- 通知测试 `7/7`、TypeScript、Prisma validate、生产构建、`git diff --check` 均通过。
+#### Bug 修复计划：张晓琦已空闲但前端刷新仍显示 418 室进行中（2026-07-18）
+
+##### 已确认现象
+
+- 数据库、`/api/tasks` 和 `/api/workbench/sync` 都返回张晓琦 `idle`，418 室任务为 `completed`；问题发生在前端任务源合并/渲染层。
+- 页面在收到空闲 profile 后仍可能保留旧的 `executing/paused` 任务卡，导致刷新后继续显示进行中和旧超时计时。
+
+##### 实施步骤
+
+- [x] 任务 1（测试）：增加“空闲助理清理旧执行/暂停任务、保留等待和历史任务”的纯函数回归测试。
+- [x] 任务 2（修复）：在 `applyTaskDataForProfile()` 的任务源入口按 profile 空闲状态清理旧活动任务。
+- [x] 任务 3（验证）：运行任务展示测试、Dock 测试、业务不变量、TypeScript、生产构建和 `git diff --check`。
+
+##### 评审
+
+- 数据核对：张晓琦 profile 为 `idle + online`；418 室任务 `e16d09be...` 于 17:46:20 完成；当前执行中的另一条 418 室任务属于罗美琪。数据库、`/api/tasks` 和 `/api/workbench/sync` 均返回正确状态，无需修改运行数据。
+- TDD：新增用例首次失败为 `removeStaleActiveTasksForIdleProfile is not a function`；实现后验证空闲助理的旧 executing 卡被清理，waiting 与 completed 仍保留。
+- 验证通过：任务展示/Dock/通知测试 `29/29`、业务不变量 `31/31`、TypeScript、Prisma validate、生产 build、`git diff --check`。
+#### 老王统一收口：会话改动归档、提交、远程与 Mac mini 同步（2026-07-21）
+
+##### 发布范围
+
+- [x] 汇总当前工作区全部代码变更，确认覆盖 Dock/身份同步、任务交换交互、熨烫派单与展示、指定助理保护、自动转派通知、在线状态和陈旧任务卡清理。
+- [x] 将所有最终运行规则写入长期文档 `摄影助理自动派单系统.md`，并同步 `tasks/lessons.md` 与本评审记录。
+- [x] 运行完整测试、TypeScript、Prisma validate、生产 build、脚本语法与 `git diff --check`；确认 `prisma/dev.db` 不进入提交。
+- [ ] 使用 `scripts/release-to-mini.sh` 统一提交并推送 `origin/后台管理`，保护 Mac mini 生产 SQLite，完成远端构建、服务重启和健康检查。
+- [ ] 发布后核对本地 HEAD、远程分支、Mac mini HEAD 一致，并记录提交号和生产访问结果。
+
+##### 发布评审
+
+- TDD 补漏：新增“有替代助理时系统换派仍保持原助理在线”和“准备熨烫无人替换时保留归属并使用独立通知”回归；旧实现首次在自动下线断言失败，修复后业务不变量 `32/32` 通过。
+- 根因修复：待就位超时扫描只维护任务归属和 profile 业务状态，不再写 `onlineStatus=offline / isOnline=false`；`notified` 熨烫保留归属使用 `standby_timeout_ironing_retained`，不再误报已释放公共队列。
+- 展示与同步验证：Dock/身份、任务展示和通知纯函数测试 `30/30` 通过，覆盖完整成员集合、空集合清空、场地/楼座乐观更新、交换状态、忙后熨烫、陈旧 executing/paused 卡片清理和通知来源区分。
+- 工程验证：TypeScript、Prisma schema validate、Next.js 生产 build、发布/备份/生产脚本语法和 `git diff --check` 全部通过。
+- 文档收口：长期运行逻辑补齐交换取消与防重复响应、指定助理硬保护、熨烫等待数优先、系统/人工通知分流、在线状态边界、Dock 权威集合与身份缓存；部署文档和一键脚本已切换到当前 Mini 目录。
+- 待发布后补充统一提交号、远程与 Mac mini HEAD、生产健康检查结果。

@@ -1,7 +1,8 @@
 #!/bin/bash
 set -euo pipefail
 
-PROJECT_DIR="/Volumes/PortableSSD/liujun-portable/liujun"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_DIR="${SCRIPT_DIR}"
 cd "${PROJECT_DIR}"
 
 echo "一键发布 / 同步到 Mac mini"

@@ -26,7 +26,7 @@ PM2 作为备选：它的进程列表、日志命令更友好，但需要额外�
 在 Mac mini 上进入项目目录：
 
 ```bash
-cd /Volumes/PortableSSD/liujun-portable/liujun
+cd /Users/lj/liujun-portable/liujun
 npm install
 npm run build
 ./scripts/install-mac-mini-launchd.sh
@@ -37,10 +37,10 @@ npm run build
 - Mac mini 本机：`http://localhost:3000/photographer`
 - 园区电脑/手机：`http://<Mac mini 固定局域网 IP>:3000/photographer`
 
-建议在路由器里给 Mac mini 做 DHCP 地址绑定，例如固定为 `192.168.1.50`。这样手机端固定入口就是：
+当前 Mac mini 的 DHCP 固定地址为 `192.168.31.171`。手机端固定入口是：
 
 ```text
-http://192.168.1.50:3000/photographer
+http://192.168.31.171:3000/photographer
 ```
 
 如果园区内有本地域名/DNS，也可以把 `spad.local` 或类似域名指向 Mac mini IP，形成：
@@ -93,7 +93,7 @@ launchctl load ~/Library/LaunchAgents/com.spad.local.plist
 每次更新代码后：
 
 ```bash
-cd /Volumes/PortableSSD/liujun-portable/liujun
+cd /Users/lj/liujun-portable/liujun
 npm install
 npm run build
 launchctl unload ~/Library/LaunchAgents/com.spad.local.plist
@@ -111,18 +111,18 @@ launchctl load ~/Library/LaunchAgents/com.spad.local.plist
 老王主控会话统一验收后，可以使用一键发布脚本把当前改动提交、推送并同步到 Mac mini：
 
 ```bash
-MINI_HOST=192.168.1.50 \
-MINI_USER=ljuuuu \
-MINI_PROJECT_DIR=/Volumes/PortableSSD/liujun-portable/liujun \
+MINI_HOST=192.168.31.171 \
+MINI_USER=lj \
+MINI_PROJECT_DIR=/Users/lj/liujun-portable/liujun \
 ./scripts/release-to-mini.sh "本次更新说明"
 ```
 
 也可以在本机项目根目录创建 `.mini-deploy.env` 保存常用配置。该文件已加入 `.gitignore`，不会提交到远程仓库：
 
 ```bash
-MINI_HOST=192.168.1.50
-MINI_USER=ljuuuu
-MINI_PROJECT_DIR=/Volumes/PortableSSD/liujun-portable/liujun
+MINI_HOST=192.168.31.171
+MINI_USER=lj
+MINI_PROJECT_DIR=/Users/lj/liujun-portable/liujun
 SSH_OPTS="-i /Users/你的用户名/.ssh/spad_release -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new"
 PRESERVE_REMOTE_DB=1
 REMOTE_DIRTY_ACTION=abort
@@ -138,7 +138,7 @@ REMOTE_DIRTY_ACTION=abort
 
 - `MINI_HOST`：Mac mini 固定局域网 IP 或主机名，必填。
 - `MINI_USER`：Mac mini SSH 用户名；如果本机 SSH 配置已包含用户名，可以不填。
-- `MINI_PROJECT_DIR`：Mac mini 上项目目录，默认 `/Volumes/PortableSSD/liujun-portable/liujun`。
+- `MINI_PROJECT_DIR`：Mac mini 上项目目录；当前生产目录为 `/Users/lj/liujun-portable/liujun`。
 - `MINI_PORT`：健康检查端口，默认 `3000`。
 - `RUN_TYPECHECK=0`：跳过本地 TypeScript 检查。
 - `RUN_BUILD=0`：跳过本地生产构建。
@@ -147,7 +147,7 @@ REMOTE_DIRTY_ACTION=abort
 - `HEALTH_RETRIES`：健康检查重试次数，默认 `20`。
 - `HEALTH_RETRY_DELAY`：健康检查重试间隔秒数，默认 `2`。
 - `PRESERVE_REMOTE_DB=1`：默认保护 Mac mini 上的 SQLite，并在拉取代码后恢复。
-- `REMOTE_DIRTY_ACTION=stash`：首次同步时如 Mac mini 上已有本地部署文件，可确认后暂存非数据库改动再拉取。
+- `REMOTE_DIRTY_ACTION=abort`：Mac mini 存在非数据库本地改动时中止发布，先人工确认改动来源；只有明确要保留现场改动时才临时使用 `stash`。
 
 脚本会依次执行：
 
@@ -164,12 +164,12 @@ REMOTE_DIRTY_ACTION=abort
 
 `release-to-mini.sh` 默认不会提交 `prisma/dev.db` 的本地改动，也不会提交 `database-backups/`。
 
-如果检测到 `prisma/dev.db` 有改动，脚本会停止，避免把本地开发数据库推送并覆盖 Mac mini 生产数据库。只有明确需要同步数据库时，才使用：
+如果检测到 `prisma/dev.db` 有改动，脚本会提示并默认把它从本次暂存中排除，然后继续发布代码，避免把本地开发数据库推送并覆盖 Mac mini 生产数据库。只有明确需要提交数据库文件时，才使用：
 
 ```bash
 ALLOW_DB_COMMIT=1 \
-MINI_HOST=192.168.1.50 \
-MINI_USER=ljuuuu \
+MINI_HOST=192.168.31.171 \
+MINI_USER=lj \
 ./scripts/release-to-mini.sh "同步数据库和代码"
 ```
 

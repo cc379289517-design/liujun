@@ -2,6 +2,7 @@ import { NextRequest } from "next/server";
 import { prisma } from "@/lib/prisma";
 import {
   assertAssistantCanStartTaskByPriority,
+  cancelPrimaryAssistantTransfer,
   completeTask,
   assignTask,
   ironingMachineAvailabilityForTask,
@@ -573,7 +574,7 @@ export async function PATCH(request: NextRequest, { params }: RouteContext) {
           });
         });
         await syncProfileStatus();
-        await runTaskMaintenance();
+        await runTaskMaintenance({ force: true });
         const latest = await prisma.bookingTask.findUnique({
           where: { id },
           include: {
@@ -692,9 +693,51 @@ export async function PATCH(request: NextRequest, { params }: RouteContext) {
         return Response.json({ ...latest, transferResult: result });
       }
 
+      case "cancelPrimaryAssistantTransfer": {
+        const actorId = actorIdFrom(actorAssistantId);
+        if (!actorId) {
+          return Response.json({ error: "actorAssistantId required for transfer cancellation", code: "TRANSFER_ACTOR_REQUIRED" }, { status: 400 });
+        }
+        const actor = await loadActorProfile(actorId);
+        if (!isAssistantActor(actor)) {
+          return forbidden("只有原助理可以取消待确认移交/交换", "ONLY_ASSISTANT_CAN_CANCEL_TRANSFER");
+        }
+        const result = await cancelPrimaryAssistantTransfer(id, actorId);
+        const latest = await prisma.bookingTask.findUnique({
+          where: { id },
+          include: {
+            photographer: true,
+            assistant: true,
+            category: true,
+            parentTask: true,
+            interruptTasks: true,
+            collaborators: {
+              where: { status: { not: "left" } },
+              include: {
+                assistant: { select: { id: true, name: true, currentRoom: true, avatar: true, buildingId: true } },
+              },
+            },
+            completionRegistration: {
+              include: {
+                assistant: { select: { id: true, name: true } },
+              },
+            },
+            assistantTransferRequests: {
+              where: { status: { in: ["confirming", "pending", "pending_after_complete", "ready_to_takeover"] } },
+              orderBy: { requestedAt: "desc" },
+              take: 3,
+            },
+          },
+        });
+        if (!latest) {
+          return Response.json({ error: "Task not found after transfer cancellation" }, { status: 404 });
+        }
+        return Response.json({ ...latest, transferResult: result });
+      }
+
       default:
         return Response.json(
-          { error: "Invalid action. Use: start, pause, complete, extend, setStatus, updateNote, updatePublisherFeedback, cancelSpecifiedAssistant, transferPrimaryAssistant, respondPrimaryAssistantTransfer" },
+          { error: "Invalid action. Use: start, pause, complete, extend, setStatus, updateNote, updatePublisherFeedback, cancelSpecifiedAssistant, transferPrimaryAssistant, respondPrimaryAssistantTransfer, cancelPrimaryAssistantTransfer" },
           { status: 400 }
         );
     }

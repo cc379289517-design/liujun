@@ -4,6 +4,7 @@ import {
   apiTaskToDisplay,
   fmtMin,
   isIroningTask,
+  passiveIroningWaitingPresentation,
   taskCategoryDurationCaption,
   taskListActualLine,
   taskStatusForProfile,
@@ -39,6 +40,8 @@ export function mobileTaskStatusMeta(
     profileId?: string | null;
     nowMs: number;
     dots: MobileTaskDotPalette;
+    freeIroningMachineCount?: number;
+    hasWorkingTaskForProfile?: boolean;
   },
 ): MobileTaskStatusMeta {
   const status = mobileTaskStatusForProfile(task, options);
@@ -58,7 +61,11 @@ export function mobileTaskStatusMeta(
   if (status === "paused") return { label: "暂停中", dot: "#9ca3af", badge: "bg-gray-100/80 text-gray-600", panel: "bg-gray-400/14" };
   if (status === "completed") return { label: "已完成", dot: options.dots.idle, badge: "bg-green-100/80 text-green-600", panel: "bg-green-400/12" };
   if (isIroningTask(task) && task.ironingStage === "waiting_machine") {
-    return { label: "等待熨烫机", dot: "#10b981", badge: "bg-emerald-100/80 text-emerald-700", panel: "bg-emerald-400/12" };
+    const presentation = passiveIroningWaitingPresentation(task, {
+      freeIroningMachineCount: options.freeIroningMachineCount,
+      hasWorkingTaskForProfile: options.hasWorkingTaskForProfile,
+    });
+    return { label: presentation.label, dot: "#10b981", badge: "bg-emerald-100/80 text-emerald-700", panel: "bg-emerald-400/12" };
   }
   if (isIroningTask(task) && task.ironingStage === "notified") {
     return { label: "准备熨烫", dot: "#84cc16", badge: "bg-lime-100/80 text-lime-700", panel: "bg-lime-400/14" };

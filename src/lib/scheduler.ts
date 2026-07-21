@@ -334,6 +334,37 @@ async function buildIdleDispatchOrder<T extends { id: string }>(
   return orderIdleDispatchCandidates(candidates, lastId);
 }
 
+async function buildIroningDispatchOrder<T extends { id: string }>(
+  buildingId: number,
+  candidates: T[]
+): Promise<T[]> {
+  const roundRobinOrder = await buildIdleDispatchOrder(buildingId, candidates);
+  if (roundRobinOrder.length <= 1) return roundRobinOrder;
+
+  const waitingTasks = await prisma.bookingTask.findMany({
+    where: {
+      assistantId: { in: roundRobinOrder.map((assistant) => assistant.id) },
+      status: TaskStatus.waiting,
+      startedAt: null,
+      parentTaskId: null,
+      category: { name: { contains: "熨" } },
+      AND: [NOT_PHOTOGRAPHER_LIMIT_QUEUE_WHERE],
+    },
+    select: { assistantId: true },
+  });
+  const waitCountByAssistant = new Map<string, number>();
+  for (const task of waitingTasks) {
+    if (!task.assistantId) continue;
+    waitCountByAssistant.set(task.assistantId, (waitCountByAssistant.get(task.assistantId) ?? 0) + 1);
+  }
+  const roundRobinRank = new Map(roundRobinOrder.map((assistant, index) => [assistant.id, index]));
+
+  return [...roundRobinOrder].sort((a, b) =>
+    (waitCountByAssistant.get(a.id) ?? 0) - (waitCountByAssistant.get(b.id) ?? 0) ||
+    (roundRobinRank.get(a.id) ?? 0) - (roundRobinRank.get(b.id) ?? 0)
+  );
+}
+
 export async function dispatchableAssistantIds(assistantIds: string[]): Promise<Set<string>> {
   if (assistantIds.length === 0) return new Set();
 
@@ -1043,7 +1074,7 @@ async function selectIdleAssistantForBuilding(buildingId: number): Promise<strin
   const availableAssistants = await dispatchableAssistantsForBuilding(buildingId);
   if (availableAssistants.length === 0) return null;
 
-  const [selected] = await buildIdleDispatchOrder(buildingId, availableAssistants);
+  const [selected] = await buildIroningDispatchOrder(buildingId, availableAssistants);
   return selected?.id ?? null;
 }
 
@@ -1084,6 +1115,9 @@ async function attachIroningTaskToAssistant(
         isPhotographerLimitQueuedTask(task) ||
         !isIroningTaskCategory(task.category)
       ) {
+        throw new Error(CLAIM_ASSISTANT_UNAVAILABLE);
+      }
+      if (task.isSpecified && task.assistantId !== assistantId) {
         throw new Error(CLAIM_ASSISTANT_UNAVAILABLE);
       }
 
@@ -2074,6 +2108,47 @@ export async function requestPrimaryAssistantTransfer(
   });
 }
 
+export async function cancelPrimaryAssistantTransfer(
+  taskId: string,
+  fromAssistantId: string,
+): Promise<{ requestId: string; kind: AssistantTransferKind }> {
+  return prisma.$transaction(async (tx) => {
+    const request = await tx.taskAssistantTransferRequest.findFirst({
+      where: {
+        taskId,
+        fromAssistantId,
+        status: "confirming",
+      },
+      orderBy: { requestedAt: "desc" },
+    });
+    if (!request) throw new Error("没有可取消的待确认移交/交换请求");
+
+    const task = await tx.bookingTask.findUnique({
+      where: { id: taskId },
+      select: { assistantId: true, status: true, completedAt: true },
+    });
+    if (!task || task.assistantId !== fromAssistantId) {
+      throw new Error("只有当前原助理可以取消该请求");
+    }
+    if (task.status === TaskStatus.completed || task.completedAt) {
+      throw new Error("任务已完成，不能取消该请求");
+    }
+
+    const now = new Date();
+    const canceled = await tx.taskAssistantTransferRequest.updateMany({
+      where: { id: request.id, status: "confirming" },
+      data: {
+        status: "canceled",
+        canceledAt: now,
+        reason: "原助理取消待确认移交/交换请求",
+      },
+    });
+    if (canceled.count !== 1) throw new Error("请求已被处理，不能重复取消");
+    await tx.bookingTask.update({ where: { id: taskId }, data: { updatedAt: now } });
+    return { requestId: request.id, kind: request.kind as AssistantTransferKind };
+  });
+}
+
 export async function respondPrimaryAssistantTransfer(
   taskId: string,
   targetAssistantId: string,
@@ -2372,7 +2447,7 @@ async function claimWaitingTaskForAssistant(
 
 /**
  * 自动分配最优空闲助理
- * 优先匹配同楼座、状态空闲的助理；同楼座内按轮询指针派发，避免总给同一个人
+ * 普通任务按同楼座轮询；熨烫任务先选未开始熨烫等待最少者，同数量再按轮询。
  */
 export async function assignTask(taskId: string, buildingId?: number): Promise<string | null> {
   let effectiveBuildingId = buildingId;
@@ -2401,7 +2476,9 @@ export async function assignTask(taskId: string, buildingId?: number): Promise<s
 
   if (dispatchableAssistants.length === 0) return null;
 
-  const orderedAssistants = await buildIdleDispatchOrder(effectiveBuildingId, dispatchableAssistants);
+  const orderedAssistants = isIroning
+    ? await buildIroningDispatchOrder(effectiveBuildingId, dispatchableAssistants)
+    : await buildIdleDispatchOrder(effectiveBuildingId, dispatchableAssistants);
   if (isIroning) {
     for (const assistant of orderedAssistants) {
       const ironingSlots = await availableIroningMachineSlotsIncludingClaims(effectiveBuildingId, taskId);
@@ -2535,6 +2612,7 @@ export async function reassignOverdueStandbyTasks(): Promise<number> {
   const overdueTasks = await prisma.bookingTask.findMany({
     where: {
       status: TaskStatus.waiting,
+      isSpecified: false,
       assistantId: { not: null },
       parentTaskId: null,
       AND: [
@@ -2618,7 +2696,7 @@ export async function reassignOverdueStandbyTasks(): Promise<number> {
         }
         await tx.profile.update({
           where: { id: oldAssistantId },
-          data: { status: ProfileStatus.idle, onlineStatus: OnlineStatus.offline, isOnline: false },
+          data: { status: ProfileStatus.idle },
         });
         await tx.standbyReassignmentNotice.create({
           data: {
@@ -2633,15 +2711,19 @@ export async function reassignOverdueStandbyTasks(): Promise<number> {
             waitedMinutes: candidate.waitedMinutes,
             thresholdMinutes,
             score: candidate.score,
-            reason: "standby_timeout_no_replacement_offline",
-            oldAssistantSetOffline: true,
+            reason: isNotifiedIroning
+              ? "standby_timeout_ironing_retained"
+              : "standby_timeout_no_replacement",
+            oldAssistantSetOffline: false,
             newAssistantAcknowledgedAt: now,
           },
         });
       });
       reassignedCount++;
       schedulerDebugLog(
-        `[reassignOverdueStandbyTasks] ${candidate.task.id} ${candidate.task.assistant.name} 待就位超时且无可替换助理，已离线`
+        isNotifiedIroning
+          ? `[reassignOverdueStandbyTasks] ${candidate.task.id} ${candidate.task.assistant.name} 准备熨烫超时且无可替换助理，保留原归属并保持在线`
+          : `[reassignOverdueStandbyTasks] ${candidate.task.id} ${candidate.task.assistant.name} 待就位超时且无可替换助理，已释放公共队列并保持在线`
       );
       continue;
     }
@@ -2739,8 +2821,6 @@ export async function reassignOverdueStandbyTasks(): Promise<number> {
       const oldAssistantHasPassiveIroningWait =
         oldAssistantOtherParticipants.some((participant) => isPassiveIroningStage(participant.task.ironingStage)) ||
         oldAssistantOtherTasks.some((task) => isPassiveIroningStage(task.ironingStage));
-      const oldAssistantSetOffline = !hasOtherExecutingWork && !hasOtherPausedWork && !oldAssistantHasPassiveIroningWait;
-
       if (hasOtherExecutingWork || hasOtherPausedWork) {
         await tx.profile.update({
           where: { id: oldAssistantId },
@@ -2754,7 +2834,7 @@ export async function reassignOverdueStandbyTasks(): Promise<number> {
       } else {
         await tx.profile.update({
           where: { id: oldAssistantId },
-          data: { status: ProfileStatus.idle, onlineStatus: OnlineStatus.offline, isOnline: false },
+          data: { status: ProfileStatus.idle },
         });
       }
       await tx.profile.update({
@@ -2774,14 +2854,14 @@ export async function reassignOverdueStandbyTasks(): Promise<number> {
           waitedMinutes: candidate.waitedMinutes,
           thresholdMinutes,
           score: candidate.score,
-          reason: oldAssistantSetOffline
-            ? "standby_timeout_offline"
-            : hasOtherExecutingWork
-              ? "standby_timeout_old_assistant_executing"
-              : hasOtherPausedWork
-                ? "standby_timeout_old_assistant_paused"
-                : "standby_timeout_old_assistant_waiting_ironing",
-          oldAssistantSetOffline,
+          reason: hasOtherExecutingWork
+            ? "standby_timeout_old_assistant_executing"
+            : hasOtherPausedWork
+              ? "standby_timeout_old_assistant_paused"
+              : oldAssistantHasPassiveIroningWait
+                ? "standby_timeout_old_assistant_waiting_ironing"
+                : "standby_timeout_reassigned",
+          oldAssistantSetOffline: false,
           oldAssistantActiveTaskRoomNumber:
             oldAssistantActiveWork && "task" in oldAssistantActiveWork
               ? oldAssistantActiveWork.task.roomNumber
@@ -2810,6 +2890,7 @@ export async function balanceIroningWaitAssignments(): Promise<number> {
   const ironingWaitTasks = await prisma.bookingTask.findMany({
     where: {
       status: TaskStatus.waiting,
+      isSpecified: false,
       assistantId: { not: null },
       parentTaskId: null,
       OR: [
@@ -2966,6 +3047,7 @@ export async function releaseUnselectedStandbyTasks(): Promise<number> {
   const standbyTasks = await prisma.bookingTask.findMany({
     where: {
       status: TaskStatus.waiting,
+      isSpecified: false,
       assistantId: { not: null },
       parentTaskId: null,
       ironingStage: IroningTaskStage.none,
@@ -3191,6 +3273,8 @@ export async function sweepIroningMachineQueue(): Promise<number> {
           targetAssistantId = owner.id;
         }
       }
+
+      if (task.isSpecified && !targetAssistantId) continue;
 
       if (!targetAssistantId) {
         targetAssistantId = await selectIdleAssistantForBuilding(buildingId);

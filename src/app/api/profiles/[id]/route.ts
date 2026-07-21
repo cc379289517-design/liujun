@@ -136,6 +136,7 @@ export async function PATCH(request: NextRequest, { params }: RouteContext) {
         where: {
           assistantId: id,
           status: TaskStatus.waiting,
+          isSpecified: false,
         },
         select: {
           id: true,
@@ -336,7 +337,7 @@ export async function PATCH(request: NextRequest, { params }: RouteContext) {
 
       if (isBuildingChange && before.status === ProfileStatus.assigned) {
         await tx.bookingTask.updateMany({
-          where: { assistantId: id, status: TaskStatus.waiting },
+          where: { assistantId: id, status: TaskStatus.waiting, isSpecified: false },
           data: { assistantId: null, parentTaskId: null },
         });
         const pausedCount = await tx.bookingTask.count({

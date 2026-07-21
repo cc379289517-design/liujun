@@ -17,6 +17,39 @@ import type {
   TaskPauseKind,
 } from "./types";
 
+export function isIncomingTransferForProfile(
+  request: { targetAssistantId: string } | null | undefined,
+  profileId: string | null | undefined,
+): boolean {
+  return Boolean(request && profileId && request.targetAssistantId === profileId);
+}
+
+export function transferResponseButtonsDisabled(responseSaving: string | null | undefined): boolean {
+  return responseSaving != null;
+}
+
+export function outgoingConfirmingSwapForProfile(
+  task: TaskFromAPI | null | undefined,
+  profileId: string | null | undefined,
+) {
+  if (!task || !profileId || task.status === "completed" || task.completedAt) return null;
+  return task.assistantTransferRequests?.find((request) =>
+    request.kind === "swap" &&
+    request.status === "confirming" &&
+    request.fromAssistantId === profileId,
+  ) ?? null;
+}
+
+export function taskTransferRequestForTask(
+  task: TaskFromAPI | undefined | null,
+  statuses: readonly string[],
+): NonNullable<TaskFromAPI["assistantTransferRequests"]>[number] | null {
+  if (!task || task.status === "completed") return null;
+  return task.assistantTransferRequests?.find((request) =>
+    request.taskId === task.id && statuses.includes(request.status)
+  ) ?? null;
+}
+
 /** 用时类展示：<=60 分钟显示「X分钟」，>60 按小时、最多一位小数（整数不写 .0） */
 export function fmtMin(min: number): string {
   const m = Math.max(0, Math.round(Number(min) || 0));
@@ -44,12 +77,14 @@ export const STATUS_STYLE: Record<string, { statusLabel: string; statusCls: stri
   assigned:  { statusLabel: "待就位", statusCls: "bg-white/35 border-blue-200/50", tagCls: "bg-blue-100/60 text-blue-600", hasProgress: false },
   waitingMachine: { statusLabel: "等待熨烫机", statusCls: "bg-white/35 border-emerald-200/50", tagCls: "bg-emerald-100/70 text-emerald-700", hasProgress: false },
   ironingReady: { statusLabel: "准备熨烫", statusCls: "bg-white/40 border-lime-200/60", tagCls: "bg-lime-100/80 text-lime-700", hasProgress: false },
+  transferConfirming: { statusLabel: "待确认交换", statusCls: "bg-white/40 border-purple-200/60", tagCls: "bg-purple-100/70 text-purple-700", hasProgress: false },
+  transferAfterComplete: { statusLabel: "结束后接替", statusCls: "bg-white/40 border-purple-200/60", tagCls: "bg-purple-100/70 text-purple-700", hasProgress: false },
   completed: { statusLabel: "已完成", statusCls: "bg-white/30 border-white/40", tagCls: "bg-green-100/60 text-green-600", hasProgress: false },
   paused:    { statusLabel: "已暂停", statusCls: "bg-white/25 border-yellow-200/40", tagCls: "bg-yellow-100/60 text-yellow-600", hasProgress: false },
 };
 
 // 任务状态排序权重：超过上限后的个人队列优先提醒，其余按待就位 -> 等待中 -> 进行中 -> 已暂停 -> 已完成
-const STATUS_ORDER: Record<string, number> = { "准备熨烫": 0, "等待熨烫机": 1, "队列中": 2, "待就位": 3, "插单等待中": 3, "让行中": 3, "等待中": 4, "进行中": 5, "已暂停": 6, "已完成": 7, "已取消": 8 };
+const STATUS_ORDER: Record<string, number> = { "准备熨烫": 0, "忙后熨烫": 1, "等待熨烫机": 1, "待确认交换": 2, "待确认移交": 2, "结束后接替": 2, "队列中": 3, "待就位": 4, "插单等待中": 4, "让行中": 4, "等待中": 5, "进行中": 6, "已暂停": 7, "已完成": 8, "已取消": 9 };
 
 export function sortTasksByStatus(tasks: DisplayTask[]): DisplayTask[] {
   return [...tasks].sort((a, b) => (STATUS_ORDER[a.statusLabel] ?? 99) - (STATUS_ORDER[b.statusLabel] ?? 99));
@@ -104,11 +139,9 @@ export function taskBelongsToProfile(
 ): boolean {
   if (!task) return false;
   if (!profileId) return true;
-  const readyTransfer = task.assistantTransferRequests?.some((request) =>
-    request.targetAssistantId === profileId &&
-    request.status === "ready_to_takeover"
-  );
-  if (readyTransfer) return true;
+  const readyTransfer = taskTransferRequestForTask(task, ["ready_to_takeover"]);
+  const isReadyTransferTarget = readyTransfer?.targetAssistantId === profileId;
+  if (isReadyTransferTarget) return true;
   return task.assistantId === profileId || taskParticipantForProfile(task, profileId) != null;
 }
 
@@ -118,14 +151,45 @@ export function taskStatusForProfile(
 ): string | null {
   if (
     profileId &&
-    task?.assistantTransferRequests?.some((request) =>
-      request.targetAssistantId === profileId &&
-      request.status === "ready_to_takeover"
-    )
+    taskTransferRequestForTask(task, ["ready_to_takeover"])?.targetAssistantId === profileId
   ) {
     return "waiting";
   }
   return taskParticipantForProfile(task, profileId)?.status ?? task?.status ?? null;
+}
+
+export function removeStaleActiveTasksForIdleProfile(
+  tasks: TaskFromAPI[],
+  profileId: string,
+  profileStatus: string | null | undefined,
+): TaskFromAPI[] {
+  if (profileStatus !== "idle") return tasks;
+  return tasks.filter((task) => {
+    if (!taskBelongsToProfile(task, profileId)) return true;
+    const status = taskStatusForProfile(task, profileId) ?? task.status;
+    return status !== "executing" && status !== "paused";
+  });
+}
+
+export type IncomingTransferPresentation = {
+  statusKey: "transferConfirming" | "transferAfterComplete";
+  label: "待确认移交" | "待确认交换" | "结束后接替";
+};
+
+export function incomingTransferPresentationForProfile(
+  task: TaskFromAPI | undefined | null,
+  profileId: string | null | undefined,
+): IncomingTransferPresentation | null {
+  if (!task || !profileId) return null;
+  const request = taskTransferRequestForTask(task, ["confirming", "pending_after_complete"]);
+  if (!request || request.targetAssistantId !== profileId) return null;
+  if (request.status === "pending_after_complete") {
+    return { statusKey: "transferAfterComplete", label: "结束后接替" };
+  }
+  return {
+    statusKey: "transferConfirming",
+    label: request.kind === "swap" ? "待确认交换" : "待确认移交",
+  };
 }
 
 export function taskTimingForProfile(
@@ -407,6 +471,37 @@ export function isPassiveIroningWaitingTask(task: TaskFromAPI | null | undefined
     task.ironingStage === "waiting_machine";
 }
 
+export type PassiveIroningWaitingPresentation = {
+  label: "等待熨烫机" | "忙后熨烫";
+  description: string;
+};
+
+export function passiveIroningWaitingPresentation(
+  task: TaskFromAPI | null | undefined,
+  options?: {
+    freeIroningMachineCount?: number;
+    hasWorkingTaskForProfile?: boolean;
+  },
+): PassiveIroningWaitingPresentation {
+  const machineHasFreeSlot = (options?.freeIroningMachineCount ?? 0) > 0;
+  const shouldShowBusyAfter =
+    isPassiveIroningWaitingTask(task) &&
+    machineHasFreeSlot &&
+    options?.hasWorkingTaskForProfile === true;
+
+  if (shouldShowBusyAfter) {
+    return {
+      label: "忙后熨烫",
+      description: "熨烫机有空，完成当前任务后再熨烫",
+    };
+  }
+
+  return {
+    label: "等待熨烫机",
+    description: "当前无空余熨烫机，只能开始做其他任务",
+  };
+}
+
 export function isUnstartedTask(task: TaskFromAPI | null | undefined): boolean {
   return !!task && task.status === "waiting" && !task.startedAt;
 }
@@ -497,8 +592,10 @@ export function apiTaskToDisplay(t: TaskFromAPI, profileId?: string): DisplayTas
   // waiting 的两种业务含义：未分配=队列中；已分配但未开始=待就位。
   const viewerStatus = taskStatusForProfile(t, profileId) ?? t.status;
   const timingSource = taskTimingForProfile(t, profileId);
+  const incomingTransferPresentation = incomingTransferPresentationForProfile(t, profileId);
   const hasAssignedPerson = !!t.assistantId || activeTaskParticipants(t).length > 0;
-  const effectiveStatus = isPhotographerLimitQueuedTask(t)
+  const effectiveStatus = incomingTransferPresentation?.statusKey
+    ?? (isPhotographerLimitQueuedTask(t)
     ? "queued"
     : isIroningTask(t) && t.status === "waiting" && t.ironingStage === "waiting_machine"
       ? "waitingMachine"
@@ -506,7 +603,7 @@ export function apiTaskToDisplay(t: TaskFromAPI, profileId?: string): DisplayTas
       ? "ironingReady"
     : viewerStatus === "waiting"
       ? hasAssignedPerson ? "assigned" : "queued"
-      : viewerStatus;
+      : viewerStatus);
   const style = STATUS_STYLE[effectiveStatus] || STATUS_STYLE.waiting;
   const PRIORITY_LABEL: Record<number, string> = { 1: "1-5分钟", 2: "5-20分钟", 3: "30分钟以内", 4: "30-60分钟", 5: "1小时以上" };
   const timePeriod = PRIORITY_LABEL[t.priority] || t.category?.name || "任务";
@@ -516,7 +613,7 @@ export function apiTaskToDisplay(t: TaskFromAPI, profileId?: string): DisplayTas
   let time = "";
   let actualTime = "";
   let progress: number | null = null;
-  if (viewerStatus === "executing") {
+  if (effectiveStatus === "executing") {
     const elapsedMin = effectiveWorkMinutesFromApi(timingSource);
     const estDur = t.category?.estDuration;
     const estWall =
@@ -534,11 +631,11 @@ export function apiTaskToDisplay(t: TaskFromAPI, profileId?: string): DisplayTas
       progress = null;
     }
     actualTime = `已进行${fmtMin(elapsedMin)}`;
-  } else if (viewerStatus === "completed" && timingSource.startedAt && timingSource.completedAt) {
+  } else if (effectiveStatus === "completed" && timingSource.startedAt && timingSource.completedAt) {
     const used = effectiveWorkMinutesFromApi(timingSource);
     time = `用时${fmtMin(used)}`;
     actualTime = fmtMin(used);
-  } else if (viewerStatus === "paused") {
+  } else if (effectiveStatus === "paused") {
     const elapsedMin = effectiveWorkMinutesFromApi(timingSource);
     time = `已执行${fmtMin(elapsedMin)}(暂停)`;
     actualTime = `已进行${fmtMin(elapsedMin)}`;
@@ -577,6 +674,9 @@ export function taskListActualLine(
   forCard: boolean,
   profileId?: string
 ): string | null {
+  if (d.statusLabel === "待确认交换" || d.statusLabel === "待确认移交" || d.statusLabel === "结束后接替") {
+    return null;
+  }
   if (d.statusLabel === "进行中" || d.statusLabel === "已暂停") {
     if (raw) {
       const timingSource = taskTimingForProfile(raw, profileId);
@@ -587,7 +687,7 @@ export function taskListActualLine(
     const m = raw ? effectiveWorkMinutesFromApi(taskTimingForProfile(raw, profileId), nowMs) : 0;
     return `已进行${fmtMin(m)}`;
   }
-  if (d.statusLabel === "队列中" || d.statusLabel === "等待中" || d.statusLabel === "待就位") {
+  if (d.statusLabel === "队列中" || d.statusLabel === "等待中" || d.statusLabel === "待就位" || d.statusLabel === "忙后熨烫") {
     const startedAt = raw ? taskWaitingStartedAt(raw, profileId) : d.createdAt;
     const m = Math.max(0, Math.floor((nowMs - new Date(startedAt).getTime()) / 60000));
     return `已等待${fmtMin(m)}`;
@@ -624,7 +724,23 @@ export function taskPauseKindFromLookup(
   return lookup.activeInterruptedParentIds.has(task.id) ? "interrupt" : "manual";
 }
 
-export function taskStatusLabelForList(d: DisplayTask, raw: TaskFromAPI | undefined, allTasks: TaskFromAPI[]): string {
+export function taskStatusLabelForList(
+  d: DisplayTask,
+  raw: TaskFromAPI | undefined,
+  allTasks: TaskFromAPI[],
+  options?: {
+    profileId?: string | null;
+    freeIroningMachineCount?: number;
+  },
+): string {
+  const incomingTransferPresentation = incomingTransferPresentationForProfile(raw, options?.profileId ?? undefined);
+  if (incomingTransferPresentation) return incomingTransferPresentation.label;
+  if (raw && isPassiveIroningWaitingTask(raw)) {
+    return passiveIroningWaitingPresentation(raw, {
+      freeIroningMachineCount: options?.freeIroningMachineCount,
+      hasWorkingTaskForProfile: hasWorkingTaskForProfile(allTasks, options?.profileId ?? undefined),
+    }).label;
+  }
   if (raw && raw.status === "waiting" && raw.parentTaskId) return "插单等待中";
   if (raw && raw.status === "waiting" && raw.startedAt) {
     const hasActiveInterrupt = allTasks.some(
