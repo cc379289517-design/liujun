@@ -161,6 +161,35 @@ export type StandbyReassignmentNoticeFromAPI = {
   } | null;
 };
 
+export type CollaborationInvitationFromAPI = {
+  id: string;
+  taskId: string;
+  inviterProfileId: string;
+  targetAssistantId: string;
+  status: "pending" | "accepted" | "rejected" | "canceled" | "expired";
+  reason: string | null;
+  requestedAt: string;
+  respondedAt: string | null;
+  canceledAt: string | null;
+  updatedAt: string;
+  inviterProfile: { id: string; name: string; role: string };
+  targetAssistant: { id: string; name: string };
+  task: {
+    id: string;
+    roomNumber: string;
+    priority: number;
+    status: string;
+    category: {
+      id: number;
+      name: string;
+      minDuration: number | null;
+      maxDuration: number | null;
+      estDuration: number | null;
+    };
+    photographer: { id: string; name: string };
+  };
+};
+
 export type DisplayTask = {
   id: string;
   name: string;

@@ -57,6 +57,8 @@ import {
   formatRoomOrVenue,
   isAssistantRole,
   isPublicQueueTaskForBuilding,
+  photographerDailyResetLocation,
+  schedulePhotographerDailyLocationReset,
   profileServiceBuildingId,
   profileServiceRoom,
   safeExtraVenueEntries,
@@ -130,7 +132,11 @@ import {
   writePublicQueueLastOrder,
   writePublicQueueSeenEscalations,
 } from "./publicQueueStorage";
-import { reassignmentNoticeDisplay } from "./reassignmentNoticeDisplay";
+import { formatNotificationTimestamp, reassignmentNoticeDisplay } from "./reassignmentNoticeDisplay";
+import {
+  collaborationInvitationDisplay,
+  incomingCollaborationInvitationForProfile,
+} from "./collaborationInvitationDisplay";
 import type {
   AssistantPresenceState,
   AssistantRankingContribution,
@@ -142,6 +148,7 @@ import type {
   AreaMetricKey,
   AreaMetricPerson,
   BuiltCategory,
+  CollaborationInvitationFromAPI,
   DbCategory,
   DisplayTask,
   IroningWorkItem,
@@ -764,6 +771,7 @@ export default function PhotographerPage() {
     eatingEndedAt?: string | null;
     eatingAccumulatedSeconds?: number | null;
   } | null>(null);
+  const profileRef = useRef(profile);
   const [workbenchRoom, setWorkbenchRoom] = useState<string | null>(null);
   const [hoveredMapAssistant, setHoveredMapAssistant] = useState<string | null>(null);
   const [notePopupTaskId, setNotePopupTaskId] = useState<string | null>(null);
@@ -844,6 +852,10 @@ export default function PhotographerPage() {
   const [collabSelectedIds, setCollabSelectedIds] = useState<string[]>([]);
   const [collabSaving, setCollabSaving] = useState(false);
   const [collabLimitWarning, setCollabLimitWarning] = useState(false);
+  const [collaborationInvitations, setCollaborationInvitations] = useState<CollaborationInvitationFromAPI[]>([]);
+  const [dismissedCollaborationInvitationIds, setDismissedCollaborationInvitationIds] = useState<string[]>([]);
+  const [collaborationInvitationResponseSaving, setCollaborationInvitationResponseSaving] = useState<"accept" | "reject" | null>(null);
+  const collaborationInvitationResponseRequestRef = useRef<string | null>(null);
   const [transferTask, setTransferTask] = useState<TaskFromAPI | null>(null);
   const [transferSavingAssistantId, setTransferSavingAssistantId] = useState<string | null>(null);
   const [transferError, setTransferError] = useState<string | null>(null);
@@ -1462,6 +1474,10 @@ export default function PhotographerPage() {
       setTaskCreateError((current) => current === message ? null : current);
     }, 3500);
   }, []);
+
+  useEffect(() => {
+    profileRef.current = profile;
+  }, [profile]);
 
   const hasPhotographerLimitQueuedTask = useCallback(() => {
     if (!profile || isAssistantRole(profile.role)) return false;
@@ -2641,6 +2657,7 @@ export default function PhotographerPage() {
           publicQueue?: unknown;
           tasks?: unknown;
           notices?: unknown;
+          collaborationInvitations?: unknown;
           syncMode?: unknown;
           syncToken?: unknown;
           syncTruncated?: unknown;
@@ -2654,6 +2671,10 @@ export default function PhotographerPage() {
         const taskData = Array.isArray(syncData.tasks) ? syncData.tasks as TaskFromAPI[] : [];
         const hasNoticesPayload = Object.prototype.hasOwnProperty.call(syncData, "notices");
         const noticeData = Array.isArray(syncData.notices) ? syncData.notices as StandbyReassignmentNoticeFromAPI[] : [];
+        const hasCollaborationInvitationsPayload = Object.prototype.hasOwnProperty.call(syncData, "collaborationInvitations");
+        const collaborationInvitationData = Array.isArray(syncData.collaborationInvitations)
+          ? syncData.collaborationInvitations as CollaborationInvitationFromAPI[]
+          : [];
         const hasAreaSummaryPayload = Object.prototype.hasOwnProperty.call(syncData, "areaSummary");
         const nextAreaSummary = hasAreaSummaryPayload
           ? parseWorkbenchAreaSummary(syncData.areaSummary)
@@ -2715,6 +2736,12 @@ export default function PhotographerPage() {
             setReassignmentNotices([]);
           } else if (hasNoticesPayload) {
             setReassignmentNotices(noticeData);
+          }
+          if (hasCollaborationInvitationsPayload) {
+            setCollaborationInvitations(collaborationInvitationData);
+            setDismissedCollaborationInvitationIds((previous) =>
+              previous.filter((id) => collaborationInvitationData.some((invitation) => invitation.id === id))
+            );
           }
           applyTaskDataForProfile(mergedTaskData, pollingProfile, buildingId);
         });
@@ -3182,6 +3209,38 @@ export default function PhotographerPage() {
     setPhotographerWorkbenchBuildingId(bld.id);
     setActiveBuildingId(bld.id);
   }, [buildingById, cancelLocationMenuClose, profile]);
+
+  const resetPhotographerLocationForNewDay = useCallback(() => {
+    const currentProfile = profileRef.current;
+    if (!currentProfile || isAssistantRole(currentProfile.role)) return;
+    const resetLocation = photographerDailyResetLocation({
+      role: currentProfile.role,
+      buildingId: originalBuildingIdRef.current ?? currentProfile.buildingId,
+      currentRoom: originalRoomRef.current ?? currentProfile.currentRoom,
+    });
+    if (!resetLocation) return;
+
+    setPhotographerWorkbenchBuildingId(resetLocation.buildingId);
+    setActiveBuildingId(resetLocation.buildingId);
+    setWorkbenchRoom(resetLocation.room);
+    if (resetLocation.needsOfficePrompt) {
+      showTaskCreateError(
+        "已复位到登记楼座，但未设置登记办公室，请补充默认楼座和办公室地点",
+        false,
+        "info",
+      );
+    }
+  }, [showTaskCreateError]);
+
+  useEffect(() => {
+    if (!profile || isAssistantRole(profile.role)) return;
+    return schedulePhotographerDailyLocationReset(
+      resetPhotographerLocationForNewDay,
+      Date.now,
+      window.setTimeout.bind(window),
+      window.clearTimeout.bind(window),
+    );
+  }, [profile?.id, profile?.role, resetPhotographerLocationForNewDay]);
 
   const switchAssistantBuilding = useCallback(async (newBuildingId: number) => {
     if (!profile || !isAssistantRole(profile.role)) return;
@@ -4081,11 +4140,66 @@ export default function PhotographerPage() {
     }
   }, [activeBuildingId, applyTaskDataForProfile, profile, reassignmentNoticeSavingId, refreshAssistants]);
 
+  const handleRespondCollaborationInvitation = useCallback(async (
+    invitation: CollaborationInvitationFromAPI,
+    accepted: boolean,
+  ) => {
+    if (!profile || collaborationInvitationResponseSaving || collaborationInvitationResponseRequestRef.current) return;
+    collaborationInvitationResponseRequestRef.current = invitation.id;
+    setCollaborationInvitationResponseSaving(accepted ? "accept" : "reject");
+    try {
+      const response = await fetch(`/api/collaboration-invitations/${invitation.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ actorAssistantId: profile.id, accepted }),
+      });
+      const data = await response.json().catch(() => null) as {
+        error?: string;
+        invitation?: CollaborationInvitationFromAPI;
+        task?: TaskFromAPI;
+      } | null;
+      if (!response.ok) {
+        if (data?.invitation && data.invitation.status !== "pending") {
+          setCollaborationInvitations((previous) => previous.filter((item) => item.id !== invitation.id));
+        }
+        showTaskCreateError(data?.error ?? "协作邀请处理失败，请稍后重试");
+        return;
+      }
+      setCollaborationInvitations((previous) => previous.filter((item) => item.id !== invitation.id));
+      setDismissedCollaborationInvitationIds((previous) => previous.filter((id) => id !== invitation.id));
+      if (data?.task) {
+        updateLocalTaskSources(data.task.id, () => data.task!, { updateDisplay: true });
+      }
+      refreshAssistants();
+      showTaskCreateError(
+        accepted ? "已接受协作邀请，请前往待就位" : "已拒绝本次协作邀请",
+        false,
+        accepted ? "success" : "info",
+      );
+    } catch (error) {
+      console.error("Failed to respond collaboration invitation", error);
+      showTaskCreateError("协作邀请处理失败，请检查网络后重试");
+    } finally {
+      collaborationInvitationResponseRequestRef.current = null;
+      setCollaborationInvitationResponseSaving(null);
+    }
+  }, [collaborationInvitationResponseSaving, profile, refreshAssistants, showTaskCreateError, updateLocalTaskSources]);
+
   const openCollaboratorModal = useCallback((task: TaskFromAPI) => {
     setCollabTaskId(task.id);
-    setCollabSelectedIds(helperParticipants(task).map((c) => c.assistantId));
+    const pendingTargetIds = collaborationInvitations
+      .filter((invitation) =>
+        invitation.taskId === task.id &&
+        invitation.status === "pending" &&
+        invitation.inviterProfileId === profile?.id
+      )
+      .map((invitation) => invitation.targetAssistantId);
+    setCollabSelectedIds([...new Set([
+      ...helperParticipants(task).map((c) => c.assistantId),
+      ...pendingTargetIds,
+    ])]);
     setCollabLimitWarning(false);
-  }, []);
+  }, [collaborationInvitations, profile?.id]);
 
   const publicQueueCountByBuilding = useMemo(() => {
     const counts: Record<number, number> = {};
@@ -4103,7 +4217,15 @@ export default function PhotographerPage() {
     const task = getVisibleRawTaskById(collabTaskId);
     const taskBuildingId = taskLocationBuildingId(task);
     const currentHelperIds = helperParticipants(task).map((c) => c.assistantId);
-    const addedIds = collabSelectedIds.filter((assistantId) => !currentHelperIds.includes(assistantId));
+    const currentPendingTargetIds = collaborationInvitations
+      .filter((invitation) =>
+        invitation.taskId === collabTaskId &&
+        invitation.status === "pending" &&
+        invitation.inviterProfileId === profile?.id
+      )
+      .map((invitation) => invitation.targetAssistantId);
+    const existingIds = new Set([...currentHelperIds, ...currentPendingTargetIds]);
+    const addedIds = collabSelectedIds.filter((assistantId) => !existingIds.has(assistantId));
     const manuallyEnabled =
       taskBuildingId != null ? collaborationEnabledByBuilding[taskBuildingId] ?? true : true;
     const queueCount =
@@ -4130,6 +4252,7 @@ export default function PhotographerPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           assistantIds: collabSelectedIds,
+          actorProfileId: profile?.id,
           actorAssistantId: isAssistantRole(profile?.role) ? profile?.id : undefined,
         }),
       });
@@ -4139,16 +4262,33 @@ export default function PhotographerPage() {
         setCollabLimitWarning(true);
         return;
       }
-      const updated = await res.json() as TaskFromAPI;
+      const responseData = await res.json() as {
+        task?: TaskFromAPI;
+        invitations?: CollaborationInvitationFromAPI[];
+      };
+      const updated = responseData.task;
+      if (!updated) {
+        showTaskCreateError("协作邀请已保存，但任务详情同步失败，请稍后刷新");
+        return;
+      }
+      if ("invitations" in responseData && Array.isArray(responseData.invitations)) {
+        setCollaborationInvitations((previous) => [
+          ...previous.filter((invitation) => invitation.taskId !== updated.id),
+          ...responseData.invitations!,
+        ]);
+      }
       updateLocalTaskSources(updated.id, () => updated, { updateDisplay: true });
       refreshAssistants();
       setCollabTaskId(null);
       setCollabSelectedIds([]);
       setCollabLimitWarning(false);
+      if (addedIds.length > 0) {
+        showTaskCreateError("协作邀请已发送，目标助理确认后才会进入待就位", false, "success");
+      }
     } finally {
       setCollabSaving(false);
     }
-  }, [collabSelectedIds, collabTaskId, collaborationEnabledByBuilding, collaborationMaxByBuilding, collaborationQueueAutoCloseLimit, getVisibleRawTaskById, profile?.id, profile?.role, publicQueueCountByBuilding, refreshAssistants, updateLocalTaskSources]);
+  }, [collabSelectedIds, collabTaskId, collaborationEnabledByBuilding, collaborationInvitations, collaborationMaxByBuilding, collaborationQueueAutoCloseLimit, getVisibleRawTaskById, profile?.id, profile?.role, publicQueueCountByBuilding, refreshAssistants, showTaskCreateError, updateLocalTaskSources]);
 
   // 助理：手动暂停当前任务（插单场景）
   const handlePauseCurrentTask = useCallback(async () => {
@@ -4470,6 +4610,25 @@ export default function PhotographerPage() {
     ? reassignmentNoticeDisplay(activeReassignmentNotice, activeReassignmentNoticeRole)
     : null;
   const activeReassignmentMessage = activeReassignmentDisplay?.message ?? "";
+  const activeReassignmentNoticeTime = activeReassignmentNotice
+    ? formatNotificationTimestamp(activeReassignmentNotice.createdAt, now)
+    : "";
+  const pendingIncomingCollaborationInvitation = profile && isAssistantRole(profile.role)
+    ? collaborationInvitations.find((invitation) =>
+        invitation.status === "pending" && invitation.targetAssistantId === profile.id
+      ) ?? null
+    : null;
+  const activeCollaborationInvitation = incomingCollaborationInvitationForProfile(
+    collaborationInvitations,
+    profile?.id,
+    dismissedCollaborationInvitationIds,
+  );
+  const activeCollaborationInvitationDisplay = activeCollaborationInvitation
+    ? collaborationInvitationDisplay(activeCollaborationInvitation)
+    : null;
+  const activeCollaborationInvitationTime = activeCollaborationInvitation
+    ? formatNotificationTimestamp(activeCollaborationInvitation.requestedAt, now)
+    : "";
   const isAssistantProfile = isAssistantRole(profile?.role);
   const assistantPresence = assistantPresenceState(profile);
   const assistantPresenceInfo = assistantPresenceMeta(assistantPresence);
@@ -4574,6 +4733,13 @@ export default function PhotographerPage() {
   const collabOverLimit = collabSelectedIds.length > collabHelperLimit;
   const showCollabLimitWarning = collabLimitWarning || collabOverLimit;
   const collabCurrentIds = helperParticipants(collabTask ?? undefined).map((c) => c.assistantId);
+  const collabPendingTargetIds = collaborationInvitations
+    .filter((invitation) =>
+      invitation.taskId === collabTaskId &&
+      invitation.status === "pending" &&
+      invitation.inviterProfileId === profile?.id
+    )
+    .map((invitation) => invitation.targetAssistantId);
   const collabCandidateProfiles = collabTask
     ? allProfiles.filter((p) => {
         if (!isAssistantRole(p.role)) return false;
@@ -4748,6 +4914,9 @@ export default function PhotographerPage() {
     ? confirmingTransferForTask(incomingConfirmingTransferTask)
     : null;
   const incomingConfirmingTransferIsSwap = incomingConfirmingTransfer?.kind === "swap";
+  const incomingConfirmingTransferTime = incomingConfirmingTransfer
+    ? formatNotificationTimestamp(incomingConfirmingTransfer.requestedAt, now)
+    : "";
 
   const canOpenTransferForTask = useCallback((task: TaskFromAPI | null | undefined) => {
     if (!task || !profile || task.assistantId !== profile.id) return false;
@@ -6355,6 +6524,11 @@ export default function PhotographerPage() {
         const activeReassignmentNoticeIsWarning = activeReassignmentNoticeRole === "old" && !activeReassignmentKeepsOldOnline;
         return withMobilePausedEatingStrip(
           <div className={`rounded-[24px] border p-5 backdrop-blur-2xl ${mobileGlassPanel} ${activeReassignmentNoticeIsWarning ? "bg-red-400/12" : "bg-purple-400/12"}`}>
+            {activeReassignmentNoticeTime && (
+              <time dateTime={activeReassignmentNotice.createdAt} className="mb-2 block text-right text-[11px] font-bold tabular-nums text-[--text-muted]">
+                {activeReassignmentNoticeTime}
+              </time>
+            )}
             <p className={`text-[13px] font-extrabold leading-relaxed ${activeReassignmentNoticeIsWarning ? "text-red-600" : "text-purple-600"}`}>{activeReassignmentMessage}</p>
             <button
               type="button"
@@ -6505,6 +6679,7 @@ export default function PhotographerPage() {
   }, [
     activeReassignmentMessage,
     activeReassignmentNotice,
+    activeReassignmentNoticeTime,
     activeReassignmentNoticeRole,
     afterCompleteSwapRequest,
     afterCompleteSwapTask,
@@ -6997,6 +7172,88 @@ export default function PhotographerPage() {
                 className="min-h-[42px] flex-1 rounded-2xl bg-orange-500 px-4 text-[13px] font-extrabold text-white shadow-lg shadow-orange-500/20 transition-colors hover:bg-orange-600"
               >
                 暂停并切换
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {pendingIncomingCollaborationInvitation &&
+        !activeCollaborationInvitation &&
+        !activeReassignmentNotice &&
+        !incomingConfirmingTransferTask && (
+        <button
+          type="button"
+          className="fixed bottom-[calc(env(safe-area-inset-bottom)+88px)] left-1/2 z-[225] min-h-[44px] -translate-x-1/2 rounded-full bg-blue-600 px-5 text-[14px] font-extrabold text-white shadow-xl shadow-blue-600/25 transition-colors hover:bg-blue-700 lg:bottom-6"
+          onClick={() => setDismissedCollaborationInvitationIds((previous) =>
+            previous.filter((id) => id !== pendingIncomingCollaborationInvitation.id)
+          )}
+        >
+          待处理协作邀请
+        </button>
+      )}
+
+      {activeCollaborationInvitation &&
+        activeCollaborationInvitationDisplay &&
+        !activeReassignmentNotice &&
+        !incomingConfirmingTransferTask && (
+        <div className="fixed inset-0 z-[235] flex items-center justify-center bg-white/25 px-4 backdrop-blur-md sm:px-6">
+          <div className="relative w-full max-w-[510px] rounded-3xl border border-white/70 bg-white/90 px-5 py-6 shadow-2xl shadow-black/10 backdrop-blur-xl sm:rounded-[36px] sm:px-9 sm:py-8">
+            <button
+              type="button"
+              aria-label="稍后处理协作邀请"
+              title="稍后处理"
+              disabled={collaborationInvitationResponseSaving != null}
+              onClick={() => setDismissedCollaborationInvitationIds((previous) => [
+                ...previous.filter((id) => id !== activeCollaborationInvitation.id),
+                activeCollaborationInvitation.id,
+              ])}
+              className="absolute right-4 top-4 flex h-8 w-8 items-center justify-center rounded-full bg-white/60 text-[20px] font-semibold leading-none text-slate-400 shadow-sm shadow-slate-200/50 transition-colors hover:bg-white/90 hover:text-slate-600 disabled:cursor-wait disabled:opacity-50 sm:right-5 sm:top-5"
+            >
+              ×
+            </button>
+            <div className="mb-5 flex items-center gap-3 pr-10 sm:mb-6">
+              <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-full bg-blue-500/15 text-[24px] font-extrabold text-blue-600">
+                +
+              </div>
+              <div className="min-w-0 flex-1">
+                <p className="text-[20px] font-bold leading-tight text-blue-950 sm:text-[23px]">
+                  {activeCollaborationInvitationDisplay.title}
+                </p>
+                <div className="mt-1 flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
+                  <p className="min-w-0 text-[15px] leading-snug text-[--text-secondary] sm:text-[17px]">
+                    {activeCollaborationInvitationDisplay.summary}
+                  </p>
+                  {activeCollaborationInvitationTime && (
+                    <time dateTime={activeCollaborationInvitation.requestedAt} className="ml-auto shrink-0 text-[12px] font-bold tabular-nums text-slate-400 sm:text-[13px]">
+                      {activeCollaborationInvitationTime}
+                    </time>
+                  )}
+                </div>
+              </div>
+            </div>
+            <p className="whitespace-pre-wrap break-words px-1 text-[17px] leading-relaxed text-blue-950 sm:text-[20px]">
+              {activeCollaborationInvitationDisplay.message}
+            </p>
+            <div className="mt-6 grid grid-cols-2 gap-2 sm:mt-8 sm:gap-3">
+              <button
+                type="button"
+                disabled={collaborationInvitationResponseSaving != null}
+                className="min-h-[50px] rounded-3xl bg-white/75 px-3 text-[16px] font-bold text-[--text-secondary] shadow-sm shadow-slate-200/50 transition-colors hover:bg-white disabled:opacity-60 sm:min-h-[54px] sm:px-5 sm:text-[18px]"
+                onClick={() => void handleRespondCollaborationInvitation(activeCollaborationInvitation, false)}
+              >
+                {collaborationInvitationResponseSaving === "reject"
+                  ? "处理中..."
+                  : activeCollaborationInvitationDisplay.rejectLabel}
+              </button>
+              <button
+                type="button"
+                disabled={collaborationInvitationResponseSaving != null}
+                className="min-h-[50px] rounded-3xl bg-blue-600 px-3 text-[16px] font-bold text-white shadow-lg shadow-blue-600/20 transition-colors hover:bg-blue-700 active:scale-[0.99] disabled:opacity-60 sm:min-h-[54px] sm:px-5 sm:text-[18px]"
+                onClick={() => void handleRespondCollaborationInvitation(activeCollaborationInvitation, true)}
+              >
+                {collaborationInvitationResponseSaving === "accept"
+                  ? "确认中..."
+                  : activeCollaborationInvitationDisplay.acceptLabel}
               </button>
             </div>
           </div>
@@ -8664,7 +8921,7 @@ export default function PhotographerPage() {
               >
                 ×
               </button>
-              <div className="mb-6 flex items-center gap-3">
+              <div className="mb-6 flex items-center gap-3 pr-10">
                 <div className={`flex h-12 w-12 items-center justify-center rounded-full ${
                   activeReassignmentNoticeRole === "old" && !activeReassignmentKeepsOldOnline
                     ? "bg-red-500/15 text-red-600"
@@ -8680,15 +8937,22 @@ export default function PhotographerPage() {
                     <TransferArrowsIcon className="h-7 w-7" />
                   )}
                 </div>
-		                <div>
-		                  <p className={`text-[23px] font-bold leading-tight ${
+	                <div className="min-w-0 flex-1">
+	                  <p className={`text-[23px] font-bold leading-tight ${
                         activeReassignmentNoticeRole === "old" && !activeReassignmentKeepsOldOnline ? "text-[--text-primary]" : "text-purple-950"
                       }`}>
-			                    {activeReassignmentDisplay?.title ?? "任务通知"}
-		                  </p>
-	                  <p className="mt-1 text-[17px] leading-snug text-[--text-secondary]">
-	                    {activeReassignmentTaskLabel}
+		                    {activeReassignmentDisplay?.title ?? "任务通知"}
 	                  </p>
+	                  <div className="mt-1 flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
+	                    <p className="min-w-0 text-[17px] leading-snug text-[--text-secondary]">
+	                      {activeReassignmentTaskLabel}
+	                    </p>
+	                    {activeReassignmentNoticeTime && (
+	                      <time dateTime={activeReassignmentNotice.createdAt} className="ml-auto shrink-0 text-[13px] font-bold tabular-nums text-slate-400">
+	                        {activeReassignmentNoticeTime}
+	                      </time>
+	                    )}
+	                  </div>
 	                </div>
 	              </div>
 	              <div className={`rounded-3xl border px-6 py-5 ${
@@ -8782,15 +9046,22 @@ export default function PhotographerPage() {
               >
                 ×
               </button>
-              <div className="mb-6 flex items-center gap-3">
+              <div className="mb-6 flex items-center gap-3 pr-10">
                 <div className="flex h-12 w-12 items-center justify-center rounded-full bg-purple-500/15 text-purple-600">
                   <TransferArrowsIcon className="h-7 w-7" />
                 </div>
-                <div>
+                <div className="min-w-0 flex-1">
                   <p className="text-[23px] font-bold leading-tight text-purple-950">收到移交请求</p>
-                  <p className="mt-1 text-[17px] leading-snug text-[--text-secondary]">
-                    {`${incomingConfirmingTransferTask.roomNumber}室 · ${incomingConfirmingTransferTask.category?.name ?? "任务"} · P${incomingConfirmingTransferTask.priority}`}
-                  </p>
+                  <div className="mt-1 flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
+                    <p className="min-w-0 text-[17px] leading-snug text-[--text-secondary]">
+                      {`${incomingConfirmingTransferTask.roomNumber}室 · ${incomingConfirmingTransferTask.category?.name ?? "任务"} · P${incomingConfirmingTransferTask.priority}`}
+                    </p>
+                    {incomingConfirmingTransferTime && (
+                      <time dateTime={incomingConfirmingTransfer.requestedAt} className="ml-auto shrink-0 text-[13px] font-bold tabular-nums text-slate-400">
+                        {incomingConfirmingTransferTime}
+                      </time>
+                    )}
+                  </div>
                 </div>
               </div>
               <div className="rounded-3xl border border-purple-100 bg-purple-50/75 px-6 py-5">
@@ -8922,9 +9193,15 @@ export default function PhotographerPage() {
                   <div className="space-y-2">
                     {collabCandidateProfiles.map((candidate) => {
                       const selected = collabSelectedIds.includes(candidate.id);
+                      const alreadyCollaborating = collabCurrentIds.includes(candidate.id);
+                      const waitingForConfirmation = collabPendingTargetIds.includes(candidate.id);
                       const live = assistantDockById.get(candidate.id);
                       const statusLabel = selected
-                        ? "已选择"
+                        ? waitingForConfirmation
+                          ? "待确认"
+                          : alreadyCollaborating
+                            ? "协作中"
+                            : "将邀请"
                         : live?.status === "idle"
                           ? "空闲中"
                           : "占用中";

@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/prisma";
+import { NextRequest } from "next/server";
 import {
   IroningMachineStatus,
   IroningTaskStage,
@@ -10,6 +11,7 @@ import {
 import { ASSISTANT_EATING_SUB_STATUS } from "@/lib/eatingPresence";
 import { POST as createTaskRoute } from "@/app/api/tasks/route";
 import { PATCH as updateTaskRoute } from "@/app/api/tasks/[id]/route";
+import { POST as updateTaskCollaboratorsRoute } from "@/app/api/tasks/[id]/collaborators/route";
 import { PATCH as updateProfileRoute } from "@/app/api/profiles/[id]/route";
 import {
   assignTask,
@@ -243,6 +245,57 @@ async function patchTask(taskId: string, body: Record<string, unknown>): Promise
   return { status: response.status, data };
 }
 
+async function updateTaskCollaborators(
+  taskId: string,
+  body: Record<string, unknown>,
+): Promise<{ status: number; data: Record<string, unknown> }> {
+  const request = new Request(`http://test.local/api/tasks/${taskId}/collaborators`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const response = await updateTaskCollaboratorsRoute(request as never, { params: Promise.resolve({ id: taskId }) });
+  const data = await response.json() as Record<string, unknown>;
+  return { status: response.status, data };
+}
+
+async function respondCollaborationInvitation(
+  invitationId: string,
+  body: { actorAssistantId: string; accepted: boolean },
+): Promise<{ status: number; data: Record<string, unknown> }> {
+  const { PATCH: respondCollaborationInvitationRoute } = await import(
+    "../../src/app/api/collaboration-invitations/[id]/route"
+  );
+  const request = new Request(`http://test.local/api/collaboration-invitations/${invitationId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const response = await respondCollaborationInvitationRoute(request as never, {
+    params: Promise.resolve({ id: invitationId }),
+  });
+  const data = await response.json() as Record<string, unknown>;
+  return { status: response.status, data };
+}
+
+async function getWorkbenchSync(
+  profileId: string,
+  buildingId: number,
+): Promise<{ status: number; data: Record<string, unknown> }> {
+  const { GET: getWorkbenchSyncRoute } = await import("../../src/app/api/workbench/sync/route");
+  const params = new URLSearchParams({
+    profileId,
+    role: "assistant",
+    view: "assistant",
+    buildingId: String(buildingId),
+    full: "1",
+  });
+  const request = new NextRequest(`http://test.local/api/workbench/sync?${params.toString()}`);
+  const response = await getWorkbenchSyncRoute(request);
+  const data = await response.json() as Record<string, unknown>;
+  return { status: response.status, data };
+}
+
 async function patchProfile(profileId: string, body: Record<string, unknown>): Promise<{ status: number; data: Record<string, unknown> }> {
   const request = new Request(`http://test.local/api/profiles/${profileId}`, {
     method: "PATCH",
@@ -273,6 +326,18 @@ async function addParticipant(
       workSegmentStartedAt: status === "executing" ? startedAt : null,
     },
   });
+}
+
+async function createCollaborationInvitationScenario(ctx: TestContext, idPrefix: string) {
+  const primary = await createAssistant(ctx, `${idPrefix}-primary`, { status: ProfileStatus.executing });
+  const target = await createAssistant(ctx, `${idPrefix}-target`);
+  const task = await createTask(ctx, {
+    assistantId: primary.id,
+    status: TaskStatus.executing,
+    startedAt: new Date(Date.now() - 60_000),
+  });
+  await addParticipant(task.id, primary.id, "primary", "executing");
+  return { primary, target, task };
 }
 
 async function assertNoInvariantViolations() {
@@ -793,6 +858,180 @@ const tests: TestCase[] = [
       await updateTaskParticipantStatus(task.id, helper.id, "completed");
       const allDone = await prisma.bookingTask.findUnique({ where: { id: task.id } });
       assert(allDone?.status === TaskStatus.completed, "协作任务全员完成后必须整体 completed");
+    },
+  },
+  {
+    name: "新增协作只创建待确认邀请且目标助理保持空闲",
+    async run(ctx) {
+      const { primary, target, task } = await createCollaborationInvitationScenario(ctx, "inv-collab-pending");
+
+      const response = await updateTaskCollaborators(task.id, {
+        actorProfileId: primary.id,
+        actorAssistantId: primary.id,
+        assistantIds: [target.id],
+      });
+      assert(response.status === 200, `主助理发起协作邀请应成功，实际 ${response.status}`);
+
+      const [helperCount, freshTarget] = await Promise.all([
+        prisma.taskCollaborator.count({
+          where: { taskId: task.id, assistantId: target.id, role: "helper", status: "waiting" },
+        }),
+        prisma.profile.findUnique({ where: { id: target.id } }),
+      ]);
+      assert(helperCount === 0, "目标确认前不能提前生成 helper waiting");
+      assert(freshTarget?.status === ProfileStatus.idle, "目标确认前必须保持 idle");
+      const invitation = await prisma.taskCollaborationInvitation.findFirst({
+        where: { taskId: task.id, targetAssistantId: target.id, status: "pending" },
+      });
+      assert(invitation != null, "新增协作必须生成一条 pending 邀请");
+      const sync = await getWorkbenchSync(target.id, ctx.buildingId);
+      const syncedInvitations = Array.isArray(sync.data.collaborationInvitations)
+        ? sync.data.collaborationInvitations as Array<{ id?: string }>
+        : [];
+      assert(sync.status === 200, `目标助理工作台同步应成功，实际 ${sync.status}`);
+      assert(syncedInvitations.some((item) => item.id === invitation.id), "目标助理工作台必须收到 pending 协作邀请");
+    },
+  },
+  {
+    name: "目标接受协作邀请后才生成唯一待就位参与者且不能重复响应",
+    async run(ctx) {
+      const { primary, target, task } = await createCollaborationInvitationScenario(ctx, "inv-collab-accept");
+      const created = await updateTaskCollaborators(task.id, {
+        actorProfileId: primary.id,
+        actorAssistantId: primary.id,
+        assistantIds: [target.id],
+      });
+      assert(created.status === 200, `创建协作邀请应成功，实际 ${created.status}`);
+      const invitation = await prisma.taskCollaborationInvitation.findFirst({
+        where: { taskId: task.id, targetAssistantId: target.id, status: "pending" },
+      });
+      assert(invitation != null, "接受前必须存在 pending 邀请");
+
+      const accepted = await respondCollaborationInvitation(invitation.id, {
+        actorAssistantId: target.id,
+        accepted: true,
+      });
+      assert(accepted.status === 200, `目标助理接受邀请应成功，实际 ${accepted.status}`);
+
+      const [acceptedInvitation, helperCount, freshTarget] = await Promise.all([
+        prisma.taskCollaborationInvitation.findUnique({ where: { id: invitation.id } }),
+        prisma.taskCollaborator.count({
+          where: { taskId: task.id, assistantId: target.id, role: "helper", status: "waiting" },
+        }),
+        prisma.profile.findUnique({ where: { id: target.id } }),
+      ]);
+      assert(acceptedInvitation?.status === "accepted", "接受后邀请必须标记 accepted");
+      assert(helperCount === 1, "接受后必须且只能生成一个 helper waiting");
+      assert(freshTarget?.status === ProfileStatus.assigned, "接受后目标助理才变为 assigned");
+      const syncAfterAccept = await getWorkbenchSync(target.id, ctx.buildingId);
+      const pendingAfterAccept = Array.isArray(syncAfterAccept.data.collaborationInvitations)
+        ? syncAfterAccept.data.collaborationInvitations as Array<{ id?: string }>
+        : [];
+      assert(!pendingAfterAccept.some((item) => item.id === invitation.id), "接受后邀请必须从目标助理待处理消息中移除");
+
+      const duplicate = await respondCollaborationInvitation(invitation.id, {
+        actorAssistantId: target.id,
+        accepted: true,
+      });
+      assert(duplicate.status === 409, `重复响应已处理邀请必须返回 409，实际 ${duplicate.status}`);
+      const helperCountAfterDuplicate = await prisma.taskCollaborator.count({
+        where: { taskId: task.id, assistantId: target.id, role: "helper", status: "waiting" },
+      });
+      assert(helperCountAfterDuplicate === 1, "重复接受不能重复创建 helper waiting");
+    },
+  },
+  {
+    name: "摄影师发起的协作邀请被拒绝后目标助理仍保持空闲",
+    async run(ctx) {
+      const { target, task } = await createCollaborationInvitationScenario(ctx, "inv-collab-reject");
+      const created = await updateTaskCollaborators(task.id, {
+        actorProfileId: ctx.photographerId,
+        assistantIds: [target.id],
+      });
+      assert(created.status === 200, `摄影师创建协作邀请应成功，实际 ${created.status}`);
+      const invitation = await prisma.taskCollaborationInvitation.findFirst({
+        where: { taskId: task.id, targetAssistantId: target.id, status: "pending" },
+      });
+      assert(invitation != null, "摄影师新增协作也必须生成 pending 邀请");
+
+      const rejected = await respondCollaborationInvitation(invitation.id, {
+        actorAssistantId: target.id,
+        accepted: false,
+      });
+      assert(rejected.status === 200, `目标助理拒绝邀请应成功，实际 ${rejected.status}`);
+      const [freshInvitation, helperCount, freshTarget] = await Promise.all([
+        prisma.taskCollaborationInvitation.findUnique({ where: { id: invitation.id } }),
+        prisma.taskCollaborator.count({ where: { taskId: task.id, assistantId: target.id, role: "helper" } }),
+        prisma.profile.findUnique({ where: { id: target.id } }),
+      ]);
+      assert(freshInvitation?.status === "rejected", "拒绝后邀请必须标记 rejected");
+      assert(helperCount === 0, "拒绝邀请不能生成协作参与者");
+      assert(freshTarget?.status === ProfileStatus.idle, "拒绝邀请后目标助理必须保持 idle");
+    },
+  },
+  {
+    name: "非目标响应和目标资格漂移都不能错误接受协作邀请",
+    async run(ctx) {
+      const { primary, target, task } = await createCollaborationInvitationScenario(ctx, "inv-collab-drift");
+      const intruder = await createAssistant(ctx, "inv-collab-intruder");
+      const created = await updateTaskCollaborators(task.id, {
+        actorProfileId: primary.id,
+        actorAssistantId: primary.id,
+        assistantIds: [target.id],
+      });
+      assert(created.status === 200, `创建协作邀请应成功，实际 ${created.status}`);
+      const invitation = await prisma.taskCollaborationInvitation.findFirst({
+        where: { taskId: task.id, targetAssistantId: target.id, status: "pending" },
+      });
+      assert(invitation != null, "资格校验前必须存在 pending 邀请");
+
+      const unauthorized = await respondCollaborationInvitation(invitation.id, {
+        actorAssistantId: intruder.id,
+        accepted: true,
+      });
+      assert(unauthorized.status === 403, `非邀请目标响应必须返回 403，实际 ${unauthorized.status}`);
+      const pendingAfterUnauthorized = await prisma.taskCollaborationInvitation.findUnique({ where: { id: invitation.id } });
+      assert(pendingAfterUnauthorized?.status === "pending", "越权响应不能改变邀请状态");
+
+      const driftTask = await createTask(ctx, { assistantId: target.id, status: TaskStatus.waiting });
+      await addParticipant(driftTask.id, target.id, "primary", "waiting");
+      await prisma.profile.update({ where: { id: target.id }, data: { status: ProfileStatus.assigned } });
+
+      const drifted = await respondCollaborationInvitation(invitation.id, {
+        actorAssistantId: target.id,
+        accepted: true,
+      });
+      assert(drifted.status === 409, `目标助理变忙后接受必须返回 409，实际 ${drifted.status}`);
+      const [expiredInvitation, helperCount, freshTarget] = await Promise.all([
+        prisma.taskCollaborationInvitation.findUnique({ where: { id: invitation.id } }),
+        prisma.taskCollaborator.count({ where: { taskId: task.id, assistantId: target.id, role: "helper" } }),
+        prisma.profile.findUnique({ where: { id: target.id } }),
+      ]);
+      assert(expiredInvitation?.status === "expired", "目标资格漂移后邀请必须标记 expired");
+      assert(helperCount === 0, "目标资格漂移后不能生成协作参与者");
+      assert(freshTarget?.status === ProfileStatus.assigned, "资格漂移失败不能覆盖目标助理的新任务状态");
+    },
+  },
+  {
+    name: "任务完成时待确认协作邀请必须自动失效",
+    async run(ctx) {
+      const { primary, target, task } = await createCollaborationInvitationScenario(ctx, "inv-collab-task-completed");
+      const created = await updateTaskCollaborators(task.id, {
+        actorProfileId: primary.id,
+        actorAssistantId: primary.id,
+        assistantIds: [target.id],
+      });
+      assert(created.status === 200, `创建协作邀请应成功，实际 ${created.status}`);
+      const invitation = await prisma.taskCollaborationInvitation.findFirst({
+        where: { taskId: task.id, targetAssistantId: target.id, status: "pending" },
+      });
+      assert(invitation != null, "任务完成前必须存在 pending 邀请");
+
+      await completeTask(task.id);
+
+      const expired = await prisma.taskCollaborationInvitation.findUnique({ where: { id: invitation.id } });
+      assert(expired?.status === "expired", "任务完成后 pending 协作邀请必须标记 expired");
+      assert(expired?.reason === "task_completed", "任务完成导致的邀请失效必须记录稳定原因");
     },
   },
   {

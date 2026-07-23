@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { reassignmentNoticeDisplay } from "../../src/app/photographer/reassignmentNoticeDisplay";
+import {
+  formatNotificationTimestamp,
+  reassignmentNoticeDisplay,
+} from "../../src/app/photographer/reassignmentNoticeDisplay";
 import type { StandbyReassignmentNoticeFromAPI } from "../../src/app/photographer/types";
 
 function notice(reason: string, overrides: Partial<StandbyReassignmentNoticeFromAPI> = {}): StandbyReassignmentNoticeFromAPI {
@@ -84,6 +87,24 @@ test("无替代助理时通知公共队列释放且在线状态未改变", () =>
   assert.match(display.message, /在线状态未改变/);
   assert.doesNotMatch(display.message, /切换为离线/);
   assert.equal(display.buttonLabel, "知道了");
+});
+
+test("当天通知只显示小时和分钟", () => {
+  const now = new Date(2026, 6, 21, 16, 30);
+  const createdAt = new Date(2026, 6, 21, 9, 5).toISOString();
+
+  assert.equal(formatNotificationTimestamp(createdAt, now), "09:05");
+});
+
+test("跨天通知显示月日、小时和分钟", () => {
+  const now = new Date(2026, 6, 21, 16, 30);
+  const createdAt = new Date(2026, 6, 20, 23, 8).toISOString();
+
+  assert.equal(formatNotificationTimestamp(createdAt, now), "07-20 23:08");
+});
+
+test("无效通知时间不显示占位", () => {
+  assert.equal(formatNotificationTimestamp("not-a-date", new Date(2026, 6, 21, 16, 30)), "");
 });
 
 test("准备熨烫无替代助理时明确保留原归属且不误报公共队列", () => {

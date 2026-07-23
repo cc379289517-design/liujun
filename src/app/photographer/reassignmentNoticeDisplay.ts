@@ -9,6 +9,24 @@ export type ReassignmentNoticeDisplay = {
   source: "system" | "manual" | "confirmed_swap";
 };
 
+function padNotificationTimePart(value: number): string {
+  return String(value).padStart(2, "0");
+}
+
+export function formatNotificationTimestamp(value: string | null | undefined, now = new Date()): string {
+  if (!value) return "";
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return "";
+  const time = `${padNotificationTimePart(date.getHours())}:${padNotificationTimePart(date.getMinutes())}`;
+  const sameDay =
+    date.getFullYear() === now.getFullYear() &&
+    date.getMonth() === now.getMonth() &&
+    date.getDate() === now.getDate();
+  return sameDay
+    ? time
+    : `${padNotificationTimePart(date.getMonth() + 1)}-${padNotificationTimePart(date.getDate())} ${time}`;
+}
+
 export function isSystemAutomaticReassignmentReason(reason: string): boolean {
   return reason === "ironing_wait_load_balance" ||
     reason === "unselected_standby_release" ||

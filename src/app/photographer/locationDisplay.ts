@@ -76,6 +76,53 @@ export function profileServiceRoom(profile: { role: string; currentRoom: string 
   return isAssistantRole(profile.role) ? profile.activeRoom ?? null : profile.currentRoom;
 }
 
+export function photographerDailyResetLocation(profile: {
+  role: string;
+  buildingId: number;
+  currentRoom: string | null | undefined;
+}): { buildingId: number; room: string | null; needsOfficePrompt: boolean } | null {
+  if (isAssistantRole(profile.role)) return null;
+  const room = typeof profile.currentRoom === "string" && profile.currentRoom.trim()
+    ? profile.currentRoom.trim()
+    : null;
+  return {
+    buildingId: profile.buildingId,
+    room,
+    needsOfficePrompt: room == null,
+  };
+}
+
+export function schedulePhotographerDailyLocationReset<TTimer>(
+  resetLocation: () => void,
+  nowMs: () => number,
+  setTimer: (callback: () => void, delayMs: number) => TTimer,
+  clearTimer: (timer: TTimer) => void,
+): () => void {
+  let stopped = false;
+  let timer: TTimer | null = null;
+
+  const scheduleNextMidnight = () => {
+    const currentMs = nowMs();
+    const nextMidnight = new Date(currentMs);
+    nextMidnight.setHours(24, 0, 0, 0);
+    const delayMs = Math.max(1000, nextMidnight.getTime() - currentMs);
+
+    timer = setTimer(() => {
+      if (stopped) return;
+      timer = null;
+      resetLocation();
+      scheduleNextMidnight();
+    }, delayMs);
+  };
+
+  scheduleNextMidnight();
+  return () => {
+    stopped = true;
+    if (timer !== null) clearTimer(timer);
+    timer = null;
+  };
+}
+
 export function taskLocationBuildingId(task: TaskFromAPI | null | undefined): number | null {
   return task?.locationBuildingId ?? task?.photographer?.buildingId ?? null;
 }

@@ -134,6 +134,8 @@ model Profile {
   taskCompletionRegistrations TaskCompletionRegistration[] @relation("TaskCompletionRegistrar")
   transferRequestsFrom TaskAssistantTransferRequest[] @relation("TransferFromAssistant")
   transferRequestsTarget TaskAssistantTransferRequest[] @relation("TransferTargetAssistant")
+  collaborationInvitationsSent TaskCollaborationInvitation[] @relation("CollaborationInvitationInviter")
+  collaborationInvitationsReceived TaskCollaborationInvitation[] @relation("CollaborationInvitationTarget")
 
   @@index([role, activeBuildingId, status, onlineStatus, name])
   @@index([role, buildingId, status, onlineStatus, name])
@@ -241,6 +243,7 @@ model BookingTask {
   assistantTransferRequests TaskAssistantTransferRequest[]
   priorityUpgradeRequests TaskPriorityUpgradeRequest[]
   completionRegistration TaskCompletionRegistration?
+  collaborationInvitations TaskCollaborationInvitation[]
 
   // 关系
   photographer    Profile      @relation("TaskPhotographer", fields: [photographerId], references: [id])
@@ -365,6 +368,32 @@ model TaskAssistantTransferRequest {
   @@index([fromAssistantId, status])
   @@index([targetAssistantId, status])
   @@map("task_assistant_transfer_requests")
+}
+
+// ============================================
+// 任务协作邀请表
+// ============================================
+model TaskCollaborationInvitation {
+  id                String   @id @default(uuid())
+  taskId            String   @map("task_id")
+  inviterProfileId  String   @map("inviter_profile_id")
+  targetAssistantId String   @map("target_assistant_id")
+  status            String   @default("pending")
+  reason            String?
+  requestedAt       DateTime @default(now()) @map("requested_at")
+  respondedAt       DateTime? @map("responded_at")
+  canceledAt        DateTime? @map("canceled_at")
+  updatedAt         DateTime @updatedAt @map("updated_at")
+
+  task            BookingTask @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  inviterProfile  Profile     @relation("CollaborationInvitationInviter", fields: [inviterProfileId], references: [id])
+  targetAssistant Profile     @relation("CollaborationInvitationTarget", fields: [targetAssistantId], references: [id])
+
+  @@unique([taskId, targetAssistantId])
+  @@index([targetAssistantId, status, requestedAt])
+  @@index([inviterProfileId, status, requestedAt])
+  @@index([taskId, status])
+  @@map("task_collaboration_invitations")
 }
 
 // ============================================

@@ -1397,6 +1397,15 @@ export async function syncTaskAggregateFromParticipants(taskId: string): Promise
   }
 
   if (nextStatus === TaskStatus.completed) {
+    const completedAt = task.completedAt ?? new Date();
+    await prisma.taskCollaborationInvitation.updateMany({
+      where: { taskId, status: "pending" },
+      data: {
+        status: "expired",
+        reason: "task_completed",
+        respondedAt: completedAt,
+      },
+    });
     await restoreInterruptedParentIfNeeded(taskId, task.assistantId);
   }
 
@@ -4011,6 +4020,14 @@ export async function completeTask(taskId: string): Promise<void> {
         },
       });
     }
+    await tx.taskCollaborationInvitation.updateMany({
+      where: { taskId, status: "pending" },
+      data: {
+        status: "expired",
+        reason: "task_completed",
+        respondedAt: now,
+      },
+    });
   });
 
   await syncTaskAggregateFromParticipants(taskId);

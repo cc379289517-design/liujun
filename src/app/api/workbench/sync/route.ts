@@ -407,6 +407,33 @@ function noticeChangedWhereForAssistant(
   };
 }
 
+function collaborationInvitationVisibleWhereForProfile(
+  profileId: string,
+): Prisma.TaskCollaborationInvitationWhereInput {
+  return {
+    status: "pending",
+    task: { status: { not: "completed" } },
+    OR: [
+      { inviterProfileId: profileId },
+      { targetAssistantId: profileId },
+    ],
+  };
+}
+
+function collaborationInvitationChangedWhereForProfile(
+  profileId: string,
+  since: Date | null,
+): Prisma.TaskCollaborationInvitationWhereInput | null {
+  if (!since) return null;
+  return {
+    updatedAt: { gte: since },
+    OR: [
+      { inviterProfileId: profileId },
+      { targetAssistantId: profileId },
+    ],
+  };
+}
+
 type AssistantProfileRow = Prisma.ProfileGetPayload<{
   select: typeof PUBLIC_PROFILE_SELECT;
 }>;
@@ -1253,7 +1280,10 @@ export async function GET(request: NextRequest) {
     const noticeChangedWhere = profileId && isAssistantRole(role)
       ? noticeChangedWhereForAssistant(profileId, since)
       : null;
-    const [profiles, areaTaskIds, rawAreaTasks, taskIds, rawTasks, noticeChanged] = await Promise.all([
+    const invitationChangedWhere = profileId
+      ? collaborationInvitationChangedWhereForProfile(profileId, since)
+      : null;
+    const [profiles, areaTaskIds, rawAreaTasks, taskIds, rawTasks, noticeChanged, invitationChanged] = await Promise.all([
       prisma.profile.findMany({
         where: {
           role: { in: ["assistant", "assistant_leader"] },
@@ -1295,6 +1325,12 @@ export async function GET(request: NextRequest) {
             select: { id: true },
           })
         : Promise.resolve(null),
+      invitationChangedWhere
+        ? prisma.taskCollaborationInvitation.findFirst({
+            where: invitationChangedWhere,
+            select: { id: true },
+          })
+        : Promise.resolve(null),
     ]);
     const transferEventsByTaskId = await loadTransferEventsByTaskId([
       ...rawAreaTasks.map((task) => task.id),
@@ -1318,6 +1354,46 @@ export async function GET(request: NextRequest) {
           },
           orderBy: { createdAt: "asc" },
           take: 5,
+        })
+      : undefined;
+    const shouldSendCollaborationInvitations = Boolean(profileId && (!since || invitationChanged != null));
+    const collaborationInvitations = shouldSendCollaborationInvitations && profileId
+      ? await prisma.taskCollaborationInvitation.findMany({
+          where: collaborationInvitationVisibleWhereForProfile(profileId),
+          select: {
+            id: true,
+            taskId: true,
+            inviterProfileId: true,
+            targetAssistantId: true,
+            status: true,
+            reason: true,
+            requestedAt: true,
+            respondedAt: true,
+            canceledAt: true,
+            updatedAt: true,
+            inviterProfile: { select: { id: true, name: true, role: true } },
+            targetAssistant: { select: { id: true, name: true } },
+            task: {
+              select: {
+                id: true,
+                roomNumber: true,
+                priority: true,
+                status: true,
+                category: {
+                  select: {
+                    id: true,
+                    name: true,
+                    minDuration: true,
+                    maxDuration: true,
+                    estDuration: true,
+                  },
+                },
+                photographer: { select: { id: true, name: true } },
+              },
+            },
+          },
+          orderBy: { requestedAt: "asc" },
+          take: 20,
         })
       : undefined;
     const areaTaskIdsTruncated = areaTaskIds.length > AREA_TASK_LIMIT;
@@ -1441,6 +1517,7 @@ export async function GET(request: NextRequest) {
         areaSummaryTruncated: areaSummaryResult?.truncated ?? false,
       },
       notices,
+      collaborationInvitations,
     });
   } catch (error) {
     console.error("[GET /api/workbench/sync]", error);
