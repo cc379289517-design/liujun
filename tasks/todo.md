@@ -7730,8 +7730,8 @@
 - [x] 补充连续跨两个自然日的定时器回归测试，确认页面长期打开时每天都能复位，而不是只触发一次。
 - [x] 将摄影师零点复位改为触发后继续安排下一次零点，并在身份切换或页面卸载时清理当前定时器。
 - [x] 重跑业务不变量、全部纯函数测试、TypeScript、Prisma validate、生产 build、脚本语法和 `git diff --check`。
-- [ ] 通过正式脚本提交并推送 `origin/后台管理`，保护 Mini 生产 SQLite，完成 schema 同步、远端构建、服务重启和健康检查。
-- [ ] 核对本地、GitHub、Mini HEAD，一并验证 `/api/config`、`/photographer`、`/admin` 和协作邀请数据表。
+- [x] 通过正式脚本提交并推送 `origin/后台管理`，保护 Mini 生产 SQLite，完成 schema 同步、远端构建、服务重启和健康检查。
+- [x] 核对本地、GitHub、Mini HEAD，一并验证 `/api/config`、`/photographer`、`/admin` 和协作邀请数据表。
 
 ##### 可选方案
 
@@ -7744,3 +7744,12 @@
 - 新增回归测试先按预期失败，原因为零点 `setTimeout` 触发后未重新注册；改为可取消的每日调度器后，连续两次午夜均会触发并安排下一次。
 - `npm run test:business-invariants` 通过（37/37）；`npx tsx --test scripts/tests/*.test.ts` 通过（40/40）；TypeScript、Prisma validate、Next.js 生产 build、发布/备份/启动脚本语法与 `git diff --check` 均通过。
 - 发布脚本已确认默认 `ALLOW_DB_COMMIT=0`、`PRESERVE_REMOTE_DB=1`；本地 `prisma/dev.db` 只作为开发运行数据，必须排除在提交外。
+
+##### 发布评审
+
+- 正式业务提交：`1785930ea696ecbb88cecc9343549773f6a332b6`，已推送 `origin/后台管理` 并部署到 Mini；提交文件列表确认不包含本地 `prisma/dev.db`。
+- Mini 拉取前已临时保护原生产 SQLite，恢复后完成 `prisma db push`；服务启动再次备份到 `database-backups/dev-20260723-144904.db.gz`。
+- Mini 已存在 `task_collaboration_invitations` 表，当前记录数为 0，符合新功能尚未产生生产邀请的状态。
+- 发布后 `/api/config`、`/photographer`、`/admin` 均返回 HTTP 200，`launchd` 的 `com.spad.local` 正常运行。
+- `launchd.err.log` 尾部的两条 Prisma Node ABI 错误来自 `2026-06-23` 历史日志；本次发布后日志无新增同类错误，实时健康检查正常。
+- `npm ci` 成功，但审计仍报告 18 个依赖漏洞（2 low、6 moderate、10 high）；本轮未执行可能引入破坏性升级的 `npm audit fix --force`，后续应单独评估依赖升级。
